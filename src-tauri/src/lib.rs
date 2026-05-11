@@ -35,13 +35,19 @@ fn generate_video(app: AppHandle, payload: GenerateVideoPayload) -> GenerateVide
         Err(message) => {
             return GenerateVideoResult {
                 ok: false,
-                command_preview: build_command_preview(&payload, None),
+                command_preview: build_command_preview(&payload, None, None),
                 message,
                 output_path: None,
             };
         }
     };
-    let command_preview = build_command_preview(&payload, Some(&script_path));
+    let input = payload
+        .input_paths
+        .first()
+        .cloned()
+        .unwrap_or_else(|| ".".to_string());
+    let (output_dir, output_file) = build_output_paths(&input, &payload);
+    let command_preview = build_command_preview(&payload, Some(&script_path), Some(&output_dir));
 
     let mut cmd = std::process::Command::new("python");
     cmd.arg(&script_path);
@@ -57,13 +63,8 @@ fn generate_video(app: AppHandle, payload: GenerateVideoPayload) -> GenerateVide
         cmd.creation_flags(0x08000000);
     }
 
-    let input = payload
-        .input_paths
-        .first()
-        .cloned()
-        .unwrap_or_else(|| ".".to_string());
-    
     cmd.arg("--input_folder").arg(&input);
+    cmd.arg("--output_dir").arg(&output_dir);
 
     if payload.recursive {
         cmd.arg("--recursive");
@@ -126,12 +127,22 @@ fn generate_video(app: AppHandle, payload: GenerateVideoPayload) -> GenerateVide
 
             let status = child.wait().unwrap_or_else(|e| panic!("Failed to wait on child: {}", e));
 
-            if status.success() {
+            if status.success() && output_file.is_file() {
                 GenerateVideoResult {
                     ok: true,
-                    message: "视频生成成功！请在输出目录查看。".to_string(),
+                    message: format!("视频生成成功：{}", output_file.display()),
                     command_preview,
-                    output_path: None,
+                    output_path: Some(output_file.display().to_string()),
+                }
+            } else if status.success() {
+                GenerateVideoResult {
+                    ok: false,
+                    message: format!(
+                        "脚本已结束，但没有找到总视频文件：{}",
+                        output_file.display()
+                    ),
+                    command_preview,
+                    output_path: Some(output_file.display().to_string()),
                 }
             } else {
                 GenerateVideoResult {
@@ -151,7 +162,11 @@ fn generate_video(app: AppHandle, payload: GenerateVideoPayload) -> GenerateVide
     }
 }
 
-fn build_command_preview(payload: &GenerateVideoPayload, script_path: Option<&Path>) -> String {
+fn build_command_preview(
+    payload: &GenerateVideoPayload,
+    script_path: Option<&Path>,
+    output_dir: Option<&Path>,
+) -> String {
     let input = payload
         .input_paths
         .first()
@@ -174,6 +189,13 @@ fn build_command_preview(payload: &GenerateVideoPayload, script_path: Option<&Pa
         "--input_folder".to_string(),
         quote(&input),
     ];
+
+    if let Some(output_dir) = output_dir {
+        args.extend([
+            "--output_dir".to_string(),
+            quote(&output_dir.display().to_string()),
+        ]);
+    }
 
     if payload.recursive {
         args.push("--recursive".to_string());
@@ -206,6 +228,30 @@ fn build_command_preview(payload: &GenerateVideoPayload, script_path: Option<&Pa
 
 fn quote(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\\\""))
+}
+
+fn build_output_paths(input: &str, payload: &GenerateVideoPayload) -> (PathBuf, PathBuf) {
+    let input_path = PathBuf::from(input);
+    let input_name = input_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("video_create");
+    let output_dir = input_path
+        .parent()
+        .map(|parent| parent.join(format!("{}_output", input_name)))
+        .unwrap_or_else(|| PathBuf::from("video_create_output"));
+    let output_name = if payload.output_name.is_empty() {
+        "bilibili_travel_video"
+    } else {
+        &payload.output_name
+    };
+    let output_file = output_dir.join(format!(
+        "{}_{}.mp4",
+        output_name,
+        payload.aspect_ratio.replace(':', "x")
+    ));
+
+    (output_dir, output_file)
 }
 
 fn find_generator_script(app: &AppHandle) -> Result<PathBuf, String> {
