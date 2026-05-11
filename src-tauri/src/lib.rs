@@ -287,6 +287,18 @@ fn build_output_paths(payload: &GenerateVideoPayload) -> (PathBuf, PathBuf) {
     (output_dir, output_file)
 }
 
+#[tauri::command]
+fn open_in_explorer(path: String) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        let _ = std::process::Command::new("explorer")
+            .arg(format!("/select,{}", path))
+            .creation_flags(0x08000000)
+            .spawn();
+    }
+}
+
 fn find_generator_script(app: &AppHandle) -> Result<PathBuf, String> {
     let file_name = "make_bilibili_video_v3.py";
     let mut candidates = Vec::new();
@@ -320,7 +332,7 @@ fn find_generator_script(app: &AppHandle) -> Result<PathBuf, String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![generate_video])
+        .invoke_handler(tauri::generate_handler![generate_video, open_in_explorer])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -1,6 +1,7 @@
 import {
   CheckCircle2,
   Clapperboard,
+  ExternalLink,
   FileVideo,
   FolderOpen,
   Gauge,
@@ -8,10 +9,11 @@ import {
   Play,
   Settings2,
   Sparkles,
+  TriangleAlert,
   X,
   Wand2,
 } from "lucide-react";
-import { useMemo, useState, useEffect } from "react";
+import { useMemo, useState, useEffect, useRef } from "react";
 import { create } from "zustand";
 import { open } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
@@ -23,6 +25,7 @@ import {
   RenderEngine,
   buildCommandPreview,
   generateVideo,
+  openInExplorer,
 } from "./lib/engine";
 
 interface StudioState {
@@ -68,12 +71,35 @@ export function App() {
   const [result, setResult] = useState<GenerateVideoResult | null>(null);
   const [isRendering, setIsRendering] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
+  const [progress, setProgress] = useState<number | null>(null);
+  const [phase, setPhase] = useState("就绪");
   const [toast, setToast] = useState<string | null>(null);
   const [highlightOutput, setHighlightOutput] = useState(false);
+  const logEndRef = useRef<HTMLDivElement>(null);
+  const [activeNav, setActiveNav] = useState("workspace");
+
+  function scrollToSection(id: string) {
+    setActiveNav(id);
+    document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
 
   useEffect(() => {
     const unlisten = listen<string>("video-progress", (event) => {
-      const formattedLine = formatProgressLine(event.payload);
+      const raw = event.payload;
+
+      const prog = parseProgress(raw);
+      if (prog) setProgress(Math.round((prog.current / prog.total) * 90));
+
+      const newPhase = detectPhase(raw);
+      if (newPhase) {
+        setPhase(newPhase);
+        if (newPhase === "合成视频") setProgress(92);
+        if (newPhase === "生成封面") setProgress(95);
+        if (newPhase === "生成报告") setProgress(98);
+        if (newPhase === "完成") setProgress(100);
+      }
+
+      const formattedLine = formatProgressLine(raw);
       if (!formattedLine) return;
 
       setLogs((prev) => {
@@ -87,6 +113,10 @@ export function App() {
       unlisten.then((f) => f());
     };
   }, []);
+
+  useEffect(() => {
+    logEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [logs]);
 
   const payload: GenerateVideoPayload = useMemo(
     () => ({
@@ -127,6 +157,8 @@ export function App() {
     setToast(null);
     setHighlightOutput(false);
     setLogs([]);
+    setProgress(null);
+    setPhase("就绪");
     const response = await generateVideo(payload);
     setResult(response);
     setIsRendering(false);
@@ -146,22 +178,22 @@ export function App() {
         </div>
 
         <nav className="nav-list" aria-label="主导航">
-          <a className="nav-item active" href="#workspace">
+          <button className={`nav-item${activeNav === "workspace" ? " active" : ""}`} onClick={() => scrollToSection("workspace")}>
             <ImagePlus size={18} />
             素材
-          </a>
-          <a className="nav-item" href="#settings">
+          </button>
+          <button className={`nav-item${activeNav === "settings" ? " active" : ""}`} onClick={() => scrollToSection("settings")}>
             <Settings2 size={18} />
             参数
-          </a>
-          <a className="nav-item" href="#engine">
+          </button>
+          <button className={`nav-item${activeNav === "engine" ? " active" : ""}`} onClick={() => scrollToSection("engine")}>
             <Gauge size={18} />
             引擎
-          </a>
-          <a className="nav-item" href="#ai">
+          </button>
+          <button className={`nav-item${activeNav === "ai" ? " active" : ""}`} onClick={() => scrollToSection("ai")}>
             <Sparkles size={18} />
             AI 蓝图
-          </a>
+          </button>
         </nav>
       </aside>
 
@@ -268,9 +300,13 @@ export function App() {
             <div className="command-box">{commandPreview}</div>
             
             {(isRendering || logs.length > 0) && (
-              <div className="log-viewer" style={{ marginTop: "1rem", padding: "1rem", background: "#0a0a0a", color: "#4ade80", borderRadius: "8px", fontSize: "0.85rem", maxHeight: "250px", overflowY: "auto", fontFamily: "monospace", display: "flex", flexDirection: "column", gap: "4px", boxShadow: "inset 0 2px 4px rgba(0,0,0,0.5)" }}>
-                {logs.length === 0 ? <div style={{opacity: 0.5}}>正在启动引擎...</div> : logs.map((log, i) => <div key={i}>{log}</div>)}
-              </div>
+              <>
+                {progress !== null && <ProgressBar percent={progress} phase={phase} />}
+                <div className="log-viewer">
+                  {logs.length === 0 ? <div className="log-placeholder">正在启动引擎...</div> : logs.map((log, i) => <div key={i}>{log}</div>)}
+                  <div ref={logEndRef} />
+                </div>
+              </>
             )}
 
             <div className="status-strip">
@@ -279,12 +315,7 @@ export function App() {
               <StatusItem label="渲染质量" value={qualityLabel(state.quality)} />
               <StatusItem label="封面" value={state.cover ? "开启" : "关闭"} />
             </div>
-            {result && (
-              <div className={result.ok ? "result success" : "result warning"}>
-                <CheckCircle2 size={18} />
-                <span>{result.message}</span>
-              </div>
-            )}
+            {result && <ResultCard result={result} />}
           </section>
 
           <section className="panel wide-panel ai-panel" id="ai">
@@ -319,16 +350,16 @@ function FolderSelector({ inputFolder, setInputFolder }: { inputFolder: string |
   return (
     <div className="folder-selector">
       {inputFolder ? (
-        <div className="selected-folder" style={{ display: "flex", alignItems: "center", gap: "1rem", padding: "1rem", background: "var(--bg-muted)", borderRadius: "8px" }}>
+        <div className="selected-folder">
           <FolderOpen size={24} />
-          <div className="folder-info" style={{ flex: 1, overflow: "hidden" }}>
-            <strong style={{ display: "block", marginBottom: "0.25rem" }}>已选择素材目录</strong>
-            <span className="folder-path" title={inputFolder} style={{ display: "block", fontSize: "0.875rem", opacity: 0.7, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{inputFolder}</span>
+          <div className="folder-info">
+            <strong>已选择素材目录</strong>
+            <span className="folder-path" title={inputFolder}>{inputFolder}</span>
           </div>
-          <button style={{ padding: "0.5rem 1rem", cursor: "pointer" }} onClick={handleSelect}>更改目录</button>
+          <button className="folder-change-btn" onClick={handleSelect}>更改目录</button>
         </div>
       ) : (
-        <div className="drop-zone" onClick={handleSelect} style={{ cursor: "pointer" }}>
+        <div className="drop-zone" onClick={handleSelect}>
           <ImagePlus size={30} />
           <strong>点击选择照片/视频所在的文件夹</strong>
           <span>脚本将自动扫描该目录下的素材</span>
@@ -383,6 +414,26 @@ function OutputFolderSelector({
   );
 }
 
+function ResultCard({ result }: { result: GenerateVideoResult }) {
+  return (
+    <div className={`result-card ${result.ok ? "success" : "warning"}`}>
+      <div className="result-card-header">
+        {result.ok ? <CheckCircle2 size={20} /> : <TriangleAlert size={20} />}
+        <strong>{result.ok ? "生成完成" : "生成失败"}</strong>
+      </div>
+      <p className="result-card-message">{result.message}</p>
+      {result.ok && result.outputPath && (
+        <div className="result-card-actions">
+          <button className="result-open-btn" onClick={() => openInExplorer(result.outputPath!)}>
+            <ExternalLink size={15} />
+            打开输出目录
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Toast({ message, onClose }: { message: string; onClose: () => void }) {
   return (
     <div className="toast warning" role="status">
@@ -431,6 +482,39 @@ function mediaKindLabel(kind: string): string {
     chapter: "章节卡",
     end: "片尾卡",
   }[kind] || "素材";
+}
+
+function parseProgress(line: string): { current: number; total: number } | null {
+  const match = line.match(/\[(\d+)\/(\d+)\]/);
+  if (!match) return null;
+  return { current: parseInt(match[1], 10), total: parseInt(match[2], 10) };
+}
+
+function detectPhase(line: string): string | null {
+  if (line.includes("素材预览")) return "扫描素材";
+  if (/\[\d+\/\d+\]\s*(生成片段|缓存命中)/.test(line)) return "生成片段";
+  if (line.includes("开始最终合成")) return "合成视频";
+  if (line.includes("视频生成完成")) return "完成";
+  if (line.includes("封面已生成")) return "生成封面";
+  if (line.includes("报告已生成")) return "生成报告";
+  return null;
+}
+
+function ProgressBar({ percent, phase }: { percent: number; phase: string }) {
+  return (
+    <div className="progress-container">
+      <div className="progress-header">
+        <span className="progress-phase">{phase}</span>
+        <span className="progress-percent">{Math.round(percent)}%</span>
+      </div>
+      <div className="progress-track">
+        <div
+          className={`progress-fill${percent >= 100 ? " complete" : ""}`}
+          style={{ width: `${percent}%` }}
+        />
+      </div>
+    </div>
+  );
 }
 
 function SectionTitle({ icon, title }: { icon: React.ReactNode; title: string }) {
@@ -500,13 +584,7 @@ function Feature({ title, text }: { title: string; text: string }) {
   );
 }
 
-function formatSize(size: number): string {
-  if (size < 1024 * 1024) {
-    return `${Math.max(1, Math.round(size / 1024))} KB`;
-  }
 
-  return `${(size / 1024 / 1024).toFixed(1)} MB`;
-}
 
 function qualityLabel(quality: Quality): string {
   return {

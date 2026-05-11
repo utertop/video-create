@@ -1,4 +1,5 @@
 :root {
+  --bg-muted: #f0f4f1;
   color: #17201a;
   background: #f6f7f4;
   font-family:
@@ -47,6 +48,12 @@ select {
   background: #fff;
   border: 1px solid #b8c7bc;
   border-radius: 8px;
+  transition: background 140ms ease, border-color 140ms ease;
+}
+
+.folder-input-row button:hover:not(:disabled) {
+  background: #f0f4f1;
+  border-color: #197a55;
 }
 
 .folder-input-row button:disabled,
@@ -170,8 +177,14 @@ select {
   min-height: 42px;
   padding: 0 12px;
   color: #d7e1da;
+  font-size: inherit;
+  text-align: left;
   text-decoration: none;
+  cursor: pointer;
+  background: transparent;
+  border: 0;
   border-radius: 8px;
+  transition: background 140ms ease, color 140ms ease;
 }
 
 .nav-item.active,
@@ -223,6 +236,16 @@ h1 {
   background: #197a55;
   border: 0;
   border-radius: 8px;
+  transition: background 160ms ease, box-shadow 160ms ease, transform 100ms ease;
+}
+
+.primary-action:hover:not(:disabled) {
+  background: #1a8c60;
+  box-shadow: 0 4px 14px rgb(25 122 85 / 22%);
+}
+
+.primary-action:active:not(:disabled) {
+  transform: scale(0.97);
 }
 
 .primary-action:disabled {
@@ -383,6 +406,12 @@ select:focus {
   background: transparent;
   border: 0;
   border-radius: 6px;
+  transition: background 140ms ease, color 140ms ease, box-shadow 140ms ease;
+}
+
+.segmented-control button:hover:not(.selected) {
+  background: rgb(255 255 255 / 50%);
+  color: #2f433a;
 }
 
 .segmented-control button.selected {
@@ -484,23 +513,65 @@ select:focus {
   font-size: 18px;
 }
 
-.result {
+.result-card {
+  margin-top: 14px;
+  padding: 16px 18px;
+  border-radius: 8px;
+  border-left: 4px solid transparent;
+}
+
+.result-card.success {
+  color: #165a3b;
+  background: #e7f6eb;
+  border-left-color: #197a55;
+}
+
+.result-card.warning {
+  color: #7a5119;
+  background: #fff5dc;
+  border-left-color: #d7922a;
+}
+
+.result-card-header {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.result-card-header strong {
+  font-size: 15px;
+}
+
+.result-card-message {
+  margin: 8px 0 0;
+  font-size: 13px;
+  line-height: 1.55;
+  word-break: break-all;
+}
+
+.result-card-actions {
   margin-top: 12px;
-  padding: 12px;
-  border-radius: 8px;
 }
 
-.result.success {
+.result-open-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 14px;
   color: #165a3b;
-  background: #e7f6eb;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  background: rgb(25 122 85 / 10%);
+  border: 1px solid rgb(25 122 85 / 20%);
+  border-radius: 6px;
+  transition: background 140ms ease, border-color 140ms ease;
 }
 
-.result.warning {
-  color: #7a5119;
-  background: #fff5dc;
+.result-open-btn:hover {
+  background: rgb(25 122 85 / 18%);
+  border-color: #197a55;
 }
 
 .feature-list {
@@ -535,6 +606,118 @@ select:focus {
   to {
     transform: rotate(360deg);
   }
+}
+
+/* ---- Progress Bar ---- */
+
+.progress-container {
+  margin-top: 1rem;
+}
+
+.progress-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.progress-phase {
+  color: #254237;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.progress-percent {
+  color: #587067;
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.progress-track {
+  height: 8px;
+  background: #e4ece6;
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  min-width: 4px;
+  background: linear-gradient(90deg, #197a55, #2cb67d);
+  border-radius: 999px;
+  transition: width 350ms ease;
+}
+
+.progress-fill.complete {
+  background: linear-gradient(90deg, #197a55, #2cb67d, #4ade80);
+}
+
+/* ---- Log Viewer ---- */
+
+.log-viewer {
+  margin-top: 10px;
+  padding: 14px;
+  background: #0c1a14;
+  color: #4ade80;
+  border-radius: 8px;
+  font-size: 0.82rem;
+  max-height: 220px;
+  overflow-y: auto;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  box-shadow: inset 0 2px 6px rgb(0 0 0 / 40%);
+}
+
+.log-placeholder {
+  opacity: 0.45;
+}
+
+/* ---- Selected Folder ---- */
+
+.selected-folder {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 1rem;
+  background: var(--bg-muted);
+  border-radius: 8px;
+}
+
+.folder-info {
+  flex: 1;
+  overflow: hidden;
+}
+
+.folder-info strong {
+  display: block;
+  margin-bottom: 0.25rem;
+}
+
+.folder-path {
+  display: block;
+  font-size: 0.875rem;
+  opacity: 0.65;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.folder-change-btn {
+  padding: 0.5rem 1rem;
+  color: #173529;
+  cursor: pointer;
+  background: #fff;
+  border: 1px solid #b8c7bc;
+  border-radius: 8px;
+  transition: background 140ms ease, border-color 140ms ease;
+}
+
+.folder-change-btn:hover {
+  background: #f0f4f1;
+  border-color: #197a55;
 }
 
 @media (max-width: 980px) {

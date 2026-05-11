@@ -39,6 +39,13 @@ export async function generateVideo(payload: GenerateVideoPayload): Promise<Gene
   }
 }
 
+export async function openInExplorer(path: string): Promise<void> {
+  try {
+    await invoke("open_in_explorer", { path });
+  } catch (error) {
+    console.error("Failed to open in explorer:", error);
+  }
+}
 export function buildCommandPreview(payload: GenerateVideoPayload): string {
   const input = payload.inputPaths[0] || "<素材文件夹>";
   const outputDir = payload.outputDir || "<输出目录>";
