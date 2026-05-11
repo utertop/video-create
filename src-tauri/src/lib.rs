@@ -1,4 +1,8 @@
 use serde::{Deserialize, Serialize};
+use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use tauri::{AppHandle, Emitter, Manager};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -25,11 +29,33 @@ struct GenerateVideoResult {
 }
 
 #[tauri::command]
-fn generate_video(payload: GenerateVideoPayload) -> GenerateVideoResult {
-    let command_preview = build_command_preview(&payload);
+fn generate_video(app: AppHandle, payload: GenerateVideoPayload) -> GenerateVideoResult {
+    let script_path = match find_generator_script(&app) {
+        Ok(path) => path,
+        Err(message) => {
+            return GenerateVideoResult {
+                ok: false,
+                command_preview: build_command_preview(&payload, None),
+                message,
+                output_path: None,
+            };
+        }
+    };
+    let command_preview = build_command_preview(&payload, Some(&script_path));
 
     let mut cmd = std::process::Command::new("python");
-    cmd.arg("make_bilibili_video_v3.py");
+    cmd.arg(&script_path);
+    if let Some(script_dir) = script_path.parent() {
+        cmd.current_dir(script_dir);
+    }
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000);
+    }
 
     let input = payload
         .input_paths
@@ -74,9 +100,33 @@ fn generate_video(payload: GenerateVideoPayload) -> GenerateVideoResult {
         cmd.arg("--output_name").arg(&payload.output_name);
     }
 
-    match cmd.output() {
-        Ok(output) => {
-            if output.status.success() {
+    match cmd.spawn() {
+        Ok(mut child) => {
+            let stdout = child.stdout.take().unwrap();
+            let app_clone = app.clone();
+            std::thread::spawn(move || {
+                let reader = BufReader::new(stdout);
+                for line in reader.lines() {
+                    if let Ok(l) = line {
+                        app_clone.emit("video-progress", l).ok();
+                    }
+                }
+            });
+
+            let stderr = child.stderr.take().unwrap();
+            let app_clone_err = app.clone();
+            std::thread::spawn(move || {
+                let reader = BufReader::new(stderr);
+                for line in reader.lines() {
+                    if let Ok(l) = line {
+                        app_clone_err.emit("video-progress", l).ok();
+                    }
+                }
+            });
+
+            let status = child.wait().unwrap_or_else(|e| panic!("Failed to wait on child: {}", e));
+
+            if status.success() {
                 GenerateVideoResult {
                     ok: true,
                     message: "视频生成成功！请在输出目录查看。".to_string(),
@@ -84,15 +134,9 @@ fn generate_video(payload: GenerateVideoPayload) -> GenerateVideoResult {
                     output_path: None,
                 }
             } else {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                // 截取最后一点日志防止过长
-                let err_msg = if stderr.is_empty() { &stdout } else { &stderr };
-                let short_err: String = err_msg.chars().rev().take(500).collect::<String>().chars().rev().collect();
-                
                 GenerateVideoResult {
                     ok: false,
-                    message: format!("执行失败:\n{}", short_err),
+                    message: format!("执行失败，退出状态: {}", status),
                     command_preview,
                     output_path: None,
                 }
@@ -107,7 +151,7 @@ fn generate_video(payload: GenerateVideoPayload) -> GenerateVideoResult {
     }
 }
 
-fn build_command_preview(payload: &GenerateVideoPayload) -> String {
+fn build_command_preview(payload: &GenerateVideoPayload, script_path: Option<&Path>) -> String {
     let input = payload
         .input_paths
         .first()
@@ -122,7 +166,11 @@ fn build_command_preview(payload: &GenerateVideoPayload) -> String {
 
     let mut args = vec![
         "python".to_string(),
-        "make_bilibili_video_v3.py".to_string(),
+        quote(
+            &script_path
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "make_bilibili_video_v3.py".to_string()),
+        ),
         "--input_folder".to_string(),
         quote(&input),
     ];
@@ -158,6 +206,36 @@ fn build_command_preview(payload: &GenerateVideoPayload) -> String {
 
 fn quote(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\\\""))
+}
+
+fn find_generator_script(app: &AppHandle) -> Result<PathBuf, String> {
+    let file_name = "make_bilibili_video_v3.py";
+    let mut candidates = Vec::new();
+
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidates.push(resource_dir.join(file_name));
+    }
+
+    if let Ok(current_dir) = std::env::current_dir() {
+        candidates.push(current_dir.join(file_name));
+        if let Some(parent) = current_dir.parent() {
+            candidates.push(parent.join(file_name));
+        }
+    }
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    candidates.push(manifest_dir.join("..").join(file_name));
+    candidates.push(manifest_dir.join(file_name));
+
+    candidates
+        .into_iter()
+        .find(|path| path.is_file())
+        .ok_or_else(|| {
+            format!(
+                "无法找到脚本 {}。请确认它在项目根目录，或已作为 Tauri resource 打包。",
+                file_name
+            )
+        })
 }
 
 pub fn run() {

@@ -10,9 +10,10 @@ import {
   Sparkles,
   Wand2,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
 import { create } from "zustand";
 import { open } from "@tauri-apps/plugin-dialog";
+import { listen } from "@tauri-apps/api/event";
 import {
   AspectRatio,
   GenerateVideoPayload,
@@ -57,6 +58,21 @@ export function App() {
   const state = useStudio();
   const [result, setResult] = useState<GenerateVideoResult | null>(null);
   const [isRendering, setIsRendering] = useState(false);
+  const [logs, setLogs] = useState<string[]>([]);
+
+  useEffect(() => {
+    const unlisten = listen<string>("video-progress", (event) => {
+      setLogs((prev) => {
+        const next = [...prev, event.payload];
+        if (next.length > 100) return next.slice(next.length - 100);
+        return next;
+      });
+    });
+
+    return () => {
+      unlisten.then((f) => f());
+    };
+  }, []);
 
   const payload: GenerateVideoPayload = useMemo(
     () => ({
@@ -79,6 +95,7 @@ export function App() {
   async function onGenerate() {
     setIsRendering(true);
     setResult(null);
+    setLogs([]);
     const response = await generateVideo(payload);
     setResult(response);
     setIsRendering(false);
@@ -199,6 +216,13 @@ export function App() {
           <section className="panel wide-panel" id="engine">
             <SectionTitle icon={<FileVideo size={18} />} title="任务预览" />
             <div className="command-box">{commandPreview}</div>
+            
+            {(isRendering || logs.length > 0) && (
+              <div className="log-viewer" style={{ marginTop: "1rem", padding: "1rem", background: "#0a0a0a", color: "#4ade80", borderRadius: "8px", fontSize: "0.85rem", maxHeight: "250px", overflowY: "auto", fontFamily: "monospace", display: "flex", flexDirection: "column", gap: "4px", boxShadow: "inset 0 2px 4px rgba(0,0,0,0.5)" }}>
+                {logs.length === 0 ? <div style={{opacity: 0.5}}>正在启动引擎...</div> : logs.map((log, i) => <div key={i}>{log}</div>)}
+              </div>
+            )}
+
             <div className="status-strip">
               <StatusItem label="输入目录" value={state.inputFolder ? state.inputFolder.split(/[/\\]/).pop() || "已选择" : "未选择"} />
               <StatusItem label="当前画幅" value={state.aspectRatio} />

@@ -27,6 +27,9 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": []
+    "icon": [],
+    "resources": {
+      "../make_bilibili_video_v3.py": "make_bilibili_video_v3.py"
+    }
   }
 }
