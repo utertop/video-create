@@ -9,7 +9,7 @@ python -m pip install moviepy==1.0.3 pillow numpy imageio-ffmpeg
 ## 推荐命令
 
 ```bash
-python make_bilibili_video_v3.py --input_folder "E:\Lumix\泉州-厦门" --recursive --chapters_from_dirs --title "福建-泉州-厦门" --end "To be continued!" --watermark "PangBo Travel" --cover --quality high --output_name "quanzhou_xiamen"
+python make_bilibili_video_v3.py --input_folder "E:\Lumix\泉州-厦门" --recursive --chapters_from_dirs --title "福建-泉州-厦门" --end "To be continued!" --watermark "utertop" --cover --quality high --output_name "quanzhou_xiamen"
 ```
 
 ## 先预检

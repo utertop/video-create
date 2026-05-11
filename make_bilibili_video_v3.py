@@ -16,7 +16,7 @@ V3 重点能力：
     6. 支持缓存：EXIF 修正图、模糊背景、视频首帧、标准化片段 mp4。
     7. 支持递归目录：--recursive，并可按子目录自动生成章节标题卡。
     8. 支持智能照片时长：按横竖图、全景、亮度、画面复杂度估算展示时间。
-    9. 支持水印 / 角标：--watermark "PangBo Travel"。
+    9. 支持水印 / 角标：--watermark "utertop"。
     10. 支持自动生成 B站封面图：--cover。
     11. 支持 build_report.txt 构建报告。
     12. 支持两种最终合成引擎：
@@ -28,7 +28,7 @@ V3 重点能力：
     python -m pip install moviepy==1.0.3 pillow numpy imageio-ffmpeg
 
 推荐运行：
-    python make_bilibili_video_v3.py --input_folder "E:\\Lumix\\泉州-厦门\\hh" --recursive --chapters_from_dirs --title "福建-泉州-厦门" --end "To be continued!" --watermark "PangBo Travel" --cover --quality high --output_name "quanzhou_xiamen"
+    python make_bilibili_video_v3.py --input_folder "E:\\Lumix\\泉州-厦门\\hh" --recursive --chapters_from_dirs --title "福建-泉州-厦门" --end "To be continued!" --watermark "utertop" --cover --quality high --output_name "quanzhou_xiamen"
 """
 
 import argparse
@@ -1116,7 +1116,7 @@ if __name__ == "__main__":
     parser.add_argument("--blur_radius", type=int, default=32, help="模糊背景强度")
     parser.add_argument("--bg_darken", type=float, default=0.30, help="模糊背景变暗比例，0~1")
 
-    parser.add_argument("--watermark", default=None, help="右下角水印文字，例如 PangBo Travel")
+    parser.add_argument("--watermark", default=None, help="右下角水印文字，例如 utertop")
     parser.add_argument("--mute", action="store_true", help="静音原视频声音；默认保留原声")
     parser.add_argument("--no_video_blur_bg", action="store_true", help="竖屏视频不使用模糊背景，改用黑底")
 

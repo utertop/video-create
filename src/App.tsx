@@ -77,7 +77,7 @@ const useStudio = create<StudioState>((set) => ({
   outputName: "travel_video",
   aspectRatio: "16:9",
   quality: "high",
-  watermark: "PangBo Travel",
+  watermark: "utertop",
   recursive: true,
   chaptersFromDirs: true,
   cover: true,
