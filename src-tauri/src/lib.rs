@@ -615,6 +615,196 @@ fn open_in_explorer(path: String) {
     }
 }
 
+// =========================
+// V5 引擎指令实现
+// =========================
+
+#[tauri::command]
+async fn scan_v5(app: AppHandle, input_folder: String) -> Result<String, String> {
+    let script_path = find_v5_engine_script(&app)?;
+    let output_path = PathBuf::from(&input_folder).join("media_library.json");
+
+    let mut cmd = std::process::Command::new("python");
+    cmd.arg(&script_path)
+        .arg("scan")
+        .arg("--input_folder")
+        .arg(&input_folder)
+        .arg("--output")
+        .arg(&output_path);
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000);
+    }
+
+    let output = cmd.output().map_err(|e| format!("启动 V5 引擎失败: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("扫描失败: {}", stderr));
+    }
+
+    // 读取生成的 JSON 并返回给前端
+    let content = std::fs::read_to_string(&output_path)
+        .map_err(|e| format!("无法读取扫描结果: {}", e))?;
+    
+    Ok(content)
+}
+
+#[tauri::command]
+async fn plan_v5(app: AppHandle, library_path: String) -> Result<String, String> {
+    let script_path = find_v5_engine_script(&app)?;
+    let lib_path = PathBuf::from(&library_path);
+    let output_path = lib_path.parent().unwrap().join("story_blueprint.json");
+
+    let mut cmd = std::process::Command::new("python");
+    cmd.arg(&script_path)
+        .arg("plan")
+        .arg("--library")
+        .arg(&library_path)
+        .arg("--output")
+        .arg(&output_path);
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000);
+    }
+
+    let output = cmd.output().map_err(|e| format!("启动 V5 引擎失败: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("生成蓝图失败: {}", stderr));
+    }
+
+    let content = std::fs::read_to_string(&output_path)
+        .map_err(|e| format!("无法读取蓝图文件: {}", e))?;
+    
+    Ok(content)
+}
+
+#[tauri::command]
+async fn save_blueprint_v5(path: String, content: String) -> Result<(), String> {
+    std::fs::write(&path, content)
+        .map_err(|e| format!("无法保存蓝图: {}", e))
+}
+
+#[tauri::command]
+async fn compile_v5(app: AppHandle, blueprint_path: String, library_path: String) -> Result<String, String> {
+    let script_path = find_v5_engine_script(&app)?;
+    let bp_path = PathBuf::from(&blueprint_path);
+    let output_path = bp_path.parent().unwrap().join("render_plan.json");
+
+    let mut cmd = std::process::Command::new("python");
+    cmd.arg(&script_path)
+        .arg("compile")
+        .arg("--blueprint")
+        .arg(&blueprint_path)
+        .arg("--library")
+        .arg(&library_path)
+        .arg("--output")
+        .arg(&output_path);
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000);
+    }
+
+    let output = cmd.output().map_err(|e| format!("启动 V5 引擎失败: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("编译计划失败: {}", stderr));
+    }
+
+    let content = std::fs::read_to_string(&output_path)
+        .map_err(|e| format!("无法读取渲染计划: {}", e))?;
+    
+    Ok(content)
+}
+
+#[tauri::command]
+async fn render_v5(app: AppHandle, plan_path: String, output_path: String, params_json: String) -> Result<(), String> {
+    let script_path = find_v5_engine_script(&app)?;
+
+    let mut cmd = std::process::Command::new("python");
+    cmd.arg(&script_path)
+        .arg("render")
+        .arg("--plan")
+        .arg(&plan_path)
+        .arg("--output")
+        .arg(&output_path)
+        .arg("--params")
+        .arg(&params_json)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000);
+    }
+
+    let mut child = cmd.spawn().map_err(|e| format!("无法启动渲染进程: {}", e))?;
+    
+    // 捕获 stdout
+    let stdout = child.stdout.take().unwrap();
+    let reader = std::io::BufReader::new(stdout);
+    
+    // 同时也捕获 stderr 以防万一
+    let stderr = child.stderr.take().unwrap();
+    let err_reader = std::io::BufReader::new(stderr);
+
+    // 在后台线程处理 stderr
+    let app_clone = app.clone();
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        for line in err_reader.lines() {
+            if let Ok(l) = line {
+                app_clone.emit("video-progress", format!("{{\"event\":\"log\",\"message\":\"ERROR: {}\"}}", l)).unwrap();
+            }
+        }
+    });
+
+    use std::io::BufRead;
+    for line in reader.lines() {
+        if let Ok(l) = line {
+            app.emit("video-progress", l).unwrap();
+        }
+    }
+
+    let status = child.wait().map_err(|e| format!("等待渲染进程失败: {}", e))?;
+    if !status.success() {
+        return Err("渲染执行过程中出现错误，请检查日志。".to_string());
+    }
+    
+    Ok(())
+}
+
+fn find_v5_engine_script(app: &AppHandle) -> Result<PathBuf, String> {
+    let file_name = "video_engine_v5.py";
+    let mut candidates = Vec::new();
+
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidates.push(resource_dir.join(file_name));
+    }
+
+    if let Ok(current_dir) = std::env::current_dir() {
+        candidates.push(current_dir.join(file_name));
+    }
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    candidates.push(manifest_dir.join("..").join(file_name));
+
+    candidates
+        .into_iter()
+        .find(|path| path.is_file())
+        .ok_or_else(|| format!("无法找到 V5 引擎脚本 {}。", file_name))
+}
+
 fn find_generator_script(app: &AppHandle) -> Result<PathBuf, String> {
     let file_name = "make_bilibili_video_v3.py";
     let mut candidates = Vec::new();
@@ -649,7 +839,16 @@ pub fn run() {
     tauri::Builder::default()
         .manage(JobManager::default())
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![generate_video, cancel_video, open_in_explorer])
+        .invoke_handler(tauri::generate_handler![
+            generate_video,
+            cancel_video,
+            open_in_explorer,
+            scan_v5,
+            plan_v5,
+            save_blueprint_v5,
+            compile_v5,
+            render_v5
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

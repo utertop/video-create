@@ -1,0 +1,118 @@
+{
+  "schema_version": "5.0.0",
+  "document_type": "story_blueprint",
+  "title": "My Travel Vlog",
+  "subtitle": "Travel Memories",
+  "sections": [
+    {
+      "section_id": "section_0001",
+      "section_type": "chapter",
+      "title": "test_assets",
+      "subtitle": null,
+      "enabled": true,
+      "source_node_id": "dir_000000",
+      "asset_refs": [],
+      "children": [
+        {
+          "section_id": "section_0002",
+          "section_type": "city",
+          "title": "厦门",
+          "subtitle": null,
+          "enabled": true,
+          "source_node_id": "dir_000001",
+          "asset_refs": [],
+          "children": [
+            {
+              "section_id": "section_0003",
+              "section_type": "scenic_spot",
+              "title": "鼓浪屿",
+              "subtitle": null,
+              "enabled": true,
+              "source_node_id": "dir_000002",
+              "asset_refs": [
+                {
+                  "asset_id": "asset_000001",
+                  "enabled": true,
+                  "role": "normal",
+                  "duration_policy": "auto",
+                  "custom_duration": null,
+                  "keep_audio": true
+                }
+              ],
+              "children": []
+            }
+          ]
+        },
+        {
+          "section_id": "section_0004",
+          "section_type": "city",
+          "title": "泉州",
+          "subtitle": null,
+          "enabled": true,
+          "source_node_id": "dir_000003",
+          "asset_refs": [],
+          "children": [
+            {
+              "section_id": "section_0005",
+              "section_type": "date",
+              "title": "Day1",
+              "subtitle": null,
+              "enabled": true,
+              "source_node_id": "dir_000004",
+              "asset_refs": [],
+              "children": [
+                {
+                  "section_id": "section_0006",
+                  "section_type": "scenic_spot",
+                  "title": "开元寺",
+                  "subtitle": null,
+                  "enabled": true,
+                  "source_node_id": "dir_000005",
+                  "asset_refs": [
+                    {
+                      "asset_id": "asset_000002",
+                      "enabled": true,
+                      "role": "normal",
+                      "duration_policy": "auto",
+                      "custom_duration": null,
+                      "keep_audio": true
+                    }
+                  ],
+                  "children": []
+                },
+                {
+                  "section_id": "section_0007",
+                  "section_type": "scenic_spot",
+                  "title": "西街",
+                  "subtitle": null,
+                  "enabled": true,
+                  "source_node_id": "dir_000006",
+                  "asset_refs": [
+                    {
+                      "asset_id": "asset_000003",
+                      "enabled": true,
+                      "role": "normal",
+                      "duration_policy": "auto",
+                      "custom_duration": null,
+                      "keep_audio": true
+                    },
+                    {
+                      "asset_id": "asset_000004",
+                      "enabled": true,
+                      "role": "normal",
+                      "duration_policy": "auto",
+                      "custom_duration": null,
+                      "keep_audio": true
+                    }
+                  ],
+                  "children": []
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "strategy": "city_date_spot"
+}

@@ -4,6 +4,112 @@ export type AspectRatio = "16:9" | "9:16";
 export type Quality = "draft" | "standard" | "high";
 export type RenderEngine = "auto" | "ffmpeg_concat" | "moviepy_crossfade";
 
+// =========================
+// V5 数据结构定义
+// =========================
+
+export interface V5MediaLibrary {
+  schema_version: string;
+  document_type: "media_library";
+  project: {
+    source_root: string;
+    scan_time: string;
+  };
+  directory_nodes: V5DirectoryNode[];
+  assets: V5Asset[];
+  summary: {
+    total_assets: number;
+    image_count: number;
+    video_count: number;
+  };
+}
+
+export interface V5DirectoryNode {
+  node_id: string;
+  name: string;
+  relative_path: string;
+  depth: number;
+  parent_id: string | null;
+  detected_type: "city" | "date" | "scenic_spot" | "chapter" | "unknown";
+  confidence: number;
+  reason: string;
+  display_title: string;
+  asset_count: number;
+  children: string[];
+}
+
+export interface V5Asset {
+  asset_id: string;
+  type: "image" | "video";
+  relative_path: string;
+  absolute_path: string;
+  file: {
+    name: string;
+    extension: string;
+    size_bytes: number;
+    modified_time: string;
+  };
+  media: {
+    width: number | null;
+    height: number | null;
+    orientation: "landscape" | "portrait" | "square" | null;
+    shooting_date: string | null;
+  };
+  classification: {
+    directory_node_id: string;
+    city: string | null;
+    scenic_spot: string | null;
+  };
+}
+
+export interface V5StoryBlueprint {
+  schema_version: string;
+  document_type: "story_blueprint";
+  title: string;
+  subtitle: string;
+  sections: V5StorySection[];
+  strategy: string;
+}
+
+export interface V5StorySection {
+  section_id: string;
+  section_type: string;
+  title: string;
+  subtitle: string | null;
+  enabled: boolean;
+  source_node_id: string | null;
+  asset_refs: V5AssetRef[];
+  children: V5StorySection[];
+}
+
+export interface V5AssetRef {
+  asset_id: string;
+  enabled: boolean;
+  role: "opening" | "normal" | "highlight";
+  duration_policy: "auto" | "custom";
+  custom_duration: number | null;
+  keep_audio: boolean;
+}
+
+export interface V5RenderPlan {
+  schema_version: string;
+  document_type: "render_plan";
+  output_path: string;
+  total_duration: number;
+  segments: V5RenderSegment[];
+}
+
+export interface V5RenderSegment {
+  segment_id: string;
+  type: "title" | "chapter" | "video" | "image" | "end";
+  source_path: string | null;
+  duration: number;
+  text: string | null;
+  subtitle: string | null;
+  start_time: number;
+  end_time: number;
+}
+
 export interface GenerateVideoPayload {
   jobId?: string;
   inputPaths: string[];
@@ -62,6 +168,52 @@ export async function openInExplorer(path: string): Promise<void> {
   } catch (error) {
     console.error("Failed to open in explorer:", error);
   }
+}
+
+// =========================
+// V5 引擎调用函数
+// =========================
+
+/**
+ * 扫描指定文件夹并返回素材事实库
+ */
+export async function scanV5(inputFolder: string): Promise<V5MediaLibrary> {
+  const jsonStr = await invoke<string>("scan_v5", { inputFolder });
+  return JSON.parse(jsonStr);
+}
+
+/**
+ * 基于素材库生成故事蓝图
+ */
+export async function planV5(libraryPath: string): Promise<V5StoryBlueprint> {
+  const jsonStr = await invoke<string>("plan_v5", { libraryPath });
+  return JSON.parse(jsonStr);
+}
+
+/**
+ * 保存编辑后的蓝图到磁盘
+ */
+export async function saveBlueprintV5(path: string, content: string): Promise<void> {
+  await invoke("save_blueprint_v5", { path, content });
+}
+
+/**
+ * 编译蓝图生成渲染计划
+ */
+export async function compileV5(blueprintPath: string, libraryPath: string): Promise<V5RenderPlan> {
+  const jsonStr = await invoke<string>("compile_v5", { blueprintPath, libraryPath });
+  return JSON.parse(jsonStr);
+}
+
+/**
+ * 执行最终渲染
+ */
+export async function renderV5(planPath: string, outputPath: string, params: any): Promise<void> {
+  await invoke("render_v5", { 
+    planPath, 
+    outputPath, 
+    paramsJson: JSON.stringify(params) 
+  });
 }
 export function buildCommandPreview(payload: GenerateVideoPayload): string {
   const input = payload.inputPaths[0] || "<素材文件夹>";
