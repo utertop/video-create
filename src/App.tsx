@@ -8,6 +8,7 @@ import {
   Play,
   Settings2,
   Sparkles,
+  X,
   Wand2,
 } from "lucide-react";
 import { useMemo, useState, useEffect } from "react";
@@ -26,7 +27,10 @@ import {
 
 interface StudioState {
   inputFolder: string | null;
+  outputFolder: string | null;
   title: string;
+  titleSubtitle: string;
+  endText: string;
   outputName: string;
   aspectRatio: AspectRatio;
   quality: Quality;
@@ -36,12 +40,16 @@ interface StudioState {
   cover: boolean;
   renderEngine: RenderEngine;
   setInputFolder: (folder: string | null) => void;
-  patch: (state: Partial<Omit<StudioState, "setInputFolder" | "patch">>) => void;
+  setOutputFolder: (folder: string | null) => void;
+  patch: (state: Partial<Omit<StudioState, "setInputFolder" | "setOutputFolder" | "patch">>) => void;
 }
 
 const useStudio = create<StudioState>((set) => ({
   inputFolder: null,
+  outputFolder: null,
   title: "福建旅行混剪",
+  titleSubtitle: "Travel Video",
+  endText: "To be continued!",
   outputName: "travel_video",
   aspectRatio: "16:9",
   quality: "high",
@@ -51,6 +59,7 @@ const useStudio = create<StudioState>((set) => ({
   cover: true,
   renderEngine: "auto",
   setInputFolder: (folder) => set({ inputFolder: folder }),
+  setOutputFolder: (folder) => set({ outputFolder: folder }),
   patch: (state) => set(state),
 }));
 
@@ -59,11 +68,16 @@ export function App() {
   const [result, setResult] = useState<GenerateVideoResult | null>(null);
   const [isRendering, setIsRendering] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
+  const [toast, setToast] = useState<string | null>(null);
+  const [highlightOutput, setHighlightOutput] = useState(false);
 
   useEffect(() => {
     const unlisten = listen<string>("video-progress", (event) => {
+      const formattedLine = formatProgressLine(event.payload);
+      if (!formattedLine) return;
+
       setLogs((prev) => {
-        const next = [...prev, event.payload];
+        const next = [...prev, formattedLine];
         if (next.length > 100) return next.slice(next.length - 100);
         return next;
       });
@@ -77,7 +91,10 @@ export function App() {
   const payload: GenerateVideoPayload = useMemo(
     () => ({
       inputPaths: state.inputFolder ? [state.inputFolder] : [],
+      outputDir: state.outputFolder || "",
       title: state.title,
+      titleSubtitle: state.titleSubtitle,
+      endText: state.endText,
       outputName: state.outputName,
       aspectRatio: state.aspectRatio,
       quality: state.quality,
@@ -93,8 +110,22 @@ export function App() {
   const commandPreview = useMemo(() => buildCommandPreview(payload), [payload]);
 
   async function onGenerate() {
+    if (!state.inputFolder || !state.outputFolder) {
+      const warning = !state.inputFolder ? "请先选择素材目录。" : "请先选择输出目录。";
+      setResult({
+        ok: false,
+        message: warning,
+        commandPreview,
+      });
+      setToast(warning);
+      setHighlightOutput(Boolean(state.inputFolder && !state.outputFolder));
+      return;
+    }
+
     setIsRendering(true);
     setResult(null);
+    setToast(null);
+    setHighlightOutput(false);
     setLogs([]);
     const response = await generateVideo(payload);
     setResult(response);
@@ -135,10 +166,11 @@ export function App() {
       </aside>
 
       <section className="workspace" id="workspace">
+        {toast && <Toast message={toast} onClose={() => setToast(null)} />}
         <header className="topbar">
           <div>
             <p className="eyebrow">GUI MVP</p>
-            <h1>把 V3 脚本装进一个真正好用的桌面工作台</h1>
+            <h1>Turn Moments into Motion.</h1>
           </div>
           <button className="primary-action" disabled={isRendering || !state.inputFolder} onClick={onGenerate}>
             {isRendering ? <Wand2 className="spin" size={18} /> : <Play size={18} />}
@@ -156,13 +188,31 @@ export function App() {
             <SectionTitle icon={<Settings2 size={18} />} title="生成参数" />
             <div className="form-grid">
               <label>
-                视频标题
+                片头主标题
                 <input value={state.title} onChange={(event) => state.patch({ title: event.target.value })} />
+              </label>
+              <label>
+                片头副标题
+                <input value={state.titleSubtitle} onChange={(event) => state.patch({ titleSubtitle: event.target.value })} />
+              </label>
+              <label>
+                片尾文字
+                <input value={state.endText} onChange={(event) => state.patch({ endText: event.target.value })} />
               </label>
               <label>
                 输出文件名
                 <input value={state.outputName} onChange={(event) => state.patch({ outputName: event.target.value })} />
               </label>
+              <OutputFolderSelector
+                disabled={!state.inputFolder}
+                invalid={highlightOutput && !state.outputFolder}
+                outputFolder={state.outputFolder}
+                setOutputFolder={(folder) => {
+                  state.setOutputFolder(folder);
+                  setHighlightOutput(false);
+                  setToast(null);
+                }}
+              />
               <label>
                 水印
                 <input value={state.watermark} onChange={(event) => state.patch({ watermark: event.target.value })} />
@@ -286,6 +336,101 @@ function FolderSelector({ inputFolder, setInputFolder }: { inputFolder: string |
       )}
     </div>
   );
+}
+
+function OutputFolderSelector({
+  disabled,
+  invalid,
+  outputFolder,
+  setOutputFolder,
+}: {
+  disabled: boolean;
+  invalid: boolean;
+  outputFolder: string | null;
+  setOutputFolder: (folder: string | null) => void;
+}) {
+  async function handleSelect() {
+    if (disabled) return;
+
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: false,
+      });
+      if (selected && typeof selected === "string") {
+        setOutputFolder(selected);
+      }
+    } catch (error) {
+      console.error("Failed to select output folder:", error);
+    }
+  }
+
+  return (
+    <label className={invalid ? "folder-field invalid" : "folder-field"}>
+      输出目录
+      <div className="folder-input-row">
+        <input
+          readOnly
+          disabled={disabled}
+          title={outputFolder || ""}
+          value={outputFolder || (disabled ? "请先选择素材目录" : "请选择输出目录")}
+        />
+        <button disabled={disabled} type="button" onClick={handleSelect}>
+          选择目录
+        </button>
+      </div>
+    </label>
+  );
+}
+
+function Toast({ message, onClose }: { message: string; onClose: () => void }) {
+  return (
+    <div className="toast warning" role="status">
+      <div>
+        <strong>缺少生成参数</strong>
+        <span>{message}</span>
+      </div>
+      <button aria-label="关闭提示" type="button" onClick={onClose}>
+        <X size={16} />
+      </button>
+    </div>
+  );
+}
+
+function formatProgressLine(line: string): string | null {
+  const trimmed = line.trim();
+  if (!trimmed || /^=+$/.test(trimmed)) return null;
+
+  const previewItem = trimmed.match(/^-\s+\[(title|chapter|end|video|image)\]\s+(.+?)\s+\|\s+(.+)$/);
+  if (previewItem) {
+    const [, kind, relPath, displayName] = previewItem;
+    return formatMediaItem(kind, relPath, displayName);
+  }
+
+  const segmentItem = trimmed.match(/^\[\d+\/\d+\].*?:\s+(title|chapter|end|video|image)\s+\|\s+(.+)$/);
+  if (segmentItem) {
+    const [, kind, displayName] = segmentItem;
+    return `生成片段：${mediaKindLabel(kind)} - ${displayName}`;
+  }
+
+  return trimmed;
+}
+
+function formatMediaItem(kind: string, relPath: string, displayName: string): string {
+  if (kind === "title") return `片头标题卡：${displayName}`;
+  if (kind === "chapter") return `章节卡：${displayName}`;
+  if (kind === "end") return `片尾卡：${displayName}`;
+  return `${mediaKindLabel(kind)}：${displayName || relPath}`;
+}
+
+function mediaKindLabel(kind: string): string {
+  return {
+    image: "图片素材",
+    video: "视频素材",
+    title: "片头标题卡",
+    chapter: "章节卡",
+    end: "片尾卡",
+  }[kind] || "素材";
 }
 
 function SectionTitle({ icon, title }: { icon: React.ReactNode; title: string }) {

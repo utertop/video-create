@@ -23,6 +23,99 @@ select {
   font: inherit;
 }
 
+.folder-field {
+  min-width: 0;
+}
+
+.folder-input-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.folder-input-row input {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.folder-input-row button {
+  min-width: 92px;
+  height: 40px;
+  padding: 0 12px;
+  color: #173529;
+  cursor: pointer;
+  background: #fff;
+  border: 1px solid #b8c7bc;
+  border-radius: 8px;
+}
+
+.folder-input-row button:disabled,
+.folder-input-row input:disabled {
+  color: #84928a;
+  cursor: not-allowed;
+  background: #f1f3f0;
+}
+
+.folder-field.invalid .folder-input-row input {
+  border-color: #d7922a;
+  box-shadow: 0 0 0 3px rgb(215 146 42 / 18%);
+}
+
+.folder-field.invalid .folder-input-row button {
+  border-color: #d7922a;
+}
+
+.toast {
+  position: fixed;
+  top: 54px;
+  right: 28px;
+  z-index: 20;
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  width: min(360px, calc(100vw - 48px));
+  padding: 14px 14px 14px 16px;
+  background: #fffdf8;
+  border: 1px solid #ecd6a6;
+  border-left: 4px solid #d7922a;
+  border-radius: 8px;
+  box-shadow: 0 18px 42px rgb(29 48 41 / 18%);
+}
+
+.toast strong,
+.toast span {
+  display: block;
+}
+
+.toast strong {
+  color: #5e3b08;
+  font-size: 14px;
+}
+
+.toast span {
+  margin-top: 4px;
+  color: #6e5830;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.toast button {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  place-items: center;
+  color: #6e5830;
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+}
+
+.toast button:hover {
+  background: #f5ead3;
+}
+
 .app-shell {
   display: grid;
   grid-template-columns: 260px minmax(0, 1fr);

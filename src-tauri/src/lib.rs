@@ -8,7 +8,10 @@ use tauri::{AppHandle, Emitter, Manager};
 #[serde(rename_all = "camelCase")]
 struct GenerateVideoPayload {
     input_paths: Vec<String>,
+    output_dir: String,
     title: String,
+    title_subtitle: String,
+    end_text: String,
     output_name: String,
     aspect_ratio: String,
     quality: String,
@@ -29,7 +32,19 @@ struct GenerateVideoResult {
 }
 
 #[tauri::command]
-fn generate_video(app: AppHandle, payload: GenerateVideoPayload) -> GenerateVideoResult {
+async fn generate_video(app: AppHandle, payload: GenerateVideoPayload) -> GenerateVideoResult {
+    match tauri::async_runtime::spawn_blocking(move || generate_video_blocking(app, payload)).await {
+        Ok(result) => result,
+        Err(e) => GenerateVideoResult {
+            ok: false,
+            message: format!("后台生成任务异常结束: {}", e),
+            command_preview: String::new(),
+            output_path: None,
+        },
+    }
+}
+
+fn generate_video_blocking(app: AppHandle, payload: GenerateVideoPayload) -> GenerateVideoResult {
     let script_path = match find_generator_script(&app) {
         Ok(path) => path,
         Err(message) => {
@@ -46,7 +61,16 @@ fn generate_video(app: AppHandle, payload: GenerateVideoPayload) -> GenerateVide
         .first()
         .cloned()
         .unwrap_or_else(|| ".".to_string());
-    let (output_dir, output_file) = build_output_paths(&input, &payload);
+    if payload.output_dir.is_empty() {
+        return GenerateVideoResult {
+            ok: false,
+            command_preview: build_command_preview(&payload, Some(&script_path), None),
+            message: "请选择输出目录。".to_string(),
+            output_path: None,
+        };
+    }
+
+    let (output_dir, output_file) = build_output_paths(&payload);
     let command_preview = build_command_preview(&payload, Some(&script_path), Some(&output_dir));
 
     let mut cmd = std::process::Command::new("python");
@@ -76,6 +100,14 @@ fn generate_video(app: AppHandle, payload: GenerateVideoPayload) -> GenerateVide
 
     if !payload.title.is_empty() {
         cmd.arg("--title").arg(&payload.title);
+    }
+
+    if !payload.title_subtitle.is_empty() {
+        cmd.arg("--title_subtitle").arg(&payload.title_subtitle);
+    }
+
+    if !payload.end_text.is_empty() {
+        cmd.arg("--end").arg(&payload.end_text);
     }
 
     if !payload.watermark.is_empty() {
@@ -208,6 +240,15 @@ fn build_command_preview(
     args.extend([
         "--title".to_string(),
         quote(&payload.title),
+        "--title_subtitle".to_string(),
+        quote(&payload.title_subtitle),
+    ]);
+
+    if !payload.end_text.is_empty() {
+        args.extend(["--end".to_string(), quote(&payload.end_text)]);
+    }
+
+    args.extend([
         "--watermark".to_string(),
         quote(&payload.watermark),
         "--quality".to_string(),
@@ -230,16 +271,8 @@ fn quote(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\\\""))
 }
 
-fn build_output_paths(input: &str, payload: &GenerateVideoPayload) -> (PathBuf, PathBuf) {
-    let input_path = PathBuf::from(input);
-    let input_name = input_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("video_create");
-    let output_dir = input_path
-        .parent()
-        .map(|parent| parent.join(format!("{}_output", input_name)))
-        .unwrap_or_else(|| PathBuf::from("video_create_output"));
+fn build_output_paths(payload: &GenerateVideoPayload) -> (PathBuf, PathBuf) {
+    let output_dir = PathBuf::from(&payload.output_dir);
     let output_name = if payload.output_name.is_empty() {
         "bilibili_travel_video"
     } else {

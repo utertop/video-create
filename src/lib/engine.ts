@@ -6,7 +6,10 @@ export type RenderEngine = "auto" | "ffmpeg_concat" | "moviepy_crossfade";
 
 export interface GenerateVideoPayload {
   inputPaths: string[];
+  outputDir: string;
   title: string;
+  titleSubtitle: string;
+  endText: string;
   outputName: string;
   aspectRatio: AspectRatio;
   quality: Quality;
@@ -38,18 +41,22 @@ export async function generateVideo(payload: GenerateVideoPayload): Promise<Gene
 
 export function buildCommandPreview(payload: GenerateVideoPayload): string {
   const input = payload.inputPaths[0] || "<素材文件夹>";
-  const outputDir = payload.inputPaths[0] ? buildOutputDir(payload.inputPaths[0]) : undefined;
+  const outputDir = payload.outputDir || "<输出目录>";
   const args = [
     "python",
     "make_bilibili_video_v3.py",
     "--input_folder",
     quote(input),
-    outputDir ? "--output_dir" : "",
-    outputDir ? quote(outputDir) : "",
+    "--output_dir",
+    quote(outputDir),
     payload.recursive ? "--recursive" : "",
     payload.chaptersFromDirs ? "--chapters_from_dirs" : "",
     "--title",
     quote(payload.title || "未命名旅行视频"),
+    "--title_subtitle",
+    quote(payload.titleSubtitle || "Travel Video"),
+    payload.endText ? "--end" : "",
+    payload.endText ? quote(payload.endText) : "",
     "--watermark",
     quote(payload.watermark),
     "--quality",
@@ -76,15 +83,4 @@ function toPythonQuality(quality: Quality): string {
 
 function quote(value: string): string {
   return `"${value.split('"').join('\\"')}"`;
-}
-
-function buildOutputDir(input: string): string {
-  const normalized = input.replace(/[/\\]+$/, "");
-  const separatorIndex = Math.max(normalized.lastIndexOf("\\"), normalized.lastIndexOf("/"));
-  if (separatorIndex < 0) return "video_create_output";
-
-  const parent = normalized.slice(0, separatorIndex);
-  const folderName = normalized.slice(separatorIndex + 1) || "video_create";
-  const separator = normalized.includes("\\") ? "\\" : "/";
-  return `${parent}${separator}${folderName}_output`;
 }

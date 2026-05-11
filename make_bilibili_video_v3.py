@@ -379,6 +379,7 @@ def create_text_card(
     out_path: str,
     subtitle: Optional[str] = None,
     kind: str = "title",
+    background_path: Optional[str] = None,
 ):
     w, h = resolution
     img = Image.new("RGB", (w, h), color=(9, 11, 18))
@@ -426,6 +427,111 @@ def create_text_card(
         y += th + gap
 
     img.save(out_path, quality=95)
+
+
+def split_text_lines(text: str, max_chars: int) -> List[str]:
+    lines, cur = [], ""
+    for ch in text:
+        cur += ch
+        if len(cur) >= max_chars:
+            lines.append(cur)
+            cur = ""
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+def create_card_background(image_path: str, resolution: Tuple[int, int]) -> Image.Image:
+    target_w, target_h = resolution
+    img = Image.open(image_path).convert("RGB")
+    src_w, src_h = img.size
+    scale = max(target_w / src_w, target_h / src_h)
+    bg_w = max(1, int(src_w * scale))
+    bg_h = max(1, int(src_h * scale))
+    bg = img.resize((bg_w, bg_h), Image.LANCZOS)
+    left = max(0, (bg_w - target_w) // 2)
+    top = max(0, (bg_h - target_h) // 2)
+    bg = bg.crop((left, top, left + target_w, top + target_h))
+    bg = bg.filter(ImageFilter.GaussianBlur(radius=34))
+    bg = Image.blend(bg, Image.new("RGB", bg.size, (0, 0, 0)), 0.48)
+    overlay = Image.new("RGBA", bg.size, (0, 0, 0, 0))
+    odraw = ImageDraw.Draw(overlay)
+    odraw.rectangle((0, int(target_h * 0.30), target_w, int(target_h * 0.70)), fill=(0, 0, 0, 78))
+    return Image.alpha_composite(bg.convert("RGBA"), overlay).convert("RGB")
+
+
+def create_structure_text_card(
+    text: str,
+    resolution: Tuple[int, int],
+    out_path: str,
+    subtitle: Optional[str] = None,
+    kind: str = "title",
+    background_path: Optional[str] = None,
+):
+    if not background_path or not os.path.exists(background_path):
+        create_text_card(text, resolution, out_path, subtitle=subtitle, kind=kind)
+        return
+
+    w, h = resolution
+    img = create_card_background(background_path, resolution)
+    draw = ImageDraw.Draw(img)
+    font_path = get_font_path()
+    title_size = int(h * (0.078 if kind != "chapter" else 0.065))
+    sub_size = int(h * 0.035)
+    title_font = ImageFont.truetype(font_path, title_size) if font_path else ImageFont.load_default()
+    sub_font = ImageFont.truetype(font_path, sub_size) if font_path else ImageFont.load_default()
+
+    elements = []
+    for line in split_text_lines(text, 24 if w > h else 14):
+        bbox = draw.textbbox((0, 0), line, font=title_font)
+        elements.append((line, title_font, bbox[2] - bbox[0], bbox[3] - bbox[1]))
+    if subtitle:
+        bbox = draw.textbbox((0, 0), subtitle, font=sub_font)
+        elements.append((subtitle, sub_font, bbox[2] - bbox[0], bbox[3] - bbox[1]))
+
+    gap = int(h * 0.035)
+    total_h = sum(e[3] for e in elements) + gap * max(0, len(elements) - 1)
+    y = (h - total_h) // 2
+    for line, font, tw, th in elements:
+        x = (w - tw) // 2
+        draw.text((x + 4, y + 4), line, font=font, fill=(0, 0, 0))
+        draw.text((x, y), line, font=font, fill=(255, 255, 255))
+        y += th + gap
+
+    img.save(out_path, quality=95)
+
+
+def extract_video_frame_cached(item: MediaItem, position: str, cache_dir: str) -> Optional[str]:
+    if not item.path:
+        return None
+
+    frame_dir = os.path.join(cache_dir, "card_frames")
+    ensure_dir(frame_dir)
+    key = stable_hash({"type": "card_frame", "position": position, **file_signature(item.path)})
+    out = os.path.join(frame_dir, f"{safe_filename(Path(item.path).stem)}_{position}_{key}.jpg")
+    if os.path.exists(out):
+        return out
+
+    clip = VideoFileClip(item.path)
+    try:
+        t = 0 if position == "first" else max(0, float(clip.duration or 0) - 0.08)
+        clip.save_frame(out, t=t)
+        return out
+    finally:
+        clip.close()
+
+
+def get_structure_card_background(media_items: List[MediaItem], position: str, cache_dir: str) -> Optional[str]:
+    source_items = media_items if position == "first" else list(reversed(media_items))
+    for item in source_items:
+        if item.kind == "image" and item.path:
+            return fix_image_orientation_cached(item.path, cache_dir)
+        if item.kind == "video" and item.path:
+            try:
+                return extract_video_frame_cached(item, position, cache_dir)
+            except Exception:
+                continue
+    return None
 
 
 # =========================
@@ -599,17 +705,20 @@ def create_card_segment(item: MediaItem, output_path: str, options: Dict[str, ob
         duration = options["title_duration"]
         subtitle = options.get("title_subtitle") or "Travel Video"
         kind = "title"
+        background_path = options.get("title_card_background")
     elif item.kind == "chapter":
         duration = options["chapter_duration"]
         subtitle = "Chapter"
         kind = "chapter"
+        background_path = None
     else:
         duration = options["end_duration"]
         subtitle = None
         kind = "end"
+        background_path = options.get("end_card_background")
 
     img_path = os.path.join(temp_dir, f"_{item.kind}_{make_cache_key(item, options)}.jpg")
-    create_text_card(item.display_name, resolution, img_path, subtitle=subtitle, kind=kind)
+    create_structure_text_card(item.display_name, resolution, img_path, subtitle=subtitle, kind=kind, background_path=background_path)
     clip = ImageClip(img_path).set_duration(float(duration))
     clip = apply_watermark(clip, watermark_path, resolution)
     clip = clip.set_audio(make_silent_audio(float(duration)))
@@ -648,6 +757,8 @@ def build_segments(items: List[MediaItem], options: Dict[str, object], temp_dir:
             "watermark": options.get("watermark"),
             "bg_darken": options["bg_darken"],
             "blur_radius": options["blur_radius"],
+            "title_card_background": options.get("title_card_background"),
+            "end_card_background": options.get("end_card_background"),
         })
         seg_path = os.path.join(seg_dir, f"{idx:05d}_{safe_filename(item.display_name)}_{key}.mp4")
         item.cached_segment = seg_path
@@ -860,6 +971,9 @@ def run(args):
         "rebuild_cache": args.rebuild_cache,
         "final_engine": None,
     }
+
+    options["title_card_background"] = get_structure_card_background(raw_media, "first", cache_dir)
+    options["end_card_background"] = get_structure_card_background(raw_media, "last", cache_dir)
 
     temp_dir = tempfile.mkdtemp(prefix="bilibili_video_v3_")
     try:
