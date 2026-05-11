@@ -94,7 +94,7 @@ interface StudioState {
   cover: boolean;
   renderEngine: RenderEngine;
   isDryRun: boolean;
-  
+
   // V5 State
   v5Stage: "INPUT" | "BLUEPRINT" | "RENDER";
   v5Library: any | null;
@@ -117,8 +117,8 @@ function ProgressBar({ percent, phase, isDryRun }: { percent: number; phase: str
         <span className="percent-number">{percent}%</span>
       </div>
       <div className="progress-track">
-        <div 
-          className="progress-fill" 
+        <div
+          className="progress-fill"
           style={{ width: `${percent}%` }}
         >
           <div className="progress-glow" />
@@ -143,7 +143,7 @@ const useStudio = create<StudioState>((set) => ({
   cover: true,
   renderEngine: "auto",
   isDryRun: false,
-  
+
   v5Stage: "INPUT",
   v5Library: null,
   v5Blueprint: null,
@@ -290,7 +290,7 @@ export function App() {
         const outputName = state.outputName || "v5_travel_vlog";
         const finalOutputName = outputName.endsWith('.mp4') ? outputName : `${outputName}.mp4`;
         const outputPath = `${state.outputFolder}/${finalOutputName}`;
-        
+
         const params = {
           title: state.title,
           title_subtitle: state.titleSubtitle,
@@ -300,20 +300,20 @@ export function App() {
         };
 
         await renderV5(planPath, outputPath, params);
-        
-        setResult({ 
-          ok: true, 
-          message: `V5 视频渲染成功！\保存至: ${outputPath}`, 
-          commandPreview: "V5 Engine Internal" 
+
+        setResult({
+          ok: true,
+          message: `V5 视频渲染成功！\n保存至: ${outputPath}`,
+          commandPreview: "V5 Engine Internal"
         });
         setProgress(100);
         setPhase("渲染完成");
       } catch (err: any) {
         console.error("V5 Render Error:", err);
-        setResult({ 
-          ok: false, 
-          message: `V5 渲染失败: ${err}`, 
-          commandPreview: "V5 Engine Internal" 
+        setResult({
+          ok: false,
+          message: `V5 渲染失败: ${err}`,
+          commandPreview: "V5 Engine Internal"
         });
       } finally {
         setIsRendering(false);
@@ -334,13 +334,13 @@ export function App() {
     state.patch({ isDryRun: dryRun });
     const response = await generateVideo({ ...payload, jobId, dryRun });
     if (activeJobRef.current !== jobId) return;
-    
+
     if (response.ok && dryRun) {
       setProgress(100);
       setPhase("预检完成");
       setHasPreChecked(true);
     }
-    
+
     setResult(response);
     setIsRendering(false);
     setIsCancelling(false);
@@ -349,20 +349,20 @@ export function App() {
 
   async function onStartV5Workflow() {
     if (!state.inputFolder) return;
-    
+
     setPhase("智能扫描中...");
     setProgress(10);
     try {
       const library = await scanV5(state.inputFolder);
       state.patch({ v5Library: library });
-      
+
       setPhase("规划故事蓝图中...");
       setProgress(40);
-      
+
       const libPath = `${state.inputFolder}/media_library.json`;
       const blueprint = await planV5(libPath);
       state.patch({ v5Blueprint: blueprint, v5Stage: "BLUEPRINT" });
-      
+
       setPhase("蓝图就绪");
       setProgress(100);
       setToast("故事蓝图已生成，请开始编排您的旅行故事！");
@@ -375,21 +375,21 @@ export function App() {
   async function onConfirmBlueprint() {
     if (!state.inputFolder || !state.v5Blueprint) return;
     setToast(null);
-    
+
     setPhase("正在保存蓝图...");
     setProgress(20);
     try {
       const bpPath = `${state.inputFolder}/story_blueprint.json`;
       const libPath = `${state.inputFolder}/media_library.json`;
-      
+
       // 1. 保存
       await saveBlueprintV5(bpPath, JSON.stringify(state.v5Blueprint, null, 2));
-      
+
       // 2. 编译
       setPhase("正在编译渲染计划...");
       setProgress(60);
       const plan = await compileV5(bpPath, libPath);
-      
+
       // 3. 进入渲染阶段
       state.patch({ v5RenderPlan: plan, v5Stage: "RENDER" });
       setPhase("渲染计划就绪");
@@ -417,179 +417,179 @@ export function App() {
   return (
     <>
       <main className="app-shell">
-      <aside className="sidebar">
-        <div className="brand">
-          <div className="brand-mark">
-            <Clapperboard size={22} />
+        <aside className="sidebar">
+          <div className="brand">
+            <div className="brand-mark">
+              <Clapperboard size={22} />
+            </div>
+            <div>
+              <strong>Video Create Studio</strong>
+              <span>智能旅行视频生成器</span>
+            </div>
           </div>
-          <div>
-            <strong>Video Create Studio</strong>
-            <span>智能旅行视频生成器</span>
-          </div>
-        </div>
 
-        <nav className="nav-list" aria-label="主导航">
-          <button className={`nav-item${activeNav === "workspace" ? " active" : ""}`} onClick={() => scrollToSection("workspace")}>
-            <ImagePlus size={18} />
-            素材
-          </button>
-          <button className={`nav-item${activeNav === "settings" ? " active" : ""}`} onClick={() => scrollToSection("settings")}>
-            <Settings2 size={18} />
-            参数
-          </button>
-          <button className={`nav-item${activeNav === "engine" ? " active" : ""}`} onClick={() => scrollToSection("engine")}>
-            <Gauge size={18} />
-            引擎
-          </button>
-          <button className={`nav-item${activeNav === "ai" ? " active" : ""}`} onClick={() => scrollToSection("ai")}>
-            <Sparkles size={18} />
-            AI 蓝图
-          </button>
-        </nav>
-      </aside>
+          <nav className="nav-list" aria-label="主导航">
+            <button className={`nav-item${activeNav === "workspace" ? " active" : ""}`} onClick={() => scrollToSection("workspace")}>
+              <ImagePlus size={18} />
+              素材
+            </button>
+            <button className={`nav-item${activeNav === "settings" ? " active" : ""}`} onClick={() => scrollToSection("settings")}>
+              <Settings2 size={18} />
+              参数
+            </button>
+            <button className={`nav-item${activeNav === "engine" ? " active" : ""}`} onClick={() => scrollToSection("engine")}>
+              <Gauge size={18} />
+              引擎
+            </button>
+            <button className={`nav-item${activeNav === "ai" ? " active" : ""}`} onClick={() => scrollToSection("ai")}>
+              <Sparkles size={18} />
+              AI 蓝图
+            </button>
+          </nav>
+        </aside>
 
-      <section className="workspace" id="workspace">
-        {toast && <Toast title={state.v5Stage === "BLUEPRINT" ? "蓝图生成成功" : "提示"} message={toast} onClose={() => setToast(null)} />}
-        <header className="topbar">
-          <div>
-            <p className="eyebrow">GUI MVP</p>
-            <h1>Turn Moments into Motion.</h1>
-          </div>
-          <div className="topbar-actions">
-            {state.v5Stage === "BLUEPRINT" && (
-               <button className="secondary-action" onClick={() => state.patch({ v5Stage: "INPUT" })}>
-                 <FolderOpen size={18} /> 重新选择
-               </button>
-            )}
-            {state.v5Stage === "RENDER" && (
-              <button
-                className={`primary-action${isRendering ? " danger" : ""}`}
-                onClick={onCancel}
-              >
-                {isRendering ? (isCancelling ? <Wand2 className="spin" size={18} /> : <Square size={16} />) : <Play size={18} />}
-                {isRendering ? (isCancelling ? "正在停止" : "停止生成") : "开始渲染"}
-              </button>
-            )}
-          </div>
-        </header>
-
-        <div className="content-grid">
-          <section className="panel import-panel">
-            <SectionTitle icon={<FolderOpen size={18} />} title="素材导入" />
-            <FolderSelector inputFolder={state.inputFolder} setInputFolder={state.setInputFolder} />
-          </section>
-
-          <section className="panel" id="settings">
-            <SectionTitle icon={<Settings2 size={18} />} title="生成参数" />
-            <div className="form-grid">
-              <label>
-                片头主标题
-                <input value={state.title} onChange={(event) => state.patch({ title: event.target.value })} />
-              </label>
-              <label>
-                片头副标题
-                <input value={state.titleSubtitle} onChange={(event) => state.patch({ titleSubtitle: event.target.value })} />
-              </label>
-              <label>
-                片尾文字
-                <input value={state.endText} onChange={(event) => state.patch({ endText: event.target.value })} />
-              </label>
-              <label>
-                输出文件名
-                <input value={state.outputName} onChange={(event) => state.patch({ outputName: event.target.value })} />
-              </label>
-              <OutputFolderSelector
-                disabled={!state.inputFolder}
-                invalid={highlightOutput && !state.outputFolder}
-                outputFolder={state.outputFolder}
-                setOutputFolder={(folder) => {
-                  state.setOutputFolder(folder);
-                  setHighlightOutput(false);
-                  setToast(null);
-                }}
-              />
-              <label>
-                水印
-                <input value={state.watermark} onChange={(event) => state.patch({ watermark: event.target.value })} />
-              </label>
-              <label>
-                合成引擎
-                <select
-                  value={state.renderEngine}
-                  onChange={(event) => state.patch({ renderEngine: event.target.value as RenderEngine })}
+        <section className="workspace" id="workspace">
+          {toast && <Toast title={state.v5Stage === "BLUEPRINT" ? "蓝图生成成功" : "提示"} message={toast} onClose={() => setToast(null)} />}
+          <header className="topbar">
+            <div>
+              <p className="eyebrow">GUI MVP</p>
+              <h1>Turn Moments into Motion.</h1>
+            </div>
+            <div className="topbar-actions">
+              {state.v5Stage === "BLUEPRINT" && (
+                <button className="secondary-action" onClick={() => state.patch({ v5Stage: "INPUT" })}>
+                  <FolderOpen size={18} /> 重新选择
+                </button>
+              )}
+              {state.v5Stage === "RENDER" && (
+                <button
+                  className={`primary-action${isRendering ? " danger" : ""}`}
+                  onClick={onCancel}
                 >
-                  <option value="auto">自动选择</option>
-                  <option value="ffmpeg_concat">FFmpeg 快速拼接</option>
-                  <option value="moviepy_crossfade">MoviePy 交叉淡化</option>
-                </select>
-              </label>
+                  {isRendering ? (isCancelling ? <Wand2 className="spin" size={18} /> : <Square size={16} />) : <Play size={18} />}
+                  {isRendering ? (isCancelling ? "正在停止" : "停止生成") : "开始渲染"}
+                </button>
+              )}
             </div>
+          </header>
 
-            <div className="option-row">
-              <SegmentedControl
-                label="画幅"
-                value={state.aspectRatio}
-                options={[
-                  ["16:9", "横屏"],
-                  ["9:16", "竖屏"],
-                ]}
-                onChange={(value) => state.patch({ aspectRatio: value as AspectRatio })}
-              />
-              <SegmentedControl
-                label="质量"
-                value={state.quality}
-                options={[
-                  ["draft", "草稿"],
-                  ["standard", "标准"],
-                  ["high", "高质量"],
-                ]}
-                onChange={(value) => state.patch({ quality: value as Quality })}
-              />
-            </div>
+          <div className="content-grid">
+            <section className="panel import-panel">
+              <SectionTitle icon={<FolderOpen size={18} />} title="素材导入" />
+              <FolderSelector inputFolder={state.inputFolder} setInputFolder={state.setInputFolder} />
+            </section>
 
-            <div className="toggles">
-              <Toggle checked={state.recursive} label="递归读取子目录" onChange={(recursive) => state.patch({ recursive })} />
-              <Toggle
-                checked={state.chaptersFromDirs}
-                label="按子目录生成章节卡"
-                onChange={(chaptersFromDirs) => state.patch({ chaptersFromDirs })}
-              />
-              <Toggle checked={state.cover} label="生成 B 站封面" onChange={(cover) => state.patch({ cover })} />
-            </div>
-          </section>
+            <section className="panel" id="settings">
+              <SectionTitle icon={<Settings2 size={18} />} title="生成参数" />
+              <div className="form-grid">
+                <label>
+                  片头主标题
+                  <input value={state.title} onChange={(event) => state.patch({ title: event.target.value })} />
+                </label>
+                <label>
+                  片头副标题
+                  <input value={state.titleSubtitle} onChange={(event) => state.patch({ titleSubtitle: event.target.value })} />
+                </label>
+                <label>
+                  片尾文字
+                  <input value={state.endText} onChange={(event) => state.patch({ endText: event.target.value })} />
+                </label>
+                <label>
+                  输出文件名
+                  <input value={state.outputName} onChange={(event) => state.patch({ outputName: event.target.value })} />
+                </label>
+                <OutputFolderSelector
+                  disabled={!state.inputFolder}
+                  invalid={highlightOutput && !state.outputFolder}
+                  outputFolder={state.outputFolder}
+                  setOutputFolder={(folder) => {
+                    state.setOutputFolder(folder);
+                    setHighlightOutput(false);
+                    setToast(null);
+                  }}
+                />
+                <label>
+                  水印
+                  <input value={state.watermark} onChange={(event) => state.patch({ watermark: event.target.value })} />
+                </label>
+                <label>
+                  合成引擎
+                  <select
+                    value={state.renderEngine}
+                    onChange={(event) => state.patch({ renderEngine: event.target.value as RenderEngine })}
+                  >
+                    <option value="auto">自动选择</option>
+                    <option value="ffmpeg_concat">FFmpeg 快速拼接</option>
+                    <option value="moviepy_crossfade">MoviePy 交叉淡化</option>
+                  </select>
+                </label>
+              </div>
 
-          <section className="panel wide-panel" id="engine">
-            {state.v5Stage === "INPUT" ? (
-               <div className="v5-welcome-hero">
+              <div className="option-row">
+                <SegmentedControl
+                  label="画幅"
+                  value={state.aspectRatio}
+                  options={[
+                    ["16:9", "横屏"],
+                    ["9:16", "竖屏"],
+                  ]}
+                  onChange={(value) => state.patch({ aspectRatio: value as AspectRatio })}
+                />
+                <SegmentedControl
+                  label="质量"
+                  value={state.quality}
+                  options={[
+                    ["draft", "草稿"],
+                    ["standard", "标准"],
+                    ["high", "高质量"],
+                  ]}
+                  onChange={(value) => state.patch({ quality: value as Quality })}
+                />
+              </div>
+
+              <div className="toggles">
+                <Toggle checked={state.recursive} label="递归读取子目录" onChange={(recursive) => state.patch({ recursive })} />
+                <Toggle
+                  checked={state.chaptersFromDirs}
+                  label="按子目录生成章节卡"
+                  onChange={(chaptersFromDirs) => state.patch({ chaptersFromDirs })}
+                />
+                <Toggle checked={state.cover} label="生成 B 站封面" onChange={(cover) => state.patch({ cover })} />
+              </div>
+            </section>
+
+            <section className="panel wide-panel" id="engine">
+              {state.v5Stage === "INPUT" ? (
+                <div className="v5-welcome-hero">
                   <div className="hero-icon"><Sparkles size={48} /></div>
                   <h2>欢迎使用 Video Create Studio V5</h2>
                   <p>选择素材文件夹后，我们将为您自动识别城市、日期与景点。</p>
-                  <button 
-                    className="primary-action pulse-guidance" 
+                  <button
+                    className="primary-action pulse-guidance"
                     disabled={!state.inputFolder}
                     onClick={onStartV5Workflow}
                   >
                     <Wand2 size={20} /> 开始智能编排
                   </button>
-               </div>
-            ) : state.v5Stage === "BLUEPRINT" ? (
-               <div className="blueprint-editor-container">
+                </div>
+              ) : state.v5Stage === "BLUEPRINT" ? (
+                <div className="blueprint-editor-container">
                   <SectionTitle icon={<ListChecks size={18} />} title="故事蓝图审核" />
-                  <BlueprintEditor 
-                    blueprint={state.v5Blueprint} 
+                  <BlueprintEditor
+                    blueprint={state.v5Blueprint}
                     library={state.v5Library}
                     onUpdate={(bp) => state.patch({ v5Blueprint: bp })}
                   />
                   <div className="blueprint-actions">
-                     <button className="secondary-action" onClick={() => state.patch({ v5Stage: "INPUT" })}>重新扫描</button>
-                     <button className="primary-action" onClick={onConfirmBlueprint}>确认并进入渲染</button>
+                    <button className="secondary-action" onClick={() => state.patch({ v5Stage: "INPUT" })}>重新扫描</button>
+                    <button className="primary-action" onClick={onConfirmBlueprint}>确认并进入渲染</button>
                   </div>
-               </div>
-            ) : (
-               <div className="render-stage-container">
+                </div>
+              ) : (
+                <div className="render-stage-container">
                   <SectionTitle icon={<FileVideo size={18} />} title="渲染执行" />
-                  
-                   {(isRendering || logs.length > 0) && (
+
+                  {(isRendering || logs.length > 0) && (
                     <div className="render-progress-area">
                       <ProgressBar isDryRun={state.isDryRun} percent={progress || 0} phase={phase} />
                     </div>
@@ -597,129 +597,129 @@ export function App() {
 
                   {!isRendering && (
                     <div className="v5-render-trigger">
-                       <button className="primary-action pulse-guidance" onClick={() => onGenerate(false)}>
-                          <PlayCircle size={24} /> 立即开始最终合成
-                       </button>
-                       <p className="hint-text">点击上方按钮，启动 V5 渲染引擎合并素材并导出视频。</p>
+                      <button className="primary-action pulse-guidance" onClick={() => onGenerate(false)}>
+                        <PlayCircle size={24} /> 立即开始最终合成
+                      </button>
+                      <p className="hint-text">点击上方按钮，启动 V5 渲染引擎合并素材并导出视频。</p>
                     </div>
                   )}
 
                   {state.v5RenderPlan && (
                     <div className="render-plan-preview">
-                       <div className="plan-summary">
-                          <span>总时长: {state.v5RenderPlan.total_duration.toFixed(1)}s</span>
-                          <span>总片段数: {state.v5RenderPlan.segments.length}</span>
-                          {isRendering && progress !== null && <span className="current-progress-text">进度: {progress}%</span>}
-                       </div>
-                       <div className="segments-timeline">
-                          {state.v5RenderPlan.segments.map((seg: V5RenderSegment, idx: number) => {
-                            const isCurrent = isRendering && progress !== null && 
-                              (progress / 100 * state.v5RenderPlan.total_duration >= seg.start_time) &&
-                              (progress / 100 * state.v5RenderPlan.total_duration < seg.end_time);
-                            
-                            return (
-                              <div key={seg.segment_id} className={`segment-strip ${seg.type}${isCurrent ? ' active-rendering' : ''}`}>
-                                 <div className="seg-label">
-                                   {isCurrent ? <Wand2 size={10} className="spin" /> : seg.type.toUpperCase()}
-                                 </div>
-                                 <div className="seg-info">
-                                    {seg.text || seg.source_path?.split(/[/\\]/).pop()}
-                                 </div>
-                                 <div className="seg-time">{seg.duration.toFixed(1)}s</div>
+                      <div className="plan-summary">
+                        <span>总时长: {state.v5RenderPlan.total_duration.toFixed(1)}s</span>
+                        <span>总片段数: {state.v5RenderPlan.segments.length}</span>
+                        {isRendering && progress !== null && <span className="current-progress-text">进度: {progress}%</span>}
+                      </div>
+                      <div className="segments-timeline">
+                        {state.v5RenderPlan.segments.map((seg: V5RenderSegment, idx: number) => {
+                          const isCurrent = isRendering && progress !== null &&
+                            (progress / 100 * state.v5RenderPlan.total_duration >= seg.start_time) &&
+                            (progress / 100 * state.v5RenderPlan.total_duration < seg.end_time);
+
+                          return (
+                            <div key={seg.segment_id} className={`segment-strip ${seg.type}${isCurrent ? ' active-rendering' : ''}`}>
+                              <div className="seg-label">
+                                {isCurrent ? <Wand2 size={10} className="spin" /> : seg.type.toUpperCase()}
                               </div>
-                            );
-                          })}
-                       </div>
+                              <div className="seg-info">
+                                {seg.text || seg.source_path?.split(/[/\\]/).pop()}
+                              </div>
+                              <div className="seg-time">{seg.duration.toFixed(1)}s</div>
+                            </div>
+                          );
+                        })}
+                      </div>
                     </div>
                   )}
 
                   <div className="command-box">{commandPreview}</div>
-                  
+
                   {(isRendering || logs.length > 0) && (
                     <div className="log-viewer">
                       {logs.length === 0 ? <div className="log-placeholder">正在启动引擎...</div> : logs.map((log, i) => <div key={i}>{log}</div>)}
                       <div ref={logEndRef} />
                     </div>
                   )}
-               </div>
-            )}
-            
-            <div className="status-strip">
-               <StatusItem label="输入目录" value={state.inputFolder ? state.inputFolder.split(/[/\\]/).pop() || "已选择" : "未选择"} />
-               <StatusItem 
-                 label="叙事阶段" 
-                 value={isRendering ? "正在渲染" : (state.v5Stage === "BLUEPRINT" ? "故事编排" : "就绪执行")} 
-                 highlight={isRendering}
-               />
-               <StatusItem label="当前画幅" value={state.aspectRatio} />
-              <StatusItem label="渲染质量" value={qualityLabel(state.quality)} />
-            </div>
-            {result && <ResultCard result={result} />}
-          </section>
+                </div>
+              )}
 
-          <section className="panel wide-panel ai-panel" id="ai">
-            <SectionTitle icon={<Sparkles size={18} />} title="下一阶段能力" />
-            <div className="feature-list">
-              <Feature title="AI 配乐蓝图" text="根据画面节奏生成 BGM 风格与时间段建议。" />
-              <Feature title="模板匹配" text="按旅行、探店、日常 Vlog 等素材特征选择剪辑方案。" />
-              <Feature title="时间线微调" text="引入轨道视图，后续只同步状态，不在前端重渲染视频。" />
-            </div>
-          </section>
-        </div>
-      </section>
-    </main>
-    {showGalleryOverlay && (
-      <div className="gallery-overlay">
-        <div className="gallery-overlay-header">
-          <div className="gallery-title-area">
-             <SectionTitle icon={<LayoutGrid size={22} />} title="素材资产库" />
-             <p className="gallery-subtitle">共有 {materials.length} 个扫描到的媒体文件</p>
+              <div className="status-strip">
+                <StatusItem label="输入目录" value={state.inputFolder ? state.inputFolder.split(/[/\\]/).pop() || "已选择" : "未选择"} />
+                <StatusItem
+                  label="叙事阶段"
+                  value={isRendering ? "正在渲染" : (state.v5Stage === "BLUEPRINT" ? "故事编排" : "就绪执行")}
+                  highlight={isRendering}
+                />
+                <StatusItem label="当前画幅" value={state.aspectRatio} />
+                <StatusItem label="渲染质量" value={qualityLabel(state.quality)} />
+              </div>
+              {result && <ResultCard result={result} />}
+            </section>
+
+            <section className="panel wide-panel ai-panel" id="ai">
+              <SectionTitle icon={<Sparkles size={18} />} title="下一阶段能力" />
+              <div className="feature-list">
+                <Feature title="AI 配乐蓝图" text="根据画面节奏生成 BGM 风格与时间段建议。" />
+                <Feature title="模板匹配" text="按旅行、探店、日常 Vlog 等素材特征选择剪辑方案。" />
+                <Feature title="时间线微调" text="引入轨道视图，后续只同步状态，不在前端重渲染视频。" />
+              </div>
+            </section>
           </div>
-          
-          <div className="gallery-nav-pills">
-             <button 
-               className={galleryView === 'chapter' ? 'active' : ''} 
-               onClick={() => setGalleryView('chapter')}
-             >
-               {(() => {
-                 const chapters = Array.from(new Set(materials.map(m => m.chapter).filter(Boolean))) as string[];
-                 const isDate = chapters.some(c => /day|天|日|\d{4}|\d{1,2}[-.]\d{1,2}/i.test(c));
-                 if (isDate) return <><Calendar size={14} /> 按日期</>;
-                 const isCity = chapters.some(c => /市|镇|区|州|岛/i.test(c));
-                 if (isCity) return <><MapPin size={14} /> 按城市</>;
-                 const isSpot = chapters.some(c => /寺|校|山|园|桥|塔|宫|馆/i.test(c));
-                 if (isSpot) return <><Palmtree size={14} /> 按景点</>;
-                 return <><Folder size={14} /> 按目录</>;
-               })()}
-             </button>
-             <button 
-               className={galleryView === 'type' ? 'active' : ''} 
-               onClick={() => setGalleryView('type')}
-             >
-               <Layers size={14} /> 按类型
-             </button>
-             <button 
-               className={galleryView === 'time' ? 'active' : ''} 
-               onClick={() => setGalleryView('time')}
-             >
-               <Calendar size={14} /> 按拍摄时间
-             </button>
+        </section>
+      </main>
+      {showGalleryOverlay && (
+        <div className="gallery-overlay">
+          <div className="gallery-overlay-header">
+            <div className="gallery-title-area">
+              <SectionTitle icon={<LayoutGrid size={22} />} title="素材资产库" />
+              <p className="gallery-subtitle">共有 {materials.length} 个扫描到的媒体文件</p>
+            </div>
+
+            <div className="gallery-nav-pills">
+              <button
+                className={galleryView === 'chapter' ? 'active' : ''}
+                onClick={() => setGalleryView('chapter')}
+              >
+                {(() => {
+                  const chapters = Array.from(new Set(materials.map(m => m.chapter).filter(Boolean))) as string[];
+                  const isDate = chapters.some(c => /day|天|日|\d{4}|\d{1,2}[-.]\d{1,2}/i.test(c));
+                  if (isDate) return <><Calendar size={14} /> 按日期</>;
+                  const isCity = chapters.some(c => /市|镇|区|州|岛/i.test(c));
+                  if (isCity) return <><MapPin size={14} /> 按城市</>;
+                  const isSpot = chapters.some(c => /寺|校|山|园|桥|塔|宫|馆/i.test(c));
+                  if (isSpot) return <><Palmtree size={14} /> 按景点</>;
+                  return <><Folder size={14} /> 按目录</>;
+                })()}
+              </button>
+              <button
+                className={galleryView === 'type' ? 'active' : ''}
+                onClick={() => setGalleryView('type')}
+              >
+                <Layers size={14} /> 按类型
+              </button>
+              <button
+                className={galleryView === 'time' ? 'active' : ''}
+                onClick={() => setGalleryView('time')}
+              >
+                <Calendar size={14} /> 按拍摄时间
+              </button>
+            </div>
+
+
+            <button className="close-overlay-btn" onClick={() => setShowGalleryOverlay(false)}>
+              <X size={20} /> 退出管理
+            </button>
           </div>
-
-
-          <button className="close-overlay-btn" onClick={() => setShowGalleryOverlay(false)}>
-            <X size={20} /> 退出管理
-          </button>
+          <div className="gallery-overlay-content">
+            <MaterialGallery materials={materials} onSelect={setSelectedMaterial} viewMode={galleryView} />
+          </div>
         </div>
-        <div className="gallery-overlay-content">
-          <MaterialGallery materials={materials} onSelect={setSelectedMaterial} viewMode={galleryView} />
-        </div>
-      </div>
-    )}
+      )}
 
-    {selectedMaterial && (
-      <PreviewModal material={selectedMaterial} onClose={() => setSelectedMaterial(null)} />
-    )}
+      {selectedMaterial && (
+        <PreviewModal material={selectedMaterial} onClose={() => setSelectedMaterial(null)} />
+      )}
     </>
   );
 }
@@ -858,18 +858,18 @@ function BlueprintEditor({ blueprint, library, onUpdate }: { blueprint: V5StoryB
   return (
     <div className="blueprint-editor">
       <div className="blueprint-header">
-         <input 
-           className="blueprint-main-title" 
-           value={blueprint.title} 
-           onChange={(e) => onUpdate({ ...blueprint, title: e.target.value })} 
-         />
+        <input
+          className="blueprint-main-title"
+          value={blueprint.title}
+          onChange={(e) => onUpdate({ ...blueprint, title: e.target.value })}
+        />
       </div>
       <div className="blueprint-sections">
         {blueprint.sections.map((section, idx) => (
-          <SectionCard 
-            key={section.section_id} 
-            section={section} 
-            library={library} 
+          <SectionCard
+            key={section.section_id}
+            section={section}
+            library={library}
             onUpdate={(upd) => updateSection(section.section_id, upd)}
           />
         ))}
@@ -880,14 +880,14 @@ function BlueprintEditor({ blueprint, library, onUpdate }: { blueprint: V5StoryB
 
 function SectionCard({ section, library, onUpdate }: { section: V5StorySection; library: V5MediaLibrary; onUpdate: (updated: V5StorySection) => void }) {
   const [isExpanded, setIsExpanded] = useState(false);
-  const icon = section.section_type === 'city' ? <MapPin size={16} /> : 
-               section.section_type === 'date' ? <Calendar size={16} /> : 
-               section.section_type === 'scenic_spot' ? <Palmtree size={16} /> : <Layers size={16} />;
+  const icon = section.section_type === 'city' ? <MapPin size={16} /> :
+    section.section_type === 'date' ? <Calendar size={16} /> :
+      section.section_type === 'scenic_spot' ? <Palmtree size={16} /> : <Layers size={16} />;
 
   const getAssetById = (id: string) => library?.assets.find(a => a.asset_id === id);
 
   const toggleSection = () => onUpdate({ ...section, enabled: !section.enabled });
-  
+
   const handleTitleChange = (newTitle: string) => onUpdate({ ...section, title: newTitle });
 
   const updateChild = (childId: string, updatedChild: V5StorySection) => {
@@ -896,7 +896,7 @@ function SectionCard({ section, library, onUpdate }: { section: V5StorySection; 
   };
 
   const toggleAsset = (assetId: string) => {
-    const newRefs = section.asset_refs.map(ref => 
+    const newRefs = section.asset_refs.map(ref =>
       ref.asset_id === assetId ? { ...ref, enabled: !ref.enabled } : ref
     );
     onUpdate({ ...section, asset_refs: newRefs });
@@ -904,82 +904,97 @@ function SectionCard({ section, library, onUpdate }: { section: V5StorySection; 
 
   return (
     <div className={`section-card ${section.section_type}${!section.enabled ? ' disabled' : ''}`}>
-       <div className="section-card-header">
-          <div className="section-type-badge">
-             {icon}
-             <span>{section.section_type.toUpperCase()}</span>
-          </div>
-          <div className="section-title-wrapper">
-            <input 
-              className="section-title-input" 
-              value={section.title} 
-              onChange={(e) => handleTitleChange(e.target.value)}
-              placeholder="输入章节标题..."
-            />
-            <Pencil size={12} className="edit-indicator" />
-          </div>
-          <div className="section-actions">
-             <button className="icon-btn" onClick={() => setIsExpanded(!isExpanded)} title={isExpanded ? "收起预览" : "放大预览"}>
-                {isExpanded ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
-             </button>
-             <button className="icon-btn" onClick={toggleSection} title={section.enabled ? "禁用此章节" : "启用此章节"}>
-                {section.enabled ? <Eye size={16} /> : <EyeOff size={16} />}
-             </button>
-          </div>
-          <div className="section-meta">
-             {section.asset_refs.length} 个素材
-          </div>
-       </div>
-       
-       {section.enabled && section.children && section.children.length > 0 && (
-         <div className="section-children">
-            {section.children.map(child => (
-              <SectionCard 
-                key={child.section_id} 
-                section={child} 
-                library={library} 
-                onUpdate={(upd) => updateChild(child.section_id, upd)}
-              />
-            ))}
-         </div>
-       )}
+      <div className="section-card-header">
+        <div className="section-type-badge">
+          {icon}
+          <span>{section.section_type.toUpperCase()}</span>
+        </div>
+        <div className="section-title-wrapper">
+          <input
+            className="section-title-input"
+            value={section.title}
+            onChange={(e) => handleTitleChange(e.target.value)}
+            placeholder="输入章节标题..."
+          />
+          <Pencil size={12} className="edit-indicator" />
+        </div>
+        <div className="section-actions">
+          <button className="icon-btn" onClick={() => setIsExpanded(!isExpanded)} title={isExpanded ? "收起预览" : "放大预览"}>
+            {isExpanded ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
+          </button>
+          <button className="icon-btn" onClick={toggleSection} title={section.enabled ? "禁用此章节" : "启用此章节"}>
+            {section.enabled ? <Eye size={16} /> : <EyeOff size={16} />}
+          </button>
+        </div>
+        <div className="section-meta">
+          {section.asset_refs.length} 个素材
+        </div>
+      </div>
 
-       {section.enabled && section.asset_refs.length > 0 && !section.children.length && (
-          <div className={`section-assets-preview${isExpanded ? ' expanded-grid' : ''}`}>
-             {section.asset_refs.slice(0, isExpanded ? 50 : 15).map(ref => {
-               const asset = getAssetById(ref.asset_id);
-               return (
-                 <div 
-                   key={ref.asset_id} 
-                   className={`asset-mini-thumb${!ref.enabled ? ' asset-disabled' : ''}`}
-                   title={asset ? `${asset.file.name}\n点击${ref.enabled ? "禁用" : "启用"}` : ""}
-                 >
-                   <div className="asset-click-area" onClick={() => toggleAsset(ref.asset_id)}>
-                     {asset && (asset.thumbnail_path || asset.type === 'image') ? (
-                       <img src={convertFileSrc(asset.thumbnail_path || asset.absolute_path)} alt="" />
-                     ) : asset?.type === 'video' ? (
-                       <div className="video-placeholder">
-                         <PlayCircle size={isExpanded ? 24 : 14} />
-                         <span className="video-tag">{asset.file.extension.replace('.', '').toUpperCase()}</span>
-                       </div>
-                     ) : null}
-                   </div>
-                   
-                   <button 
-                     className="asset-toggle-badge" 
-                     onClick={(e) => { e.stopPropagation(); toggleAsset(ref.asset_id); }}
-                     title={ref.enabled ? "移除素材" : "恢复素材"}
-                   >
-                     {ref.enabled ? <X size={10} /> : <CheckCircle2 size={10} />}
-                   </button>
-                 </div>
-               );
-             })}
-             {section.asset_refs.length > (isExpanded ? 50 : 15) && <div className="asset-more">+{section.asset_refs.length - (isExpanded ? 50 : 15)}</div>}
-          </div>
-       )}
+      {section.enabled && section.children && section.children.length > 0 && (
+        <div className="section-children">
+          {section.children.map(child => (
+            <SectionCard
+              key={child.section_id}
+              section={child}
+              library={library}
+              onUpdate={(upd) => updateChild(child.section_id, upd)}
+            />
+          ))}
+        </div>
+      )}
+
+      {section.enabled && section.asset_refs.length > 0 && !section.children.length && (
+        <div className={`section-assets-preview${isExpanded ? ' expanded-grid' : ''}`}>
+          {section.asset_refs.slice(0, isExpanded ? 50 : 15).map(ref => {
+            const asset = getAssetById(ref.asset_id);
+            return (
+              <div
+                key={ref.asset_id}
+                className={`asset-mini-thumb${!ref.enabled ? ' asset-disabled' : ''}`}
+                title={asset ? `${asset.file.name}\n点击${ref.enabled ? "禁用" : "启用"}` : ""}
+              >
+                <div className="asset-click-area" onClick={() => toggleAsset(ref.asset_id)}>
+                  {asset && (getAssetThumbnailPath(asset) || asset.type === 'image') ? (
+                    <img src={convertFileSrc(getAssetThumbnailPath(asset) || asset.absolute_path)} alt={asset.file.name} />
+                  ) : asset?.type === 'video' ? (
+                    <div className="video-placeholder">
+                      <PlayCircle size={isExpanded ? 24 : 14} />
+                      <span className="video-tag">{asset.file.extension.replace('.', '').toUpperCase()}</span>
+                    </div>
+                  ) : null}
+                </div>
+
+                <button
+                  className="asset-toggle-badge"
+                  onClick={(e) => { e.stopPropagation(); toggleAsset(ref.asset_id); }}
+                  title={ref.enabled ? "移除素材" : "恢复素材"}
+                >
+                  {ref.enabled ? <X size={10} /> : <CheckCircle2 size={10} />}
+                </button>
+              </div>
+            );
+          })}
+          {section.asset_refs.length > (isExpanded ? 50 : 15) && <div className="asset-more">+{section.asset_refs.length - (isExpanded ? 50 : 15)}</div>}
+        </div>
+      )}
     </div>
   );
+}
+
+function getAssetThumbnailPath(asset: unknown): string | null {
+  if (!asset || typeof asset !== "object") return null;
+  const maybeAsset = asset as { thumbnail_path?: unknown; thumbnail?: unknown };
+
+  if (typeof maybeAsset.thumbnail_path === "string" && maybeAsset.thumbnail_path.length > 0) {
+    return maybeAsset.thumbnail_path;
+  }
+
+  if (typeof maybeAsset.thumbnail === "string" && maybeAsset.thumbnail.length > 0) {
+    return maybeAsset.thumbnail;
+  }
+
+  return null;
 }
 
 function formatProgressLine(line: string): string | null {
@@ -1161,15 +1176,15 @@ function Toggle({ checked, label, onChange }: { checked: boolean; label: string;
     </label>
   );
 }
-function MaterialGallery({ materials, onSelect, viewMode }: { 
-  materials: VideoEvent[]; 
+function MaterialGallery({ materials, onSelect, viewMode }: {
+  materials: VideoEvent[];
   onSelect: (m: VideoEvent) => void;
   viewMode: "chapter" | "type" | "time";
 }) {
   // Group materials based on viewMode
   const groups = useMemo(() => {
     const res: Record<string, VideoEvent[]> = {};
-    
+
     materials.forEach((m) => {
       let key = "其他";
       if (viewMode === "chapter") {
@@ -1184,7 +1199,7 @@ function MaterialGallery({ materials, onSelect, viewMode }: {
           key = "未知时间";
         }
       }
-      
+
       if (!res[key]) res[key] = [];
       res[key].push(m);
     });
@@ -1203,15 +1218,15 @@ function MaterialGallery({ materials, onSelect, viewMode }: {
         <div className="gallery-section" key={groupName}>
           <div className="gallery-section-header">
             <div className="section-title">
-               <span className="dot"></span>
-               {groupName}
+              <span className="dot"></span>
+              {groupName}
             </div>
             <span className="count">{items.length} 个项目</span>
           </div>
           <div className="gallery-grid">
             {items.map((item, i) => (
-              <div 
-                className={`material-card ${item.error ? 'has-error' : ''}`} 
+              <div
+                className={`material-card ${item.error ? 'has-error' : ''}`}
                 key={i}
                 onClick={() => onSelect(item)}
               >
@@ -1226,7 +1241,7 @@ function MaterialGallery({ materials, onSelect, viewMode }: {
                   {item.item_kind === "video" && (
                     <div className="video-overlay">
                       <div className="play-icon-circle">
-                         <PlayCircle size={28} />
+                        <PlayCircle size={28} />
                       </div>
                       {item.duration && <span className="duration-tag">{Math.round(item.duration)}s</span>}
                     </div>
@@ -1239,7 +1254,7 @@ function MaterialGallery({ materials, onSelect, viewMode }: {
                 </div>
                 <div className="material-info">
                   <div className="name-row">
-                     <span className="material-name">{item.display_name}</span>
+                    <span className="material-name">{item.display_name}</span>
                   </div>
                   <div className="meta-row">
                     {item.width && item.height && (
@@ -1284,9 +1299,17 @@ function PreviewModal({ material, onClose }: { material: VideoEvent; onClose: ()
   );
 }
 
-function StatusItem({ label, value }: { label: string; value: string }) {
+function StatusItem({
+  label,
+  value,
+  highlight = false,
+}: {
+  label: string;
+  value: string;
+  highlight?: boolean;
+}) {
   return (
-    <div>
+    <div className={highlight ? "status-item highlight" : "status-item"}>
       <span>{label}</span>
       <strong>{value}</strong>
     </div>
