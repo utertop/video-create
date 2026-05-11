@@ -5,6 +5,7 @@ export type Quality = "draft" | "standard" | "high";
 export type RenderEngine = "auto" | "ffmpeg_concat" | "moviepy_crossfade";
 
 export interface GenerateVideoPayload {
+  jobId?: string;
   inputPaths: string[];
   outputDir: string;
   title: string;
@@ -18,6 +19,7 @@ export interface GenerateVideoPayload {
   chaptersFromDirs: boolean;
   cover: boolean;
   renderEngine: RenderEngine;
+  dryRun?: boolean;
 }
 
 export interface GenerateVideoResult {
@@ -25,6 +27,9 @@ export interface GenerateVideoResult {
   message: string;
   commandPreview: string;
   outputPath?: string;
+  outputDir?: string;
+  cancelled?: boolean;
+  isDryRun?: boolean;
 }
 
 export async function generateVideo(payload: GenerateVideoPayload): Promise<GenerateVideoResult> {
@@ -35,6 +40,18 @@ export async function generateVideo(payload: GenerateVideoPayload): Promise<Gene
       ok: false,
       message: "当前运行在浏览器预览模式，或 Tauri 后端尚未启动。",
       commandPreview: buildCommandPreview(payload),
+    };
+  }
+}
+
+export async function cancelVideo(jobId: string): Promise<GenerateVideoResult> {
+  try {
+    return await invoke<GenerateVideoResult>("cancel_video", { jobId });
+  } catch (error) {
+    return {
+      ok: false,
+      message: "无法取消任务：Tauri 后端尚未响应。",
+      commandPreview: "",
     };
   }
 }
@@ -54,8 +71,8 @@ export function buildCommandPreview(payload: GenerateVideoPayload): string {
     "make_bilibili_video_v3.py",
     "--input_folder",
     quote(input),
-    "--output_dir",
-    quote(outputDir),
+    payload.outputDir ? "--output_dir" : "",
+    payload.outputDir ? quote(outputDir) : "",
     payload.recursive ? "--recursive" : "",
     payload.chaptersFromDirs ? "--chapters_from_dirs" : "",
     "--title",
@@ -73,6 +90,7 @@ export function buildCommandPreview(payload: GenerateVideoPayload): string {
     "--ratio",
     payload.aspectRatio,
     payload.cover ? "--cover" : "",
+    payload.dryRun ? "--dry_run" : "",
     "--output_name",
     quote(payload.outputName || "travel_video"),
   ].filter(Boolean);

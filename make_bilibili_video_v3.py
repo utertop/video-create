@@ -74,6 +74,38 @@ VIDEO_EXTS = (".mp4", ".mov", ".avi", ".mkv", ".m4v")
 ALL_EXTS = IMAGE_EXTS + VIDEO_EXTS
 
 
+def emit_event(event_type: str, **payload):
+    payload["type"] = event_type
+    print(json.dumps(payload, ensure_ascii=False), flush=True)
+
+
+def emit_log(message: str, **payload):
+    emit_event("log", message=message, **payload)
+
+
+def emit_phase(phase: str, message: Optional[str] = None, percent: Optional[int] = None, **payload):
+    data = {"phase": phase}
+    if message is not None:
+        data["message"] = message
+    if percent is not None:
+        data["percent"] = percent
+    data.update(payload)
+    emit_event("phase", **data)
+
+
+def emit_progress(current: int, total: int, phase: str, message: str, **payload):
+    percent = 0 if total <= 0 else max(0, min(100, round(current / total * 90)))
+    emit_event(
+        "progress",
+        current=current,
+        total=total,
+        percent=percent,
+        phase=phase,
+        message=message,
+        **payload,
+    )
+
+
 @dataclass
 class MediaItem:
     kind: str              # image / video / title / chapter / end
@@ -517,6 +549,10 @@ def extract_video_frame_cached(item: MediaItem, position: str, cache_dir: str) -
         t = 0 if position == "first" else max(0, float(clip.duration or 0) - 0.08)
         clip.save_frame(out, t=t)
         return out
+        emit_event("result", ok=True, output_path=output_file, output_dir=output_dir, percent=100, phase="complete")
+
+        emit_event("result", ok=True, output_path=output_file, output_dir=output_dir, percent=100, phase="complete")
+
     finally:
         clip.close()
 
@@ -765,12 +801,14 @@ def build_segments(items: List[MediaItem], options: Dict[str, object], temp_dir:
 
         if os.path.exists(seg_path) and not options["rebuild_cache"]:
             item.status = "cache_hit"
+            emit_progress(idx, len(items), "segment", f"Cache hit: {item.display_name}", item_kind=item.kind, display_name=item.display_name)
             print(f"[{idx}/{len(items)}] 缓存命中: {item.display_name}")
             built.append(item)
             continue
 
         print(f"[{idx}/{len(items)}] 生成片段: {item.kind} | {item.display_name}")
         try:
+            emit_progress(idx, len(items), "segment", f"Rendering segment: {item.kind} | {item.display_name}", item_kind=item.kind, display_name=item.display_name)
             if item.kind == "image":
                 create_photo_segment(item, seg_path, options, temp_dir, watermark_path)
             elif item.kind == "video":
@@ -796,6 +834,7 @@ def build_segments(items: List[MediaItem], options: Dict[str, object], temp_dir:
         except Exception as exc:
             item.status = "failed"
             item.error = str(exc)
+            emit_event("error", message=str(exc), phase="segment", item_kind=item.kind, display_name=item.display_name)
             print(f"[跳过] {item.display_name}，原因: {exc}")
     return built
 
@@ -920,6 +959,16 @@ def run(args):
 
     image_count = sum(1 for i in raw_media if i.kind == "image")
     video_count = sum(1 for i in raw_media if i.kind == "video")
+    emit_phase(
+        "scan",
+        "Media scan complete",
+        percent=5,
+        input_folder=input_folder,
+        output_dir=output_dir,
+        image_count=image_count,
+        video_count=video_count,
+        item_count=len(structured_items),
+    )
 
     print("=" * 90)
     print("B站横屏视频生成器 V3")
@@ -938,9 +987,11 @@ def run(args):
 
     print("素材预览:")
     for item in structured_items:
-        print(f" - [{item.kind}] {item.rel_path} | {item.display_name}")
+        emit_event("media", item_kind=item.kind, rel_path=item.rel_path, display_name=item.display_name)
 
     if args.dry_run:
+        emit_phase("complete", "素材预检完成", percent=100)
+        time.sleep(0.5)  # 确保缓冲区数据被读走
         print("\ndry-run 模式：只预检，不生成视频。")
         return
 
@@ -979,13 +1030,16 @@ def run(args):
     try:
         watermark_path = create_watermark_image(args.watermark, resolution, temp_dir) if args.watermark else None
 
+        emit_phase("segment", "Building video segments", percent=10, item_count=len(structured_items))
         built_items = build_segments(structured_items, options, temp_dir, watermark_path)
         if not built_items:
+            emit_event("error", message="No video segments were generated", phase="segment")
             print("没有成功生成任何片段，终止。")
             return
 
         estimated_duration = sum(float(i.duration or 0.0) for i in built_items)
         if args.max_seconds is not None and estimated_duration > args.max_seconds:
+            emit_event("error", message=f"Estimated duration {estimated_duration:.1f}s exceeds limit {args.max_seconds:.1f}s", phase="segment")
             print(f"预计片段总时长 {estimated_duration:.1f}s 超过限制 {args.max_seconds:.1f}s，终止。")
             return
 
@@ -996,6 +1050,7 @@ def run(args):
         print("=" * 90)
         print(f"开始最终合成，engine={final_engine}")
         print("=" * 90)
+        emit_phase("render", f"Final render started: {final_engine}", percent=92, engine=final_engine)
         segments = [i.cached_segment for i in built_items if i.cached_segment and os.path.exists(i.cached_segment)]
         if final_engine == "ffmpeg_concat":
             concat_with_ffmpeg(segments, output_file)
@@ -1005,12 +1060,14 @@ def run(args):
             raise ValueError(f"未知 engine: {final_engine}")
 
         if args.cover:
+            emit_phase("cover", "Generating cover", percent=95)
             cover_title = args.cover_title or args.title or args.output_name
             cover_path = os.path.join(output_dir, f"cover_{args.output_name}.jpg")
             create_cover_image(input_folder, raw_media, resolution, cover_path, cover_title, subtitle=args.cover_subtitle)
             print(f"封面已生成: {cover_path}")
 
         if args.report:
+            emit_phase("report", "Writing build report", percent=98)
             report_path = os.path.join(output_dir, f"build_report_{args.output_name}.txt")
             write_report(report_path, options, structured_items, built_items, output_file, started_at)
             print(f"报告已生成: {report_path}")
@@ -1073,4 +1130,8 @@ if __name__ == "__main__":
     parser.add_argument("--max_seconds", type=float, default=None, help="限制最大时长，超过则停止")
     parser.add_argument("--rebuild_cache", action="store_true", help="强制重建缓存")
 
-    run(parser.parse_args())
+    try:
+        run(parser.parse_args())
+    except Exception as exc:
+        emit_event("error", message=str(exc), phase="fatal")
+        raise

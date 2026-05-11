@@ -9,9 +9,11 @@ import {
   Play,
   Settings2,
   Sparkles,
+  Square,
   TriangleAlert,
   X,
   Wand2,
+  ListChecks,
 } from "lucide-react";
 import { useMemo, useState, useEffect, useRef } from "react";
 import { create } from "zustand";
@@ -24,9 +26,27 @@ import {
   Quality,
   RenderEngine,
   buildCommandPreview,
+  cancelVideo,
   generateVideo,
   openInExplorer,
 } from "./lib/engine";
+
+interface VideoEvent {
+  type?: string;
+  message?: string;
+  phase?: string;
+  percent?: number;
+  current?: number;
+  total?: number;
+  ok?: boolean;
+  output_path?: string;
+  output_dir?: string;
+  artifact?: string;
+  path?: string;
+  item_kind?: string;
+  rel_path?: string;
+  display_name?: string;
+}
 
 interface StudioState {
   inputFolder: string | null;
@@ -42,6 +62,7 @@ interface StudioState {
   chaptersFromDirs: boolean;
   cover: boolean;
   renderEngine: RenderEngine;
+  isDryRun: boolean;
   setInputFolder: (folder: string | null) => void;
   setOutputFolder: (folder: string | null) => void;
   patch: (state: Partial<Omit<StudioState, "setInputFolder" | "setOutputFolder" | "patch">>) => void;
@@ -61,6 +82,7 @@ const useStudio = create<StudioState>((set) => ({
   chaptersFromDirs: true,
   cover: true,
   renderEngine: "auto",
+  isDryRun: false,
   setInputFolder: (folder) => set({ inputFolder: folder }),
   setOutputFolder: (folder) => set({ outputFolder: folder }),
   patch: (state) => set(state),
@@ -70,13 +92,31 @@ export function App() {
   const state = useStudio();
   const [result, setResult] = useState<GenerateVideoResult | null>(null);
   const [isRendering, setIsRendering] = useState(false);
+  const [isCancelling, setIsCancelling] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [progress, setProgress] = useState<number | null>(null);
   const [phase, setPhase] = useState("就绪");
   const [toast, setToast] = useState<string | null>(null);
   const [highlightOutput, setHighlightOutput] = useState(false);
   const logEndRef = useRef<HTMLDivElement>(null);
+  const activeJobRef = useRef<string | null>(null);
   const [activeNav, setActiveNav] = useState("workspace");
+
+  const [hasPreChecked, setHasPreChecked] = useState(false);
+
+  const resetTask = () => {
+    setResult(null);
+    setLogs([]);
+    setProgress(null);
+    setPhase("就绪");
+    setHighlightOutput(false);
+    setHasPreChecked(false);
+    state.patch({ isDryRun: false });
+  };
+
+  useEffect(() => {
+    resetTask();
+  }, [state.inputFolder]);
 
   function scrollToSection(id: string) {
     setActiveNav(id);
@@ -86,6 +126,11 @@ export function App() {
   useEffect(() => {
     const unlisten = listen<string>("video-progress", (event) => {
       const raw = event.payload;
+      const structured = parseVideoEvent(raw);
+      if (structured) {
+        applyStructuredEvent(structured, setPhase, setProgress, setLogs);
+        return;
+      }
 
       const prog = parseProgress(raw);
       if (prog) setProgress(Math.round((prog.current / prog.total) * 90));
@@ -139,8 +184,13 @@ export function App() {
 
   const commandPreview = useMemo(() => buildCommandPreview(payload), [payload]);
 
-  async function onGenerate() {
-    if (!state.inputFolder || !state.outputFolder) {
+  async function onGenerate(dryRun: boolean = false) {
+    if (isRendering) {
+      await onCancel();
+      return;
+    }
+
+    if (!state.inputFolder || (!dryRun && !state.outputFolder)) {
       const warning = !state.inputFolder ? "请先选择素材目录。" : "请先选择输出目录。";
       setResult({
         ok: false,
@@ -148,20 +198,48 @@ export function App() {
         commandPreview,
       });
       setToast(warning);
-      setHighlightOutput(Boolean(state.inputFolder && !state.outputFolder));
+      setHighlightOutput(Boolean(state.inputFolder && !state.outputFolder && !dryRun));
       return;
     }
 
+    const jobId = crypto.randomUUID();
+    activeJobRef.current = jobId;
     setIsRendering(true);
+    setIsCancelling(false);
     setResult(null);
     setToast(null);
     setHighlightOutput(false);
     setLogs([]);
     setProgress(null);
     setPhase("就绪");
-    const response = await generateVideo(payload);
+    state.patch({ isDryRun: dryRun });
+    const response = await generateVideo({ ...payload, jobId, dryRun });
+    if (activeJobRef.current !== jobId) return;
+    
+    if (response.ok && dryRun) {
+      setProgress(100);
+      setPhase("预检完成");
+      setHasPreChecked(true);
+    }
+    
     setResult(response);
     setIsRendering(false);
+    setIsCancelling(false);
+    activeJobRef.current = null;
+  }
+
+  async function onCancel() {
+    const jobId = activeJobRef.current;
+    if (!jobId || isCancelling) return;
+
+    setIsCancelling(true);
+    setPhase("Stopping");
+    setLogs((prev) => [...prev, "Stopping current render job..."]);
+    const response = await cancelVideo(jobId);
+    if (!response.ok) {
+      setToast(response.message);
+      setIsCancelling(false);
+    }
   }
 
   return (
@@ -204,10 +282,26 @@ export function App() {
             <p className="eyebrow">GUI MVP</p>
             <h1>Turn Moments into Motion.</h1>
           </div>
-          <button className="primary-action" disabled={isRendering || !state.inputFolder} onClick={onGenerate}>
-            {isRendering ? <Wand2 className="spin" size={18} /> : <Play size={18} />}
-            {isRendering ? "生成中" : "生成视频"}
-          </button>
+          <div className="topbar-actions">
+            {!isRendering && (
+              <button
+                className={`secondary-action${!hasPreChecked && state.inputFolder ? " pulse-guidance" : ""}`}
+                disabled={!state.inputFolder}
+                onClick={() => onGenerate(true)}
+              >
+                <ListChecks size={18} />
+                素材预检
+              </button>
+            )}
+            <button
+              className={`primary-action${isRendering ? " danger" : ""}`}
+              disabled={!isRendering && !state.inputFolder}
+              onClick={() => onGenerate(false)}
+            >
+              {isRendering ? (isCancelling ? <Wand2 className="spin" size={18} /> : <Square size={16} />) : <Play size={18} />}
+              {isRendering ? (isCancelling ? "正在停止" : "停止生成") : "生成视频"}
+            </button>
+          </div>
         </header>
 
         <div className="content-grid">
@@ -301,7 +395,7 @@ export function App() {
             
             {(isRendering || logs.length > 0) && (
               <>
-                {progress !== null && <ProgressBar percent={progress} phase={phase} />}
+                {progress !== null && <ProgressBar percent={progress} phase={phase} isDryRun={state.isDryRun} />}
                 <div className="log-viewer">
                   {logs.length === 0 ? <div className="log-placeholder">正在启动引擎...</div> : logs.map((log, i) => <div key={i}>{log}</div>)}
                   <div ref={logEndRef} />
@@ -419,12 +513,19 @@ function ResultCard({ result }: { result: GenerateVideoResult }) {
     <div className={`result-card ${result.ok ? "success" : "warning"}`}>
       <div className="result-card-header">
         {result.ok ? <CheckCircle2 size={20} /> : <TriangleAlert size={20} />}
-        <strong>{result.ok ? "生成完成" : "生成失败"}</strong>
+        <strong>{result.isDryRun ? (result.ok ? "预检完成" : "预检失败") : (result.ok ? "生成完成" : "生成失败")}</strong>
       </div>
-      <p className="result-card-message">{result.message}</p>
+      <p className="result-card-message">
+        {result.message}
+        {result.isDryRun && result.ok && (
+          <span style={{ display: 'block', marginTop: '4px', opacity: 0.8, fontSize: '0.9em' }}>
+            提示：素材状态良好，您可以点击右上角的“生成视频”开始正式合成。
+          </span>
+        )}
+      </p>
       {result.ok && result.outputPath && (
         <div className="result-card-actions">
-          <button className="result-open-btn" onClick={() => openInExplorer(result.outputPath!)}>
+          <button className="result-open-btn" onClick={() => openInExplorer(result.outputDir || result.outputPath!)}>
             <ExternalLink size={15} />
             打开输出目录
           </button>
@@ -467,6 +568,79 @@ function formatProgressLine(line: string): string | null {
   return trimmed;
 }
 
+function parseVideoEvent(line: string): VideoEvent | null {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return null;
+  try {
+    const parsed = JSON.parse(trimmed) as VideoEvent;
+    return parsed.type ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function applyStructuredEvent(
+  event: VideoEvent,
+  setPhase: React.Dispatch<React.SetStateAction<string>>,
+  setProgress: React.Dispatch<React.SetStateAction<number | null>>,
+  setLogs: React.Dispatch<React.SetStateAction<string[]>>,
+) {
+  if (typeof event.percent === "number") {
+    setProgress(Math.max(0, Math.min(100, event.percent)));
+  }
+
+  if (event.phase) {
+    setPhase(phaseLabel(event.phase));
+  }
+
+  const line = formatStructuredEvent(event);
+  if (!line) return;
+
+  setLogs((prev) => {
+    const next = [...prev, line];
+    if (next.length > 100) return next.slice(next.length - 100);
+    return next;
+  });
+}
+
+function formatStructuredEvent(event: VideoEvent): string | null {
+  if (event.type === "media") {
+    return formatMediaItem(event.item_kind || "media", event.rel_path || "", event.display_name || "");
+  }
+  if (event.type === "progress") {
+    const prefix = event.current && event.total ? `[${event.current}/${event.total}] ` : "";
+    return `${prefix}${event.message || phaseLabel(event.phase || "segment")}`;
+  }
+  if (event.type === "phase") {
+    return event.message || phaseLabel(event.phase || "");
+  }
+  if (event.type === "artifact") {
+    return `${event.message || `${event.artifact || "Artifact"} generated`}${event.path ? `: ${event.path}` : ""}`;
+  }
+  if (event.type === "result") {
+    return event.output_path ? `Video generated: ${event.output_path}` : event.message || "Render complete";
+  }
+  if (event.type === "error") {
+    return `Error: ${event.message || "Unknown error"}`;
+  }
+  if (event.type === "log") {
+    return event.message || null;
+  }
+  return event.message || null;
+}
+
+function phaseLabel(phase: string): string {
+  return {
+    scan: "扫描素材",
+    segment: "生成片段",
+    render: "合成视频",
+    cover: "生成封面",
+    report: "生成报告",
+    complete: "完成",
+    fatal: "失败",
+  }[phase] || phase;
+}
+
 function formatMediaItem(kind: string, relPath: string, displayName: string): string {
   if (kind === "title") return `片头标题卡：${displayName}`;
   if (kind === "chapter") return `章节卡：${displayName}`;
@@ -500,7 +674,7 @@ function detectPhase(line: string): string | null {
   return null;
 }
 
-function ProgressBar({ percent, phase }: { percent: number; phase: string }) {
+function ProgressBar({ percent, phase, isDryRun }: { percent: number; phase: string; isDryRun?: boolean }) {
   return (
     <div className="progress-container">
       <div className="progress-header">
@@ -509,7 +683,7 @@ function ProgressBar({ percent, phase }: { percent: number; phase: string }) {
       </div>
       <div className="progress-track">
         <div
-          className={`progress-fill${percent >= 100 ? " complete" : ""}`}
+          className={`progress-fill${percent >= 100 ? (isDryRun ? " checked" : " complete") : ""}`}
           style={{ width: `${percent}%` }}
         />
       </div>
