@@ -33,6 +33,7 @@
     "targets": "all",
     "icon": [],
     "resources": {
+      "../video_engine_v5.py": "video_engine_v5.py",
       "../make_bilibili_video_v3.py": "make_bilibili_video_v3.py"
     }
   }

@@ -5,10 +5,6 @@ export type Quality = "draft" | "standard" | "high";
 export type PythonQuality = "normal" | "high" | "ultra";
 export type RenderEngine = "auto" | "ffmpeg_concat" | "moviepy_crossfade";
 
-// =========================
-// V5 common type definitions
-// =========================
-
 export type V5DocumentType = "media_library" | "story_blueprint" | "render_plan";
 export type V5DirectoryType = "city" | "date" | "scenic_spot" | "chapter" | "unknown";
 export type V5AssetType = "image" | "video";
@@ -20,13 +16,10 @@ export type V5RenderSegmentType = "title" | "chapter" | "video" | "image" | "end
 
 export const V5_SCHEMA_VERSION = "5.0";
 
-// =========================
-// V5 data structure definitions
-// =========================
-
 export interface V5MediaLibrary {
   schema_version: string;
   document_type: "media_library";
+  engine_version?: string;
   project: {
     source_root: string;
     scan_time: string;
@@ -55,10 +48,7 @@ export interface V5DirectoryNode {
   display_title: string;
   asset_count: number;
   children: string[];
-
-  /** True when detected by scan/plan automatically. */
   auto_detected?: boolean;
-  /** True after the user manually edits the detected type/title/order in GUI. */
   user_overridden?: boolean;
 }
 
@@ -67,23 +57,21 @@ export interface V5Asset {
   type: V5AssetType;
   relative_path: string;
   absolute_path: string;
-
-  /** Preferred thumbnail field returned by Python V5 scan. */
   thumbnail_path?: string | null;
-  /** Backward-compatible alias for older event/material payloads. */
   thumbnail?: string | null;
-
   file: {
     name: string;
     extension: string;
     size_bytes: number;
     modified_time: string;
+    content_hash?: string | null;
   };
   media: {
     width: number | null;
     height: number | null;
     orientation: V5Orientation | null;
     shooting_date: string | null;
+    duration_seconds?: number | null;
     duration?: number | null;
   };
   classification: {
@@ -91,11 +79,10 @@ export interface V5Asset {
     city: string | null;
     scenic_spot: string | null;
     date?: string | null;
+    detected_role?: string;
+    confidence?: number;
   };
-  status?: {
-    state?: "ready" | "skipped" | "error";
-    message?: string | null;
-  };
+  status?: string | { state?: "ready" | "supported" | "skipped" | "error"; message?: string | null };
   cache?: V5CacheEntry | null;
 }
 
@@ -122,7 +109,6 @@ export interface V5StorySection {
   source_node_id: string | null;
   asset_refs: V5AssetRef[];
   children: V5StorySection[];
-
   auto_detected?: boolean;
   user_overridden?: boolean;
   order_index?: number;
@@ -196,6 +182,17 @@ export interface V5CacheEntry {
   generated_at?: string;
 }
 
+export interface V5RenderParams {
+  title: string;
+  title_subtitle: string;
+  watermark: string;
+  aspect_ratio: AspectRatio;
+  quality: Quality;
+  engine?: RenderEngine;
+  cover?: boolean;
+  fps?: number;
+}
+
 export interface GenerateVideoPayload {
   jobId?: string;
   inputPaths: string[];
@@ -223,20 +220,6 @@ export interface GenerateVideoResult {
   cancelled?: boolean;
   isDryRun?: boolean;
 }
-
-export interface RenderV5Params {
-  title?: string;
-  title_subtitle?: string;
-  watermark?: string;
-  aspect_ratio?: AspectRatio;
-  quality?: Quality;
-  engine?: RenderEngine;
-  fps?: number;
-}
-
-// =========================
-// Legacy V3 engine calls
-// =========================
 
 export async function generateVideo(payload: GenerateVideoPayload): Promise<GenerateVideoResult> {
   try {
@@ -270,46 +253,37 @@ export async function openInExplorer(path: string): Promise<void> {
   }
 }
 
-// =========================
-// V5 engine calls
-// =========================
-
-/** Scan a folder and return Media Library JSON. */
 export async function scanV5(inputFolder: string): Promise<V5MediaLibrary> {
   const jsonStr = await invoke<string>("scan_v5", { inputFolder });
   return parseV5Json<V5MediaLibrary>(jsonStr, "media_library");
 }
 
-/** Generate a Story Blueprint from a Media Library JSON file. */
 export async function planV5(libraryPath: string): Promise<V5StoryBlueprint> {
   const jsonStr = await invoke<string>("plan_v5", { libraryPath });
   return parseV5Json<V5StoryBlueprint>(jsonStr, "story_blueprint");
 }
 
-/** Save edited Story Blueprint JSON to disk. */
 export async function saveBlueprintV5(path: string, content: string): Promise<void> {
   await invoke("save_blueprint_v5", { path, content });
 }
 
-/** Compile Story Blueprint + Media Library into Render Plan. */
 export async function compileV5(blueprintPath: string, libraryPath: string): Promise<V5RenderPlan> {
   const jsonStr = await invoke<string>("compile_v5", { blueprintPath, libraryPath });
   return parseV5Json<V5RenderPlan>(jsonStr, "render_plan");
 }
 
-/** Execute final V5 render. */
-export async function renderV5(planPath: string, outputPath: string, params: RenderV5Params): Promise<void> {
+export async function renderV5(planPath: string, outputPath: string, params: V5RenderParams): Promise<void> {
   await invoke("render_v5", {
     planPath,
     outputPath,
-    paramsJson: JSON.stringify(params),
+    paramsJson: JSON.stringify({
+      ...params,
+      python_quality: toPythonQuality(params.quality),
+    }),
   });
 }
 
-// =========================
-// Command preview helpers
-// =========================
-
+/** Legacy V3 command preview. Used only when running the old generate_video path. */
 export function buildCommandPreview(payload: GenerateVideoPayload): string {
   const input = payload.inputPaths[0] || "<素材文件夹>";
   const outputDir = payload.outputDir || "<输出目录>";
@@ -345,6 +319,27 @@ export function buildCommandPreview(payload: GenerateVideoPayload): string {
   return args.join(" ");
 }
 
+export function buildV5RenderCommandPreview(args: {
+  inputFolder: string;
+  outputFolder: string;
+  outputFileName: string;
+  params: V5RenderParams;
+}): string {
+  const planPath = joinPath(args.inputFolder, "render_plan.json");
+  const outputPath = joinPath(args.outputFolder, args.outputFileName);
+  return [
+    "python",
+    "video_engine_v5.py",
+    "render",
+    "--plan",
+    quote(planPath),
+    "--output",
+    quote(outputPath),
+    "--params",
+    quote(JSON.stringify({ ...args.params, python_quality: toPythonQuality(args.params.quality) })),
+  ].join(" ");
+}
+
 export function toPythonQuality(quality: Quality): PythonQuality {
   const mapping: Record<Quality, PythonQuality> = {
     draft: "normal",
@@ -354,8 +349,9 @@ export function toPythonQuality(quality: Quality): PythonQuality {
   return mapping[quality];
 }
 
-export function toPythonQualityLabel(quality: Quality): string {
-  return toPythonQuality(quality);
+function joinPath(base: string, name: string): string {
+  const separator = base.includes("\\") ? "\\" : "/";
+  return `${base.replace(/[\\/]+$/, "")}${separator}${name}`;
 }
 
 function quote(value: string): string {
