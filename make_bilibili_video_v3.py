@@ -119,6 +119,9 @@ class MediaItem:
     cached_segment: Optional[str] = None
     status: str = "pending"
     error: Optional[str] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
+    thumbnail: Optional[str] = None
 
 
 def natural_sort_key(name: str):
@@ -987,7 +990,37 @@ def run(args):
 
     print("素材预览:")
     for item in structured_items:
-        emit_event("media", item_kind=item.kind, rel_path=item.rel_path, display_name=item.display_name)
+        # Fetch metadata for dry-run gallery
+        if args.dry_run and item.path:
+            try:
+                if item.kind == "image":
+                    with Image.open(item.path) as img:
+                        item.width, item.height = img.size
+                        item.thumbnail = item.path # Direct path for images
+                elif item.kind == "video":
+                    clip = VideoFileClip(item.path)
+                    item.width, item.height = clip.size
+                    item.duration = clip.duration
+                    clip.close()
+                    # Generate/Fetch thumbnail
+                    item.thumbnail = extract_video_frame_cached(item, "first", cache_dir)
+            except Exception as e:
+                item.error = str(e)
+                item.status = "error"
+
+        emit_event(
+            "media",
+            item_kind=item.kind,
+            rel_path=item.rel_path,
+            display_name=item.display_name,
+            width=item.width,
+            height=item.height,
+            duration=item.duration,
+            thumbnail=item.thumbnail,
+            error=item.error,
+            mtime=item.source_mtime,
+            chapter=item.chapter
+        )
 
     if args.dry_run:
         emit_phase("complete", "素材预检完成", percent=100)

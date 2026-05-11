@@ -14,11 +14,21 @@ import {
   X,
   Wand2,
   ListChecks,
+  Eye,
+  PlayCircle,
+  FileWarning,
+  Calendar,
+  Folder,
+  Layers,
+  LayoutGrid,
+  MapPin,
+  Palmtree,
 } from "lucide-react";
 import { useMemo, useState, useEffect, useRef } from "react";
 import { create } from "zustand";
 import { open } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import {
   AspectRatio,
   GenerateVideoPayload,
@@ -46,6 +56,13 @@ interface VideoEvent {
   item_kind?: string;
   rel_path?: string;
   display_name?: string;
+  width?: number;
+  height?: number;
+  duration?: number;
+  thumbnail?: string;
+  error?: string;
+  chapter?: string;
+  mtime?: number;
 }
 
 interface StudioState {
@@ -98,6 +115,10 @@ export function App() {
   const [phase, setPhase] = useState("就绪");
   const [toast, setToast] = useState<string | null>(null);
   const [highlightOutput, setHighlightOutput] = useState(false);
+  const [materials, setMaterials] = useState<VideoEvent[]>([]);
+  const [selectedMaterial, setSelectedMaterial] = useState<VideoEvent | null>(null);
+  const [showGalleryOverlay, setShowGalleryOverlay] = useState(false);
+  const [galleryView, setGalleryView] = useState<"chapter" | "type" | "time">("chapter");
   const logEndRef = useRef<HTMLDivElement>(null);
   const activeJobRef = useRef<string | null>(null);
   const [activeNav, setActiveNav] = useState("workspace");
@@ -111,6 +132,9 @@ export function App() {
     setPhase("就绪");
     setHighlightOutput(false);
     setHasPreChecked(false);
+    setMaterials([]);
+    setSelectedMaterial(null);
+    setShowGalleryOverlay(false);
     state.patch({ isDryRun: false });
   };
 
@@ -128,7 +152,7 @@ export function App() {
       const raw = event.payload;
       const structured = parseVideoEvent(raw);
       if (structured) {
-        applyStructuredEvent(structured, setPhase, setProgress, setLogs);
+        applyStructuredEvent(structured, setPhase, setProgress, setLogs, setMaterials);
         return;
       }
 
@@ -243,7 +267,8 @@ export function App() {
   }
 
   return (
-    <main className="app-shell">
+    <>
+      <main className="app-shell">
       <aside className="sidebar">
         <div className="brand">
           <div className="brand-mark">
@@ -395,11 +420,18 @@ export function App() {
             
             {(isRendering || logs.length > 0) && (
               <>
-                {progress !== null && <ProgressBar percent={progress} phase={phase} isDryRun={state.isDryRun} />}
+                {progress !== null && <ProgressBar isDryRun={state.isDryRun} percent={progress} phase={phase} />}
                 <div className="log-viewer">
                   {logs.length === 0 ? <div className="log-placeholder">正在启动引擎...</div> : logs.map((log, i) => <div key={i}>{log}</div>)}
                   <div ref={logEndRef} />
                 </div>
+                {materials.length > 0 && !showGalleryOverlay && (
+                  <div style={{ marginTop: '16px', textAlign: 'center' }}>
+                     <button className="secondary-action" onClick={() => setShowGalleryOverlay(true)}>
+                       <Eye size={16} /> 查看 {materials.length} 个扫描到的素材
+                     </button>
+                  </div>
+                )}
               </>
             )}
 
@@ -423,6 +455,59 @@ export function App() {
         </div>
       </section>
     </main>
+    {showGalleryOverlay && (
+      <div className="gallery-overlay">
+        <div className="gallery-overlay-header">
+          <div className="gallery-title-area">
+             <SectionTitle icon={<LayoutGrid size={22} />} title="素材资产库" />
+             <p className="gallery-subtitle">共有 {materials.length} 个扫描到的媒体文件</p>
+          </div>
+          
+          <div className="gallery-nav-pills">
+             <button 
+               className={galleryView === 'chapter' ? 'active' : ''} 
+               onClick={() => setGalleryView('chapter')}
+             >
+               {(() => {
+                 const chapters = Array.from(new Set(materials.map(m => m.chapter).filter(Boolean))) as string[];
+                 const isDate = chapters.some(c => /day|天|日|\d{4}|\d{1,2}[-.]\d{1,2}/i.test(c));
+                 if (isDate) return <><Calendar size={14} /> 按日期</>;
+                 const isCity = chapters.some(c => /市|镇|区|州|岛/i.test(c));
+                 if (isCity) return <><MapPin size={14} /> 按城市</>;
+                 const isSpot = chapters.some(c => /寺|校|山|园|桥|塔|宫|馆/i.test(c));
+                 if (isSpot) return <><Palmtree size={14} /> 按景点</>;
+                 return <><Folder size={14} /> 按目录</>;
+               })()}
+             </button>
+             <button 
+               className={galleryView === 'type' ? 'active' : ''} 
+               onClick={() => setGalleryView('type')}
+             >
+               <Layers size={14} /> 按类型
+             </button>
+             <button 
+               className={galleryView === 'time' ? 'active' : ''} 
+               onClick={() => setGalleryView('time')}
+             >
+               <Calendar size={14} /> 按拍摄时间
+             </button>
+          </div>
+
+
+          <button className="close-overlay-btn" onClick={() => setShowGalleryOverlay(false)}>
+            <X size={20} /> 退出管理
+          </button>
+        </div>
+        <div className="gallery-overlay-content">
+          <MaterialGallery materials={materials} onSelect={setSelectedMaterial} viewMode={galleryView} />
+        </div>
+      </div>
+    )}
+
+    {selectedMaterial && (
+      <PreviewModal material={selectedMaterial} onClose={() => setSelectedMaterial(null)} />
+    )}
+    </>
   );
 }
 
@@ -584,7 +669,12 @@ function applyStructuredEvent(
   setPhase: React.Dispatch<React.SetStateAction<string>>,
   setProgress: React.Dispatch<React.SetStateAction<number | null>>,
   setLogs: React.Dispatch<React.SetStateAction<string[]>>,
+  setMaterials: React.Dispatch<React.SetStateAction<VideoEvent[]>>,
 ) {
+  if (event.type === "media") {
+    setMaterials((prev) => [...prev, event]);
+  }
+
   if (typeof event.percent === "number") {
     setProgress(Math.max(0, Math.min(100, event.percent)));
   }
@@ -737,6 +827,128 @@ function Toggle({ checked, label, onChange }: { checked: boolean; label: string;
       <span />
       {label}
     </label>
+  );
+}
+function MaterialGallery({ materials, onSelect, viewMode }: { 
+  materials: VideoEvent[]; 
+  onSelect: (m: VideoEvent) => void;
+  viewMode: "chapter" | "type" | "time";
+}) {
+  // Group materials based on viewMode
+  const groups = useMemo(() => {
+    const res: Record<string, VideoEvent[]> = {};
+    
+    materials.forEach((m) => {
+      let key = "其他";
+      if (viewMode === "chapter") {
+        key = m.chapter || "默认章节";
+      } else if (viewMode === "type") {
+        key = m.item_kind === "video" ? "视频文件" : m.item_kind === "image" ? "图片素材" : "其他";
+      } else if (viewMode === "time") {
+        if (m.mtime) {
+          const date = new Date(m.mtime * 1000);
+          key = `${date.getFullYear()}/${date.getMonth() + 1}/${date.getDate()}`;
+        } else {
+          key = "未知时间";
+        }
+      }
+      
+      if (!res[key]) res[key] = [];
+      res[key].push(m);
+    });
+
+    // Sort items within groups by filename
+    Object.values(res).forEach(list => {
+      list.sort((a, b) => (a.display_name || "").localeCompare(b.display_name || ""));
+    });
+
+    return res;
+  }, [materials, viewMode]);
+
+  return (
+    <div className="material-gallery">
+      {Object.entries(groups).map(([groupName, items]) => (
+        <div className="gallery-section" key={groupName}>
+          <div className="gallery-section-header">
+            <div className="section-title">
+               <span className="dot"></span>
+               {groupName}
+            </div>
+            <span className="count">{items.length} 个项目</span>
+          </div>
+          <div className="gallery-grid">
+            {items.map((item, i) => (
+              <div 
+                className={`material-card ${item.error ? 'has-error' : ''}`} 
+                key={i}
+                onClick={() => onSelect(item)}
+              >
+                <div className="thumbnail-container">
+                  {item.thumbnail ? (
+                    <img src={convertFileSrc(item.thumbnail)} alt={item.display_name} loading="lazy" />
+                  ) : (
+                    <div className="thumbnail-placeholder">
+                      <FileWarning size={24} />
+                    </div>
+                  )}
+                  {item.item_kind === "video" && (
+                    <div className="video-overlay">
+                      <div className="play-icon-circle">
+                         <PlayCircle size={28} />
+                      </div>
+                      {item.duration && <span className="duration-tag">{Math.round(item.duration)}s</span>}
+                    </div>
+                  )}
+                  {item.error && (
+                    <div className="error-indicator" title={item.error}>
+                      <FileWarning size={14} />
+                    </div>
+                  )}
+                </div>
+                <div className="material-info">
+                  <div className="name-row">
+                     <span className="material-name">{item.display_name}</span>
+                  </div>
+                  <div className="meta-row">
+                    {item.width && item.height && (
+                      <span className="res-tag">{item.width}x{item.height}</span>
+                    )}
+                    {item.item_kind === "image" && <span className="type-tag">IMG</span>}
+                    {item.item_kind === "video" && <span className="type-tag">MOV</span>}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function PreviewModal({ material, onClose }: { material: VideoEvent; onClose: () => void }) {
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+        <button className="modal-close" onClick={onClose}><X size={24} /></button>
+        <div className="preview-container">
+          {material.item_kind === "video" ? (
+            <video src={convertFileSrc(material.path!)} controls autoPlay />
+          ) : (
+            <img src={convertFileSrc(material.path!)} alt={material.display_name} />
+          )}
+        </div>
+        <div className="preview-footer">
+          <h3>{material.display_name}</h3>
+          <p>{material.path}</p>
+          <div className="preview-stats">
+            {material.width && <span>分辨率: {material.width}x{material.height}</span>}
+            {material.duration && <span>时长: {material.duration.toFixed(1)}s</span>}
+            {material.error && <span className="error-text">错误: {material.error}</span>}
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
 

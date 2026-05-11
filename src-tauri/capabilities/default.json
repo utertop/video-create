@@ -3,5 +3,10 @@
   "identifier": "default",
   "description": "Default desktop permissions",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:default"]
+  "permissions": [
+    "core:default",
+    "dialog:default",
+    "core:event:default",
+    "core:webview:default"
+  ]
 }
