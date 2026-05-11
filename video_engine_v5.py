@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ImageDraw, ImageFont
 # 修复新版 Pillow 移除 ANTIALIAS 导致的 MoviePy 崩溃
 if not hasattr(Image, 'ANTIALIAS'):
     Image.ANTIALIAS = Image.LANCZOS
@@ -563,9 +563,10 @@ class Renderer:
             # 添加水印 (如果需要)
             if self.params.get("watermark"):
                 try:
-                    watermark_txt = TextClip(self.params["watermark"], fontsize=30, color='white', opacity=0.5)
-                    watermark_txt = watermark_txt.set_duration(final_video.duration).set_position(("right", "bottom"))
-                    final_video = CompositeVideoClip([final_video, watermark_txt])
+                    # 使用自定义的文字渲染逻辑代替 TextClip
+                    watermark_img = self._create_watermark_image(self.params["watermark"])
+                    watermark_clip = ImageClip(watermark_img).set_duration(final_video.duration).set_position(("right", "bottom"))
+                    final_video = CompositeVideoClip([final_video, watermark_clip])
                 except Exception as e:
                     emit_event("log", message=f"Warning: Failed to add watermark: {str(e)}")
 
@@ -618,23 +619,34 @@ class Renderer:
         return None
 
     def _create_text_card(self, title, subtitle, duration, is_main=False):
-        bg = ColorClip(size=self.target_size, color=(20, 40, 32)).set_duration(duration)
+        # 创建背景
+        bg_color = (20, 30, 25) # 深色背景
+        img = Image.new("RGB", self.target_size, bg_color)
+        draw = ImageDraw.Draw(img)
         
+        # 尝试加载字体 (Windows 常用字体)
         try:
-            t_clip = TextClip(title or "", fontsize=70 if is_main else 50, color='white', font="Arial-Bold")
-            t_clip = t_clip.set_duration(duration).set_position("center")
-            
-            elements = [bg, t_clip]
-            
-            if subtitle:
-                s_clip = TextClip(subtitle, fontsize=30, color='#4ade80', font="Arial")
-                s_clip = s_clip.set_duration(duration).set_position(("center", self.target_size[1]//2 + 60))
-                elements.append(s_clip)
-                
-            return CompositeVideoClip(elements)
-        except Exception as e:
-            emit_event("log", message=f"Warning: TextClip failed (ImageMagick missing?): {str(e)}")
-            return bg
+            # 优先使用微软雅黑，如果没有则使用系统默认
+            font_title = ImageFont.truetype("msyh.ttc", 80 if is_main else 60)
+            font_sub = ImageFont.truetype("msyh.ttc", 35)
+        except:
+            font_title = ImageFont.load_default()
+            font_sub = ImageFont.load_default()
+
+        # 绘制主标题 (居中)
+        w, h = self.target_size
+        tw, th = draw.textsize(title or "", font=font_title) if hasattr(draw, 'textsize') else draw.textbbox((0,0), title or "", font=font_title)[2:]
+        draw.text(((w - tw) // 2, (h - th) // 2 - 40), title or "", font=font_title, fill=(255, 255, 255))
+        
+        # 绘制副标题 (如果存在)
+        if subtitle:
+            sw, sh = draw.textsize(subtitle, font=font_sub) if hasattr(draw, 'textsize') else draw.textbbox((0,0), subtitle, font=font_sub)[2:]
+            draw.text(((w - sw) // 2, (h - sh) // 2 + 60), subtitle, font=font_sub, fill=(16, 185, 129))
+
+        # 转换为 MoviePy 剪辑
+        # 需要把 PIL 图片转为 numpy array
+        frame = np.array(img)
+        return ImageClip(frame).set_duration(duration)
 
     def _process_visual_clip(self, clip):
         # 统一缩放并裁剪到目标画幅
@@ -649,6 +661,25 @@ class Renderer:
         # 再从中间裁剪
         clip = clip.crop(x_center=new_w/2, y_center=new_h/2, width=target_w, height=target_h)
         return clip
+
+    def _create_watermark_image(self, text):
+        # 创建一个小透明背景的图片作为水印
+        font_size = 30
+        try:
+            font = ImageFont.truetype("msyh.ttc", font_size)
+        except:
+            font = ImageFont.load_default()
+            
+        # 计算文字大小
+        temp_draw = ImageDraw.Draw(Image.new("RGBA", (1,1)))
+        tw, th = temp_draw.textsize(text, font=font) if hasattr(temp_draw, 'textsize') else temp_draw.textbbox((0,0), text, font=font)[2:]
+        
+        # 创建带透明度的水印图
+        img = Image.new("RGBA", (tw + 20, th + 20), (0,0,0,0))
+        draw = ImageDraw.Draw(img)
+        draw.text((10, 10), text, font=font, fill=(255, 255, 255, 128)) # 半透明白色
+        
+        return np.array(img)
 
 # =========================
 # CLI 主程序

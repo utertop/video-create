@@ -1,22 +1,27 @@
 import { invoke } from "@tauri-apps/api/core";
 
-export type AspectRatio = "16:9" | "9:16" | "1:1";
+export type AspectRatio = "16:9" | "9:16";
 export type Quality = "draft" | "standard" | "high";
 export type PythonQuality = "normal" | "high" | "ultra";
 export type RenderEngine = "auto" | "ffmpeg_concat" | "moviepy_crossfade";
+
+// =========================
+// V5 common type definitions
+// =========================
+
 export type V5DocumentType = "media_library" | "story_blueprint" | "render_plan";
 export type V5DirectoryType = "city" | "date" | "scenic_spot" | "chapter" | "unknown";
 export type V5AssetType = "image" | "video";
-export type V5Orientation = "landscape" | "portrait" | "square" | null;
-export type V5SectionType = "title" | "city" | "date" | "scenic_spot" | "chapter" | "end" | string;
+export type V5Orientation = "landscape" | "portrait" | "square";
+export type V5StorySectionType = "city" | "date" | "scenic_spot" | "chapter" | "opening" | "ending" | string;
 export type V5AssetRole = "opening" | "normal" | "highlight";
 export type V5DurationPolicy = "auto" | "custom";
-export type V5SegmentType = "title" | "chapter" | "video" | "image" | "end";
+export type V5RenderSegmentType = "title" | "chapter" | "video" | "image" | "end";
 
 export const V5_SCHEMA_VERSION = "5.0";
 
 // =========================
-// V5 数据结构定义
+// V5 data structure definitions
 // =========================
 
 export interface V5MediaLibrary {
@@ -25,8 +30,7 @@ export interface V5MediaLibrary {
   project: {
     source_root: string;
     scan_time: string;
-    recursive?: boolean;
-    strategy?: string;
+    project_title?: string | null;
   };
   directory_nodes: V5DirectoryNode[];
   assets: V5Asset[];
@@ -52,8 +56,9 @@ export interface V5DirectoryNode {
   asset_count: number;
   children: string[];
 
-  /** 自动识别结果是否被用户覆盖。用于 GUI 蓝图审核页。 */
+  /** True when detected by scan/plan automatically. */
   auto_detected?: boolean;
+  /** True after the user manually edits the detected type/title/order in GUI. */
   user_overridden?: boolean;
 }
 
@@ -63,13 +68,9 @@ export interface V5Asset {
   relative_path: string;
   absolute_path: string;
 
-  /**
-   * V5 扫描阶段生成的缩略图路径。
-   * App.tsx 的故事蓝图审核页会优先使用该字段。
-   */
+  /** Preferred thumbnail field returned by Python V5 scan. */
   thumbnail_path?: string | null;
-
-  /** 兼容旧事件/旧扫描器可能返回 thumbnail 的情况。 */
+  /** Backward-compatible alias for older event/material payloads. */
   thumbnail?: string | null;
 
   file: {
@@ -77,31 +78,25 @@ export interface V5Asset {
     extension: string;
     size_bytes: number;
     modified_time: string;
-    hash?: string | null;
   };
   media: {
     width: number | null;
     height: number | null;
-    orientation: V5Orientation;
+    orientation: V5Orientation | null;
     shooting_date: string | null;
     duration?: number | null;
   };
   classification: {
     directory_node_id: string;
     city: string | null;
-    date?: string | null;
     scenic_spot: string | null;
-  };
-  analysis?: {
-    brightness?: number | null;
-    complexity?: number | null;
-    quality_score?: number | null;
+    date?: string | null;
   };
   status?: {
-    usable?: boolean;
-    error?: string | null;
-    ignored?: boolean;
+    state?: "ready" | "skipped" | "error";
+    message?: string | null;
   };
+  cache?: V5CacheEntry | null;
 }
 
 export interface V5StoryBlueprint {
@@ -114,14 +109,13 @@ export interface V5StoryBlueprint {
   metadata?: {
     created_at?: string;
     updated_at?: string;
-    source_library?: string;
-    user_overridden?: boolean;
+    source_library_path?: string;
   };
 }
 
 export interface V5StorySection {
   section_id: string;
-  section_type: V5SectionType;
+  section_type: V5StorySectionType;
   title: string;
   subtitle: string | null;
   enabled: boolean;
@@ -131,7 +125,8 @@ export interface V5StorySection {
 
   auto_detected?: boolean;
   user_overridden?: boolean;
-  rhythm?: "slow" | "standard" | "fast" | string;
+  order_index?: number;
+  rhythm?: "slow" | "standard" | "fast";
 }
 
 export interface V5AssetRef {
@@ -141,6 +136,7 @@ export interface V5AssetRef {
   duration_policy: V5DurationPolicy;
   custom_duration: number | null;
   keep_audio: boolean;
+  order_index?: number;
   user_overridden?: boolean;
 }
 
@@ -152,41 +148,52 @@ export interface V5RenderPlan {
   segments: V5RenderSegment[];
   render_settings?: V5RenderSettings;
   cache_policy?: V5CachePolicy;
+  metadata?: {
+    generated_at?: string;
+    source_blueprint_path?: string;
+    source_library_path?: string;
+  };
 }
 
 export interface V5RenderSegment {
   segment_id: string;
-  type: V5SegmentType;
+  type: V5RenderSegmentType;
   source_path: string | null;
   duration: number;
   text: string | null;
   subtitle: string | null;
   start_time: number;
   end_time: number;
-  transition?: "none" | "crossfade" | string;
-  background?: "blur" | "black" | "contain" | string;
+  section_id?: string | null;
+  asset_id?: string | null;
+  transition?: "none" | "crossfade";
+  background?: "blur" | "black" | "solid";
   keep_audio?: boolean;
   cache_key?: string | null;
 }
 
 export interface V5RenderSettings {
-  aspect_ratio?: AspectRatio;
-  quality?: Quality | PythonQuality;
-  watermark?: string;
+  aspect_ratio: AspectRatio;
+  quality: Quality;
+  python_quality?: PythonQuality;
   fps?: number;
+  watermark?: string;
   engine?: RenderEngine;
+  cover?: boolean;
 }
 
 export interface V5CachePolicy {
   enabled: boolean;
   cache_root?: string;
-  invalidation?: {
-    file_path?: boolean;
-    file_size?: boolean;
-    modified_time?: boolean;
-    render_params?: boolean;
-    engine_version?: boolean;
-  };
+  invalidation_keys: Array<"file_path" | "file_size" | "mtime" | "render_params" | "engine_version" | string>;
+}
+
+export interface V5CacheEntry {
+  cache_key: string;
+  fixed_image_path?: string | null;
+  thumbnail_path?: string | null;
+  segment_path?: string | null;
+  generated_at?: string;
 }
 
 export interface GenerateVideoPayload {
@@ -222,38 +229,14 @@ export interface RenderV5Params {
   title_subtitle?: string;
   watermark?: string;
   aspect_ratio?: AspectRatio;
-  quality?: Quality | PythonQuality;
-  fps?: number;
+  quality?: Quality;
   engine?: RenderEngine;
+  fps?: number;
 }
 
-function normalizeErrorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  if (typeof error === "string") return error;
-  try {
-    return JSON.stringify(error);
-  } catch {
-    return String(error);
-  }
-}
-
-function parseJsonResult<T>(jsonStr: string, context: string): T {
-  try {
-    return JSON.parse(jsonStr) as T;
-  } catch (error) {
-    throw new Error(`${context} 返回了无效 JSON：${normalizeErrorMessage(error)}`);
-  }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-function assertDocumentType(value: unknown, expected: V5DocumentType, context: string): void {
-  if (!isRecord(value) || value.document_type !== expected) {
-    throw new Error(`${context} 返回类型异常，期望 document_type=${expected}`);
-  }
-}
+// =========================
+// Legacy V3 engine calls
+// =========================
 
 export async function generateVideo(payload: GenerateVideoPayload): Promise<GenerateVideoResult> {
   try {
@@ -261,7 +244,7 @@ export async function generateVideo(payload: GenerateVideoPayload): Promise<Gene
   } catch (error) {
     return {
       ok: false,
-      message: `生成任务启动失败：${normalizeErrorMessage(error)}`,
+      message: formatInvokeError(error, "当前运行在浏览器预览模式，或 Tauri 后端尚未启动。"),
       commandPreview: buildCommandPreview(payload),
     };
   }
@@ -273,7 +256,7 @@ export async function cancelVideo(jobId: string): Promise<GenerateVideoResult> {
   } catch (error) {
     return {
       ok: false,
-      message: `无法取消任务：${normalizeErrorMessage(error)}`,
+      message: formatInvokeError(error, "无法取消任务：Tauri 后端尚未响应。"),
       commandPreview: "",
     };
   }
@@ -288,39 +271,33 @@ export async function openInExplorer(path: string): Promise<void> {
 }
 
 // =========================
-// V5 引擎调用函数
+// V5 engine calls
 // =========================
 
-/** 扫描指定文件夹并返回素材事实库 */
+/** Scan a folder and return Media Library JSON. */
 export async function scanV5(inputFolder: string): Promise<V5MediaLibrary> {
   const jsonStr = await invoke<string>("scan_v5", { inputFolder });
-  const library = parseJsonResult<V5MediaLibrary>(jsonStr, "scan_v5");
-  assertDocumentType(library, "media_library", "scan_v5");
-  return library;
+  return parseV5Json<V5MediaLibrary>(jsonStr, "media_library");
 }
 
-/** 基于素材库生成故事蓝图 */
+/** Generate a Story Blueprint from a Media Library JSON file. */
 export async function planV5(libraryPath: string): Promise<V5StoryBlueprint> {
   const jsonStr = await invoke<string>("plan_v5", { libraryPath });
-  const blueprint = parseJsonResult<V5StoryBlueprint>(jsonStr, "plan_v5");
-  assertDocumentType(blueprint, "story_blueprint", "plan_v5");
-  return blueprint;
+  return parseV5Json<V5StoryBlueprint>(jsonStr, "story_blueprint");
 }
 
-/** 保存编辑后的蓝图到磁盘 */
+/** Save edited Story Blueprint JSON to disk. */
 export async function saveBlueprintV5(path: string, content: string): Promise<void> {
   await invoke("save_blueprint_v5", { path, content });
 }
 
-/** 编译蓝图生成渲染计划 */
+/** Compile Story Blueprint + Media Library into Render Plan. */
 export async function compileV5(blueprintPath: string, libraryPath: string): Promise<V5RenderPlan> {
   const jsonStr = await invoke<string>("compile_v5", { blueprintPath, libraryPath });
-  const plan = parseJsonResult<V5RenderPlan>(jsonStr, "compile_v5");
-  assertDocumentType(plan, "render_plan", "compile_v5");
-  return plan;
+  return parseV5Json<V5RenderPlan>(jsonStr, "render_plan");
 }
 
-/** 执行最终渲染 */
+/** Execute final V5 render. */
 export async function renderV5(planPath: string, outputPath: string, params: RenderV5Params): Promise<void> {
   await invoke("render_v5", {
     planPath,
@@ -328,6 +305,10 @@ export async function renderV5(planPath: string, outputPath: string, params: Ren
     paramsJson: JSON.stringify(params),
   });
 }
+
+// =========================
+// Command preview helpers
+// =========================
 
 export function buildCommandPreview(payload: GenerateVideoPayload): string {
   const input = payload.inputPaths[0] || "<素材文件夹>";
@@ -359,19 +340,68 @@ export function buildCommandPreview(payload: GenerateVideoPayload): string {
     payload.dryRun ? "--dry_run" : "",
     "--output_name",
     quote(payload.outputName || "travel_video"),
-  ].filter(Boolean);
+  ].filter((arg): arg is string => Boolean(arg));
 
   return args.join(" ");
 }
 
 export function toPythonQuality(quality: Quality): PythonQuality {
-  return {
+  const mapping: Record<Quality, PythonQuality> = {
     draft: "normal",
     standard: "high",
     high: "ultra",
-  }[quality];
+  };
+  return mapping[quality];
+}
+
+export function toPythonQualityLabel(quality: Quality): string {
+  return toPythonQuality(quality);
 }
 
 function quote(value: string): string {
   return `"${value.split('"').join('\\"')}"`;
+}
+
+function parseV5Json<T extends { document_type?: V5DocumentType; schema_version?: string }>(
+  jsonStr: string,
+  expectedType: V5DocumentType,
+): T {
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(jsonStr);
+  } catch (error) {
+    throw new Error(`V5 JSON 解析失败：${formatUnknownError(error)}`);
+  }
+
+  if (!parsed || typeof parsed !== "object") {
+    throw new Error(`V5 返回结果不是有效对象，期望 document_type=${expectedType}`);
+  }
+
+  const doc = parsed as { document_type?: unknown; schema_version?: unknown };
+  if (doc.document_type !== expectedType) {
+    throw new Error(`V5 返回 document_type 不匹配：期望 ${expectedType}，实际 ${String(doc.document_type)}`);
+  }
+
+  if (typeof doc.schema_version !== "string" || doc.schema_version.length === 0) {
+    throw new Error(`V5 返回结果缺少 schema_version，document_type=${expectedType}`);
+  }
+
+  return parsed as T;
+}
+
+function formatInvokeError(error: unknown, fallback: string): string {
+  const detail = formatUnknownError(error);
+  return detail ? `${fallback} ${detail}` : fallback;
+}
+
+function formatUnknownError(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  if (error == null) return "";
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
 }
