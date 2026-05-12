@@ -1,0 +1,45 @@
+name: Build and Check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-check:
+    name: Build and Check
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: TypeScript build
+        run: npm run build
+
+      - name: Rust check
+        run: cargo check --manifest-path .\src-tauri\Cargo.toml
+
+      - name: Python syntax check
+        run: python -m py_compile .\video_engine_v5.py
+
+      - name: Python CLI smoke check
+        run: python .\video_engine_v5.py --help

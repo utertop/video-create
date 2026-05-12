@@ -48,13 +48,13 @@ import {
   saveBlueprintV5,
   compileV5,
   renderV5,
-  buildV5RenderCommandPreview,
-  V5RenderParams,
   V5StoryBlueprint,
   V5StorySection,
   V5MediaLibrary,
   V5RenderPlan,
-  V5RenderSegment
+  V5RenderSegment,
+  RenderV5Params,
+  buildV5RenderCommandPreview
 } from "./lib/engine";
 
 interface VideoEvent {
@@ -259,28 +259,40 @@ export function App() {
 
   const commandPreview = useMemo(() => buildCommandPreview(payload), [payload]);
 
-  const v5CommandPreview = useMemo(() => {
-    if (!state.inputFolder || !state.outputFolder) {
-      return "python video_engine_v5.py render --plan <render_plan.json> --output <output.mp4>";
-    }
+  const v5ProjectDir = useMemo(() => {
+    const base = state.outputFolder || state.inputFolder || "";
+    return base ? `${base}\\.video_create_project` : "";
+  }, [state.outputFolder, state.inputFolder]);
 
+  const v5PlanPath = useMemo(() => v5ProjectDir ? `${v5ProjectDir}\\render_plan.json` : "", [v5ProjectDir]);
+
+  const v5FinalOutputName = useMemo(() => {
     const outputName = state.outputName || "travel_video";
-    const finalOutputName = outputName.endsWith(".mp4") ? outputName : `${outputName}.mp4`;
-    return buildV5RenderCommandPreview({
-      inputFolder: state.inputFolder,
-      outputFolder: state.outputFolder,
-      outputFileName: finalOutputName,
-      params: {
-        title: state.title,
-        title_subtitle: state.titleSubtitle,
-        watermark: state.watermark,
-        aspect_ratio: state.aspectRatio,
-        quality: state.quality,
-        engine: state.renderEngine,
-        cover: state.cover,
-      },
-    });
-  }, [state.inputFolder, state.outputFolder, state.outputName, state.title, state.titleSubtitle, state.watermark, state.aspectRatio, state.quality, state.renderEngine, state.cover]);
+    return outputName.endsWith(".mp4") ? outputName : `${outputName}.mp4`;
+  }, [state.outputName]);
+
+  const v5OutputPath = useMemo(() => {
+    return state.outputFolder ? `${state.outputFolder}\\${v5FinalOutputName}` : "";
+  }, [state.outputFolder, v5FinalOutputName]);
+
+  const v5RenderParams: RenderV5Params = useMemo(() => ({
+    title: state.title,
+    title_subtitle: state.titleSubtitle,
+    watermark: state.watermark,
+    aspect_ratio: state.aspectRatio,
+    quality: state.quality,
+    engine: state.renderEngine,
+    cover: state.cover,
+    fps: 30,
+  }), [state.title, state.titleSubtitle, state.watermark, state.aspectRatio, state.quality, state.renderEngine, state.cover]);
+
+  const v5CommandPreview = useMemo(() => buildV5RenderCommandPreview({
+    planPath: v5PlanPath || "<render_plan.json>",
+    outputPath: v5OutputPath || "<输出视频路径>",
+    params: v5RenderParams,
+  }), [v5PlanPath, v5OutputPath, v5RenderParams]);
+
+  const activeCommandPreview = state.v5Stage === "RENDER" ? v5CommandPreview : commandPreview;
 
   async function onGenerate(dryRun: boolean = false) {
     if (isRendering) {
@@ -293,7 +305,7 @@ export function App() {
       setResult({
         ok: false,
         message: warning,
-        commandPreview,
+        commandPreview: activeCommandPreview,
       });
       setToast(warning);
       setHighlightOutput(Boolean(state.inputFolder && !state.outputFolder && !dryRun));
@@ -311,27 +323,20 @@ export function App() {
       setPhase("V5 引擎初始化...");
 
       try {
-        const planPath = `${state.inputFolder}/render_plan.json`;
-        const outputName = state.outputName || "v5_travel_vlog";
-        const finalOutputName = outputName.endsWith('.mp4') ? outputName : `${outputName}.mp4`;
-        const outputPath = `${state.outputFolder}/${finalOutputName}`;
-        
-        const params: V5RenderParams = {
-          title: state.title,
-          title_subtitle: state.titleSubtitle,
-          watermark: state.watermark,
-          aspect_ratio: state.aspectRatio,
-          quality: state.quality,
-          engine: state.renderEngine,
-          cover: state.cover
-        };
+        if (!v5PlanPath || !v5OutputPath) {
+          throw new Error("V5 渲染需要输出目录与 render_plan.json。请先选择输出目录并确认故事蓝图。")
+        }
 
-        await renderV5(planPath, outputPath, params);
+        const jobId = crypto.randomUUID();
+        activeJobRef.current = jobId;
+        await renderV5(v5PlanPath, v5OutputPath, v5RenderParams, jobId);
         
         setResult({ 
           ok: true, 
-          message: `V5 视频渲染成功！\n保存至: ${outputPath}`, 
-          commandPreview: v5CommandPreview 
+          message: `V5 视频渲染成功！\n保存至: ${v5OutputPath}`, 
+          commandPreview: v5CommandPreview,
+          outputPath: v5OutputPath,
+          outputDir: state.outputFolder || undefined,
         });
         setProgress(100);
         setPhase("渲染完成");
@@ -344,6 +349,8 @@ export function App() {
         });
       } finally {
         setIsRendering(false);
+        activeJobRef.current = null;
+        setIsCancelling(false);
       }
       return;
     }
@@ -376,18 +383,24 @@ export function App() {
 
   async function onStartV5Workflow() {
     if (!state.inputFolder) return;
+    if (!state.outputFolder) {
+      const warning = "请先选择输出目录。V5.1 会把 media_library / story_blueprint / render_plan 放到输出目录下的 .video_create_project。";
+      setToast(warning);
+      setHighlightOutput(true);
+      return;
+    }
     
     setPhase("智能扫描中...");
     setProgress(10);
     try {
-      const library = await scanV5(state.inputFolder);
+      const library = await scanV5(state.inputFolder, v5ProjectDir, state.recursive);
       state.patch({ v5Library: library });
       
       setPhase("规划故事蓝图中...");
       setProgress(40);
       
-      const libPath = `${state.inputFolder}/media_library.json`;
-      const blueprint = await planV5(libPath);
+      const libPath = `${v5ProjectDir}\\media_library.json`;
+      const blueprint = await planV5(libPath, `${v5ProjectDir}\\story_blueprint.json`);
       state.patch({ v5Blueprint: blueprint, v5Stage: "BLUEPRINT" });
       
       setPhase("蓝图就绪");
@@ -406,8 +419,8 @@ export function App() {
     setPhase("正在保存蓝图...");
     setProgress(20);
     try {
-      const bpPath = `${state.inputFolder}/story_blueprint.json`;
-      const libPath = `${state.inputFolder}/media_library.json`;
+      const bpPath = `${v5ProjectDir}\\story_blueprint.json`;
+      const libPath = `${v5ProjectDir}\\media_library.json`;
       
       // 1. 保存
       await saveBlueprintV5(bpPath, JSON.stringify(state.v5Blueprint, null, 2));
@@ -415,7 +428,7 @@ export function App() {
       // 2. 编译
       setPhase("正在编译渲染计划...");
       setProgress(60);
-      const plan = await compileV5(bpPath, libPath);
+      const plan = await compileV5(bpPath, libPath, `${v5ProjectDir}\\render_plan.json`);
       
       // 3. 进入渲染阶段
       state.patch({ v5RenderPlan: plan, v5Stage: "RENDER" });
@@ -491,7 +504,7 @@ export function App() {
             {state.v5Stage === "RENDER" && (
               <button
                 className={`primary-action${isRendering ? " danger" : ""}`}
-                onClick={() => (isRendering ? onCancel() : onGenerate(false))}
+                onClick={isRendering ? onCancel : () => onGenerate(false)}
               >
                 {isRendering ? (isCancelling ? <Wand2 className="spin" size={18} /> : <Square size={16} />) : <Play size={18} />}
                 {isRendering ? (isCancelling ? "正在停止" : "停止生成") : "开始渲染"}
@@ -624,7 +637,7 @@ export function App() {
 
                   {!isRendering && (
                     <div className="v5-render-trigger">
-                       <button className="primary-action pulse-guidance" onClick={() => onGenerate(false)}>
+                       <button className="primary-action pulse-guidance" disabled={!state.outputFolder || isRendering} onClick={() => onGenerate(false)}>
                           <PlayCircle size={24} /> 立即开始最终合成
                        </button>
                        <p className="hint-text">点击上方按钮，启动 V5 渲染引擎合并素材并导出视频。</p>
@@ -660,7 +673,7 @@ export function App() {
                     </div>
                   )}
 
-                  <div className="command-box">{state.v5Stage === "RENDER" ? v5CommandPreview : commandPreview}</div>
+                  <div className="command-box">{activeCommandPreview}</div>
                   
                   {(isRendering || logs.length > 0) && (
                     <div className="log-viewer">
@@ -675,7 +688,7 @@ export function App() {
                <StatusItem label="输入目录" value={state.inputFolder ? state.inputFolder.split(/[/\\]/).pop() || "已选择" : "未选择"} />
                <StatusItem 
                  label="叙事阶段" 
-                 value={isRendering ? "正在渲染" : (state.v5Stage === "BLUEPRINT" ? "故事编排" : state.v5Stage === "RENDER" ? "渲染计划" : "就绪执行")} 
+                 value={isRendering ? "正在渲染" : (state.v5Stage === "BLUEPRINT" ? "故事编排" : "就绪执行")} 
                  highlight={isRendering}
                />
                <StatusItem label="当前画幅" value={state.aspectRatio} />

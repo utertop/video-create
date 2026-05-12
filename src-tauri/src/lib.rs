@@ -417,51 +417,63 @@ fn open_in_explorer(path: String) {
 // =========================
 
 #[tauri::command]
-async fn scan_v5(app: AppHandle, input_folder: String) -> Result<String, String> {
+async fn scan_v5(
+    app: AppHandle,
+    input_folder: String,
+    project_dir: Option<String>,
+    recursive: Option<bool>,
+) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let script_path = find_v5_engine_script(&app)?;
-        let output_path = PathBuf::from(&input_folder).join("media_library.json");
+        let workspace = project_workspace(&input_folder, project_dir)?;
+        std::fs::create_dir_all(&workspace)
+            .map_err(|e| format!("无法创建 V5 项目目录 {}: {}", workspace.display(), e))?;
+        let output_path = workspace.join("media_library.json");
 
-        run_python_to_json_file(
-            &script_path,
-            &[
-                "scan",
-                "--input_folder",
-                &input_folder,
-                "--output",
-                &output_path.display().to_string(),
-                "--recursive",
-            ],
-            &output_path,
-            "扫描失败",
-        )
+        let mut args = vec![
+            "scan".to_string(),
+            "--input_folder".to_string(),
+            input_folder.clone(),
+            "--output".to_string(),
+            output_path.display().to_string(),
+        ];
+        if recursive.unwrap_or(true) {
+            args.push("--recursive".to_string());
+        }
+
+        run_python_to_json_file(&script_path, &args, &output_path, "扫描失败")
     })
     .await
     .map_err(|e| format!("V5 scan 后台任务异常: {}", e))?
 }
 
 #[tauri::command]
-async fn plan_v5(app: AppHandle, library_path: String) -> Result<String, String> {
+async fn plan_v5(
+    app: AppHandle,
+    library_path: String,
+    output_path: Option<String>,
+) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let script_path = find_v5_engine_script(&app)?;
         let lib_path = PathBuf::from(&library_path);
-        let output_path = lib_path
-            .parent()
-            .ok_or_else(|| "无法确定 media_library.json 所在目录。".to_string())?
-            .join("story_blueprint.json");
+        let output_path = output_path
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                lib_path
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .join("story_blueprint.json")
+            });
 
-        run_python_to_json_file(
-            &script_path,
-            &[
-                "plan",
-                "--library",
-                &library_path,
-                "--output",
-                &output_path.display().to_string(),
-            ],
-            &output_path,
-            "生成蓝图失败",
-        )
+        let args = vec![
+            "plan".to_string(),
+            "--library".to_string(),
+            library_path.clone(),
+            "--output".to_string(),
+            output_path.display().to_string(),
+        ];
+
+        run_python_to_json_file(&script_path, &args, &output_path, "生成蓝图失败")
     })
     .await
     .map_err(|e| format!("V5 plan 后台任务异常: {}", e))?
@@ -486,29 +498,31 @@ async fn compile_v5(
     app: AppHandle,
     blueprint_path: String,
     library_path: String,
+    output_path: Option<String>,
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let script_path = find_v5_engine_script(&app)?;
         let bp_path = PathBuf::from(&blueprint_path);
-        let output_path = bp_path
-            .parent()
-            .ok_or_else(|| "无法确定 story_blueprint.json 所在目录。".to_string())?
-            .join("render_plan.json");
+        let output_path = output_path
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                bp_path
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .join("render_plan.json")
+            });
 
-        run_python_to_json_file(
-            &script_path,
-            &[
-                "compile",
-                "--blueprint",
-                &blueprint_path,
-                "--library",
-                &library_path,
-                "--output",
-                &output_path.display().to_string(),
-            ],
-            &output_path,
-            "编译渲染计划失败",
-        )
+        let args = vec![
+            "compile".to_string(),
+            "--blueprint".to_string(),
+            blueprint_path.clone(),
+            "--library".to_string(),
+            library_path.clone(),
+            "--output".to_string(),
+            output_path.display().to_string(),
+        ];
+
+        run_python_to_json_file(&script_path, &args, &output_path, "编译渲染计划失败")
     })
     .await
     .map_err(|e| format!("V5 compile 后台任务异常: {}", e))?
@@ -517,12 +531,15 @@ async fn compile_v5(
 #[tauri::command]
 async fn render_v5(
     app: AppHandle,
+    manager: State<'_, JobManager>,
     plan_path: String,
     output_path: String,
     params_json: String,
+    job_id: Option<String>,
 ) -> Result<(), String> {
+    let manager = manager.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        render_v5_blocking(app, plan_path, output_path, params_json)
+        render_v5_blocking(app, manager, plan_path, output_path, params_json, job_id)
     })
     .await
     .map_err(|e| format!("V5 render 后台任务异常: {}", e))?
@@ -530,9 +547,11 @@ async fn render_v5(
 
 fn render_v5_blocking(
     app: AppHandle,
+    manager: JobManager,
     plan_path: String,
     output_path: String,
     params_json: String,
+    job_id: Option<String>,
 ) -> Result<(), String> {
     let script_path = find_v5_engine_script(&app)?;
     let output_file = PathBuf::from(&output_path);
@@ -562,6 +581,21 @@ fn render_v5_blocking(
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("无法启动 V5 渲染进程: {}", e))?;
+
+    let pid = child.id();
+    let job_id = job_id.unwrap_or_else(|| format!("v5-render-{}", pid));
+    let cancelled = Arc::new(AtomicBool::new(false));
+    if let Ok(mut current) = manager.current.lock() {
+        if current.is_some() {
+            kill_process_tree(pid);
+            return Err("已有视频正在生成，请先等待完成或停止当前任务。".to_string());
+        }
+        *current = Some(ActiveJob {
+            id: job_id.clone(),
+            pid,
+            cancelled: cancelled.clone(),
+        });
+    }
 
     // stdout: Python V5 engine emits JSON progress events here.
     if let Some(stdout) = child.stdout.take() {
@@ -597,6 +631,13 @@ fn render_v5_blocking(
         .wait()
         .map_err(|e| format!("等待 V5 渲染进程失败: {}", e))?;
 
+    let was_cancelled = cancelled.load(Ordering::SeqCst);
+    clear_job(&manager, &job_id);
+
+    if was_cancelled {
+        return Err("已停止当前 V5 渲染任务。".to_string());
+    }
+
     if !status.success() {
         return Err(format!("V5 渲染失败，退出状态: {}", status));
     }
@@ -623,9 +664,18 @@ fn render_v5_blocking(
 // Shared helpers
 // =========================
 
+fn project_workspace(input_folder: &str, project_dir: Option<String>) -> Result<PathBuf, String> {
+    if let Some(dir) = project_dir {
+        if !dir.trim().is_empty() {
+            return Ok(PathBuf::from(dir));
+        }
+    }
+    Ok(PathBuf::from(input_folder).join(".video_create_project"))
+}
+
 fn run_python_to_json_file(
     script_path: &Path,
-    args: &[&str],
+    args: &[String],
     output_path: &Path,
     error_prefix: &str,
 ) -> Result<String, String> {
