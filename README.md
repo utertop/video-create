@@ -2,11 +2,11 @@
 
 **桌面级旅行视频自动生成器** — Tauri + React + Python
 
-Video Create Studio 将照片、相机视频与旅行素材组织成可审核的故事蓝图，再渲染为适合 B 站 / YouTube 发布的横屏或竖屏视频。
+Video Create Studio 是一个面向旅行 / Vlog / B站 / YouTube 内容创作者的桌面视频生成工具。它将素材目录中的照片与视频，通过 V5 四阶段引擎自动生成带章节、文案卡、虚化背景、水印和封面的旅行短片。
 
-## V5.1 核心定位
+## 当前版本定位：V5.3
 
-V5.1 默认使用新的四阶段工程链路：
+V5.3 的主流程是：
 
 ```text
 素材目录
@@ -14,38 +14,63 @@ V5.1 默认使用新的四阶段工程链路：
 media_library.json
   ↓ plan
 story_blueprint.json
-  ↓ 用户审核 / 编辑
+  ↓ 用户审核故事蓝图
   ↓ compile
 render_plan.json
   ↓ render
-最终 mp4 + cover
+最终 mp4
 ```
-
-旧版 `make_bilibili_video_v3.py` 仍保留为 Legacy 兼容脚本，但 V5.1 主流程以 `video_engine_v5.py` 为准。
 
 ## 功能概览
 
 | 功能 | 状态 |
-|------|------|
-| 原生文件夹选择（素材目录 / 输出目录） | ✅ |
-| V5 素材扫描：城市 / 日期 / 景点目录识别 | ✅ |
-| Media Library / Story Blueprint / Render Plan 三层 JSON | ✅ |
-| 故事蓝图审核：章节标题、启用/禁用、素材预览 | ✅ |
-| Render Plan 时间线预览 | ✅ |
-| 最终导出进度回传，避免 98% 假卡住 | ✅ |
-| V5 渲染任务取消 | ✅ |
-| Legacy V3 一键生成脚本 | ✅ 兼容 |
-| AI 配乐蓝图 / 智能选片 / 模板匹配 | 🔜 V6 规划 |
+|---|---|
+| 原生文件夹选择：素材目录 / 输出目录 | ✅ |
+| V5 四阶段引擎：scan / plan / compile / render | ✅ |
+| `media_library.json` 素材事实库 | ✅ |
+| `story_blueprint.json` 故事蓝图 | ✅ |
+| `render_plan.json` 渲染计划 | ✅ |
+| 片头 / 片尾文案卡首帧 / 尾帧虚化背景 | ✅ |
+| 片头 / 片尾背景手动选择 | ✅ |
+| 章节卡智能过渡背景 | ✅ |
+| 章节卡背景手动选择 | ✅ |
+| 景点章节默认首素材标题叠加 | ✅ |
+| B站封面自动生成 | ✅ |
+| V3 脚本兼容模式 `make_bilibili_video_v3.py` | ✅ Legacy |
+
+## V5.3 章节背景策略
+
+在“生成参数”中可以选择：
+
+```text
+章节卡背景：
+- 智能过渡：上一段尾帧 + 当前章节首帧融合虚化
+- 章节首图：当前章节第一个视觉素材虚化
+- 纯色极简：品牌纯色背景
+```
+
+每个章节还可以在故事蓝图审核页单独点击“选择背景”，从素材库中选择图片或视频缩略图作为该章节文案卡背景。
+
+## 景点章节策略
+
+为了让旅行视频更自然，V5.3 默认：
+
+```text
+城市 / 日期 / 普通章节：完整章节卡
+景点章节：首素材标题叠加
+```
+
+如果你给景点章节手动选择背景，该景点章节会升级为完整章节卡。
 
 ## 运行要求
 
-- Node.js ≥ 18
+- Node.js >= 18
 - Rust stable
-- Python ≥ 3.9
+- Python >= 3.9
 
 Python 依赖：
 
-```powershell
+```bash
 python -m pip install moviepy==1.0.3 pillow numpy imageio-ffmpeg proglog
 ```
 
@@ -56,72 +81,6 @@ npm install
 npm run tauri dev
 ```
 
-## 推荐使用流程
-
-1. 选择素材目录，例如：
-
-```text
-E:\bilibili_create\泉州-厦门
-├── 泉州
-│   ├── 西街
-│   └── 开元寺
-└── 厦门
-    ├── 鼓浪屿
-    └── 曾厝垵
-```
-
-2. 选择输出目录。
-
-V5.1 会在输出目录下生成项目工作目录：
-
-```text
-<输出目录>\.video_create_project
-├── media_library.json
-├── story_blueprint.json
-└── render_plan.json
-```
-
-3. 点击“开始智能编排”。
-4. 在“故事蓝图审核”里确认章节、素材和标题。
-5. 点击“确认并进入渲染”。
-6. 点击“立即开始最终合成”。
-
-最终输出：
-
-```text
-<输出目录>\travel_video.mp4
-<输出目录>\cover_travel_video.jpg
-```
-
-## V5 引擎命令
-
-```powershell
-python video_engine_v5.py scan --input_folder "E:\素材" --output "E:\输出\.video_create_project\media_library.json" --recursive
-python video_engine_v5.py plan --library "E:\输出\.video_create_project\media_library.json" --output "E:\输出\.video_create_project\story_blueprint.json"
-python video_engine_v5.py compile --blueprint "E:\输出\.video_create_project\story_blueprint.json" --library "E:\输出\.video_create_project\media_library.json" --output "E:\输出\.video_create_project\render_plan.json"
-python video_engine_v5.py render --plan "E:\输出\.video_create_project\render_plan.json" --output "E:\输出\travel_video.mp4"
-```
-
-## 架构
-
-```text
-React UI
-  ↓ Tauri invoke
-Rust Commands
-  ├── scan_v5
-  ├── plan_v5
-  ├── compile_v5
-  └── render_v5
-      ↓ spawn python
-video_engine_v5.py
-  ├── scan
-  ├── plan
-  ├── compile
-  └── render
-      ↓ MoviePy / FFmpeg
-final mp4
-```
-
 ## 项目结构
 
 ```text
@@ -129,10 +88,10 @@ video-create/
 ├── src/
 │   ├── App.tsx
 │   ├── lib/engine.ts
-│   └── styles.css
+│   ├── styles.css
+│   └── v5-background.css
 ├── src-tauri/
 │   ├── src/lib.rs
-│   ├── src/main.rs
 │   └── tauri.conf.json
 ├── video_engine_v5.py
 ├── make_bilibili_video_v3.py
@@ -142,14 +101,8 @@ video-create/
 ## 开发验证
 
 ```powershell
+python -m py_compile .\video_engine_v5.py
 npm run build
 cargo check --manifest-path .\src-tauri\Cargo.toml
-python -m py_compile .\video_engine_v5.py
-python .\video_engine_v5.py --help
+npm run tauri dev
 ```
-
-## 路线图
-
-- V5.1：主流程稳定闭环、进度回传、任务取消、JSON 工作目录规范
-- V5.2：更完整的故事蓝图审核页和素材筛选
-- V6：AI 配乐蓝图、智能选片、模板匹配、时间线编辑器

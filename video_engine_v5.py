@@ -66,7 +66,7 @@ except Exception:
 # =========================
 
 SCHEMA_VERSION = "5.0"
-ENGINE_VERSION = "video-create-engine-v5.0.1"
+ENGINE_VERSION = "video-create-engine-v5.1.1"
 
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
 VIDEO_EXTS = (".mp4", ".mov", ".avi", ".mkv", ".m4v")
@@ -354,6 +354,8 @@ class StorySection:
     auto_detected: bool = True
     user_overridden: bool = False
     rhythm: str = "standard"
+    title_mode: str = "full_card"
+    background: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -370,6 +372,14 @@ class RenderSegment:
     asset_id: Optional[str] = None
     transition: str = "none"
     background: str = "blur"
+    background_mode: Optional[str] = None
+    background_source_path: Optional[str] = None
+    background_source_position: Optional[str] = None
+    background_source_path_2: Optional[str] = None
+    background_source_position_2: Optional[str] = None
+    overlay_text: Optional[str] = None
+    overlay_subtitle: Optional[str] = None
+    overlay_duration: Optional[float] = None
     keep_audio: bool = True
     cache_key: Optional[str] = None
 
@@ -633,15 +643,23 @@ class Planner:
             return None
 
         section_id = "section_" + safe_id(node.get("relative_path") or node.get("name", "section"))
+        section_type = node.get("detected_type", "chapter")
         return StorySection(
             section_id=section_id,
-            section_type=node.get("detected_type", "chapter"),
+            section_type=section_type,
             title=node.get("display_title") or node.get("name", "章节"),
             subtitle=None,
             enabled=True,
             source_node_id=node["node_id"],
             asset_refs=asset_refs,
             children=children,
+            title_mode="overlay" if section_type == "scenic_spot" else "full_card",
+            background={
+                "mode": "auto_bridge",
+                "custom_asset_id": None,
+                "custom_path": None,
+                "user_overridden": False,
+            },
         )
 
     def _asset_refs_for_node(self, node_id: str) -> List[AssetRef]:
@@ -661,8 +679,12 @@ class Compiler:
         self.blueprint = blueprint
         self.library = library
         self.assets = {a["asset_id"]: a for a in library.get("assets", [])}
+        self.blueprint_metadata = blueprint.get("metadata", {}) or {}
+        self.default_chapter_background_mode = self.blueprint_metadata.get("chapter_background_mode", "auto_bridge")
+        self.scenic_spot_title_mode = self.blueprint_metadata.get("scenic_spot_title_mode", "overlay")
         self.time = 0.0
         self.segments: List[RenderSegment] = []
+        self.last_visual_source_path: Optional[str] = None
 
     def compile(self) -> Dict[str, Any]:
         emit_event("phase", phase="compile", message="编译渲染计划", percent=20)
@@ -711,15 +733,28 @@ class Compiler:
             return
 
         stype = section.get("section_type", "chapter")
-        if stype in {"city", "date", "scenic_spot", "chapter"}:
+        background = section.get("background") or {}
+        has_custom_background = bool(background.get("user_overridden") and background.get("custom_path"))
+        use_overlay_title = stype == "scenic_spot" and not has_custom_background and self.scenic_spot_title_mode == "overlay"
+
+        pending_overlay_text = None
+        pending_overlay_subtitle = None
+
+        if stype in {"city", "date", "chapter"} or (stype == "scenic_spot" and not use_overlay_title):
+            bg_info = self._chapter_background_info(section)
             self._add(
                 "chapter",
                 duration=2.5,
                 text=section.get("title"),
                 subtitle=section.get("subtitle"),
                 section_id=section.get("section_id"),
+                **bg_info,
             )
+        elif use_overlay_title:
+            pending_overlay_text = section.get("title")
+            pending_overlay_subtitle = section.get("subtitle")
 
+        overlay_consumed = False
         for ref in section.get("asset_refs", []):
             if not ref.get("enabled", True):
                 continue
@@ -729,6 +764,13 @@ class Compiler:
                 continue
 
             duration = self._asset_duration(asset, ref)
+            overlay_text = None
+            overlay_subtitle = None
+            if pending_overlay_text and not overlay_consumed:
+                overlay_text = pending_overlay_text
+                overlay_subtitle = pending_overlay_subtitle
+                overlay_consumed = True
+
             self._add(
                 asset.get("type"),
                 duration=duration,
@@ -736,10 +778,69 @@ class Compiler:
                 asset_id=asset.get("asset_id"),
                 section_id=section.get("section_id"),
                 keep_audio=bool(ref.get("keep_audio", True)),
+                overlay_text=overlay_text,
+                overlay_subtitle=overlay_subtitle,
+                overlay_duration=1.8 if overlay_text else None,
             )
 
         for child in section.get("children", []):
             self._section(child)
+
+    def _chapter_background_info(self, section: Dict[str, Any]) -> Dict[str, Optional[str]]:
+        background = section.get("background") or {}
+        mode = background.get("mode") or self.default_chapter_background_mode
+        custom_path = background.get("custom_path")
+
+        if background.get("user_overridden") and custom_path:
+            return {
+                "background_mode": "custom_blur",
+                "background_source_path": custom_path,
+                "background_source_position": "middle",
+                "background_source_path_2": None,
+                "background_source_position_2": None,
+            }
+
+        first_visual = self._first_visual_source_in_section(section)
+
+        if mode == "plain":
+            return {
+                "background_mode": "plain",
+                "background_source_path": None,
+                "background_source_position": None,
+                "background_source_path_2": None,
+                "background_source_position_2": None,
+            }
+
+        if mode == "auto_first_asset":
+            return {
+                "background_mode": "auto_first_asset",
+                "background_source_path": first_visual,
+                "background_source_position": "first",
+                "background_source_path_2": None,
+                "background_source_position_2": None,
+            }
+
+        # Default: bridge background blends previous visual tail with current section first visual.
+        return {
+            "background_mode": "bridge_blur",
+            "background_source_path": self.last_visual_source_path or first_visual,
+            "background_source_position": "last" if self.last_visual_source_path else "first",
+            "background_source_path_2": first_visual,
+            "background_source_position_2": "first",
+        }
+
+    def _first_visual_source_in_section(self, section: Dict[str, Any]) -> Optional[str]:
+        for ref in section.get("asset_refs", []):
+            if not ref.get("enabled", True):
+                continue
+            asset = self.assets.get(ref.get("asset_id"))
+            if asset and asset.get("status") != "error" and asset.get("type") in {"image", "video"}:
+                return asset.get("absolute_path")
+        for child in section.get("children", []):
+            found = self._first_visual_source_in_section(child)
+            if found:
+                return found
+        return None
 
     def _asset_duration(self, asset: Dict[str, Any], ref: Dict[str, Any]) -> float:
         if ref.get("duration_policy") == "custom" and ref.get("custom_duration"):
@@ -765,6 +866,14 @@ class Compiler:
         section_id: Optional[str] = None,
         asset_id: Optional[str] = None,
         keep_audio: bool = True,
+        background_mode: Optional[str] = None,
+        background_source_path: Optional[str] = None,
+        background_source_position: Optional[str] = None,
+        background_source_path_2: Optional[str] = None,
+        background_source_position_2: Optional[str] = None,
+        overlay_text: Optional[str] = None,
+        overlay_subtitle: Optional[str] = None,
+        overlay_duration: Optional[float] = None,
     ) -> None:
         seg = RenderSegment(
             segment_id=f"seg_{len(self.segments):05d}",
@@ -778,9 +887,19 @@ class Compiler:
             section_id=section_id,
             asset_id=asset_id,
             keep_audio=keep_audio,
-            cache_key=safe_id(f"{seg_type}|{source_path}|{duration}|{text}|{ENGINE_VERSION}"),
+            background_mode=background_mode,
+            background_source_path=background_source_path,
+            background_source_position=background_source_position,
+            background_source_path_2=background_source_path_2,
+            background_source_position_2=background_source_position_2,
+            overlay_text=overlay_text,
+            overlay_subtitle=overlay_subtitle,
+            overlay_duration=overlay_duration,
+            cache_key=safe_id(f"{seg_type}|{source_path}|{duration}|{text}|{background_mode}|{ENGINE_VERSION}"),
         )
         self.segments.append(seg)
+        if seg_type in {"image", "video"} and source_path:
+            self.last_visual_source_path = source_path
         self.time += duration
 
 
@@ -798,6 +917,8 @@ class Renderer:
             params.get("aspect_ratio") or settings.get("aspect_ratio") or "16:9"
         )
         self.temp_dir = Path(tempfile.mkdtemp(prefix="vcs_v5_render_"))
+        self.first_visual_source = self._find_visual_source("first")
+        self.last_visual_source = self._find_visual_source("last")
 
     def render(self) -> None:
         if not HAS_MOVIEPY:
@@ -876,28 +997,181 @@ class Renderer:
         duration = float(seg.get("duration") or 3.0)
 
         if stype in {"title", "chapter", "end"}:
-            return self._text_card(
-                seg.get("text") or "",
-                seg.get("subtitle"),
-                duration,
-                main=(stype == "title"),
-            )
+            if stype == "title":
+                background_source = self.params.get("title_background_path") or self.first_visual_source
+                return self._text_card(
+                    seg.get("text") or "",
+                    seg.get("subtitle"),
+                    duration,
+                    main=True,
+                    background_source=background_source,
+                    background_position="first",
+                )
+
+            if stype == "end":
+                background_source = self.params.get("end_background_path") or self.last_visual_source
+                return self._text_card(
+                    seg.get("text") or "",
+                    seg.get("subtitle"),
+                    duration,
+                    main=False,
+                    background_source=background_source,
+                    background_position="last",
+                )
+
+            return self._chapter_card(seg, duration)
 
         if stype == "image":
-            return self._image_clip(Path(seg["source_path"]), duration)
+            clip = self._image_clip(Path(seg["source_path"]), duration)
+            return self._apply_overlay_title(clip, seg)
 
         if stype == "video":
-            return self._video_clip(
+            clip = self._video_clip(
                 Path(seg["source_path"]),
                 duration,
                 keep_audio=bool(seg.get("keep_audio", True)),
             )
+            return self._apply_overlay_title(clip, seg)
 
         return None
 
-    def _text_card(self, title: str, subtitle: Optional[str], duration: float, main: bool = False):
+    def _find_visual_source(self, direction: str) -> Optional[str]:
+        """Find first/last image or video source from render_plan for title/end backgrounds."""
+        segments = self.plan.get("segments", [])
+        ordered = segments if direction == "first" else list(reversed(segments))
+        for seg in ordered:
+            if seg.get("type") in {"image", "video"} and seg.get("source_path"):
+                return str(seg.get("source_path"))
+        return None
+
+    def _source_frame_for_background(self, source_path: Optional[str], position: str) -> Optional[Path]:
+        """Return a temporary image frame that can be blurred as a text-card background.
+
+        Image source: EXIF-transposed image.
+        Video source: first frame for opening title, last frame for ending card.
+        """
+        if not source_path:
+            return None
+
+        source = Path(str(source_path))
+        if not source.exists():
+            emit_event("log", message=f"文案背景源不存在，已回退为纯色背景: {source}")
+            return None
+
+        suffix = source.suffix.lower()
+        out = self.temp_dir / f"text_bg_{position}_{safe_id(str(source))}.jpg"
+        if out.exists():
+            return out
+
+        try:
+            if suffix in IMAGE_EXTS:
+                with Image.open(source) as img:
+                    img = ImageOps.exif_transpose(img).convert("RGB")
+                    img.save(out, quality=94)
+                return out
+
+            if suffix in VIDEO_EXTS:
+                clip = VideoFileClip(str(source))
+                try:
+                    duration = float(clip.duration or 0)
+                    if position == "last":
+                        t = max(0.0, duration - 0.08) if duration else 0.0
+                    elif position == "middle":
+                        t = max(0.0, duration / 2.0) if duration else 0.0
+                    else:
+                        t = 0.05 if duration > 0.1 else 0.0
+                    clip.save_frame(str(out), t=t)
+                    return out
+                finally:
+                    clip.close()
+        except Exception as exc:
+            emit_event("log", message=f"生成文案背景帧失败，已回退为纯色背景: {source.name}: {exc}")
+
+        return None
+
+    def _chapter_card(self, seg: Dict[str, Any], duration: float):
+        mode = seg.get("background_mode") or "bridge_blur"
+        if mode == "plain":
+            return self._text_card(
+                seg.get("text") or "",
+                seg.get("subtitle"),
+                duration,
+                main=False,
+                background_source=None,
+                background_position="first",
+            )
+
+        if mode == "bridge_blur":
+            return self._text_card(
+                seg.get("text") or "",
+                seg.get("subtitle"),
+                duration,
+                main=False,
+                background_source=seg.get("background_source_path"),
+                background_position=seg.get("background_source_position") or "last",
+                background_source_2=seg.get("background_source_path_2"),
+                background_position_2=seg.get("background_source_position_2") or "first",
+                blend_sources=True,
+            )
+
+        return self._text_card(
+            seg.get("text") or "",
+            seg.get("subtitle"),
+            duration,
+            main=False,
+            background_source=seg.get("background_source_path"),
+            background_position=seg.get("background_source_position") or "first",
+        )
+
+    def _text_card(
+        self,
+        title: str,
+        subtitle: Optional[str],
+        duration: float,
+        main: bool = False,
+        background_source: Optional[str] = None,
+        background_position: str = "first",
+        background_source_2: Optional[str] = None,
+        background_position_2: str = "first",
+        blend_sources: bool = False,
+    ):
+        img = self._text_card_image(
+            title=title,
+            subtitle=subtitle,
+            main=main,
+            background_source=background_source,
+            background_position=background_position,
+            background_source_2=background_source_2,
+            background_position_2=background_position_2,
+            blend_sources=blend_sources,
+        )
+        return ImageClip(np.array(img)).set_duration(duration)
+
+    def _text_card_image(
+        self,
+        title: str,
+        subtitle: Optional[str],
+        main: bool = False,
+        background_source: Optional[str] = None,
+        background_position: str = "first",
+        background_source_2: Optional[str] = None,
+        background_position_2: str = "first",
+        blend_sources: bool = False,
+    ) -> Image.Image:
+        """Build the exact PIL frame used by title/chapter/end cards.
+
+        Cover generation calls this helper too, so the exported
+        cover image is visually consistent with the first video frame.
+        """
         w, h = self.target_size
-        img = Image.new("RGB", self.target_size, (17, 31, 25))
+        img = self._build_text_background(
+            background_source,
+            background_position,
+            background_source_2,
+            background_position_2,
+            blend_sources=blend_sources,
+        )
+
         draw = ImageDraw.Draw(img)
 
         title_font = load_font(78 if main else 58)
@@ -910,7 +1184,57 @@ class Renderer:
             sw, sh = text_size(draw, subtitle, sub_font)
             draw.text(((w - sw) // 2, (h - sh) // 2 + 55), subtitle, font=sub_font, fill=(52, 211, 153))
 
-        return ImageClip(np.array(img)).set_duration(duration)
+        return img
+
+    def _build_text_background(
+        self,
+        source_1: Optional[str],
+        pos_1: str,
+        source_2: Optional[str] = None,
+        pos_2: str = "first",
+        blend_sources: bool = False,
+    ) -> Image.Image:
+        frame_1 = self._source_frame_for_background(source_1, pos_1)
+        frame_2 = self._source_frame_for_background(source_2, pos_2) if source_2 else None
+
+        if frame_1 and frame_1.exists():
+            img_1 = Image.open(self._blur_bg(frame_1)).convert("RGB")
+            if blend_sources and frame_2 and frame_2.exists():
+                img_2 = Image.open(self._blur_bg(frame_2)).convert("RGB")
+                img = Image.blend(img_1, img_2, 0.50)
+            else:
+                img = img_1
+            return Image.blend(img, Image.new("RGB", self.target_size, (0, 0, 0)), 0.20)
+
+        if frame_2 and frame_2.exists():
+            img = Image.open(self._blur_bg(frame_2)).convert("RGB")
+            return Image.blend(img, Image.new("RGB", self.target_size, (0, 0, 0)), 0.20)
+
+        return Image.new("RGB", self.target_size, (17, 31, 25))
+
+    def _apply_overlay_title(self, clip: Any, seg: Dict[str, Any]):
+        text = seg.get("overlay_text")
+        if not text:
+            return clip
+        subtitle = seg.get("overlay_subtitle")
+        duration = min(float(seg.get("overlay_duration") or 1.8), float(clip.duration or 1.8))
+        overlay = self._overlay_title_clip(str(text), subtitle, duration)
+        return CompositeVideoClip([clip, overlay], size=clip.size).set_duration(clip.duration)
+
+    def _overlay_title_clip(self, title: str, subtitle: Optional[str], duration: float):
+        w, h = self.target_size
+        box_w = min(int(w * 0.48), 760)
+        box_h = 126 if subtitle else 86
+        img = Image.new("RGBA", (box_w, box_h), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        draw.rounded_rectangle((0, 0, box_w, box_h), radius=22, fill=(10, 22, 17, 132))
+        draw.rectangle((0, 18, 6, box_h - 18), fill=(52, 211, 153, 210))
+        title_font = load_font(38)
+        sub_font = load_font(22)
+        draw.text((28, 20), title, font=title_font, fill=(255, 255, 255, 235))
+        if subtitle:
+            draw.text((30, 72), subtitle, font=sub_font, fill=(199, 245, 224, 215))
+        return ImageClip(np.array(img)).set_duration(duration).set_position((int(w * 0.06), int(h * 0.72)))
 
     def _image_clip(self, source: Path, duration: float):
         fixed = self.temp_dir / f"fixed_{safe_id(str(source))}.jpg"
@@ -985,25 +1309,36 @@ class Renderer:
         return CompositeVideoClip([video, wm], size=video.size)
 
     def _create_cover(self) -> None:
-        cover = self.output_path.with_name(f"cover_{self.output_path.stem}.jpg")
-        w, h = self.target_size
-        img = Image.new("RGB", self.target_size, (18, 32, 26))
-        draw = ImageDraw.Draw(img)
+        """Create the upload cover from the same visual recipe as the opening title card.
 
+        Priority:
+          1. params.title_background_path selected in GUI
+          2. first visual segment from render_plan
+          3. plain brand background fallback
+
+        This keeps cover_travel_video.jpg, the first video frame, and the
+        user-selected opening background visually consistent.
+        """
+        cover = self.output_path.with_name(f"cover_{self.output_path.stem}.jpg")
         title = str(self.params.get("title") or "Travel Video")
         subtitle = str(self.params.get("title_subtitle") or "Video Create Studio")
+        background_source = self.params.get("title_background_path") or self.first_visual_source
 
-        title_font = load_font(72)
-        sub_font = load_font(34)
-
-        tw, th = text_size(draw, title, title_font)
-        draw.text(((w - tw) // 2, h // 2 - 70), title, font=title_font, fill=(255, 255, 255))
-
-        sw, sh = text_size(draw, subtitle, sub_font)
-        draw.text(((w - sw) // 2, h // 2 + 30), subtitle, font=sub_font, fill=(52, 211, 153))
+        img = self._text_card_image(
+            title=title,
+            subtitle=subtitle,
+            main=True,
+            background_source=background_source,
+            background_position="first",
+        )
 
         img.save(cover, quality=92)
-        emit_event("artifact", artifact="cover", path=str(cover), message="Cover generated")
+        emit_event(
+            "artifact",
+            artifact="cover",
+            path=str(cover),
+            message="Cover generated from opening title card background",
+        )
 
 
 # =========================

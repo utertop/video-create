@@ -17,6 +17,8 @@ export type V5StorySectionType = "city" | "date" | "scenic_spot" | "chapter" | "
 export type V5AssetRole = "opening" | "normal" | "highlight";
 export type V5DurationPolicy = "auto" | "custom";
 export type V5RenderSegmentType = "title" | "chapter" | "video" | "image" | "end";
+export type V5ChapterBackgroundMode = "auto_bridge" | "auto_first_asset" | "custom_asset" | "plain";
+export type V5SectionTitleMode = "full_card" | "overlay";
 
 export const V5_SCHEMA_VERSION = "5.0";
 
@@ -85,6 +87,7 @@ export interface V5Asset {
     orientation: V5Orientation | null;
     shooting_date: string | null;
     duration?: number | null;
+    duration_seconds?: number | null;
   };
   classification: {
     directory_node_id: string;
@@ -92,7 +95,7 @@ export interface V5Asset {
     scenic_spot: string | null;
     date?: string | null;
   };
-  status?: {
+  status?: "ready" | "skipped" | "error" | {
     state?: "ready" | "skipped" | "error";
     message?: string | null;
   };
@@ -110,6 +113,8 @@ export interface V5StoryBlueprint {
     created_at?: string;
     updated_at?: string;
     source_library_path?: string;
+    chapter_background_mode?: V5ChapterBackgroundMode;
+    scenic_spot_title_mode?: V5SectionTitleMode;
   };
 }
 
@@ -127,6 +132,22 @@ export interface V5StorySection {
   user_overridden?: boolean;
   order_index?: number;
   rhythm?: "slow" | "standard" | "fast";
+  title_mode?: V5SectionTitleMode;
+  background?: V5SectionBackground | null;
+}
+
+
+export interface V5SectionBackground {
+  /**
+   * auto_bridge: use previous visual frame + current section first frame.
+   * auto_first_asset: use the first visual asset in this section.
+   * custom_asset: use custom_path/custom_asset_id selected in GUI.
+   * plain: use solid brand background.
+   */
+  mode: V5ChapterBackgroundMode;
+  custom_asset_id?: string | null;
+  custom_path?: string | null;
+  user_overridden?: boolean;
 }
 
 export interface V5AssetRef {
@@ -168,6 +189,14 @@ export interface V5RenderSegment {
   asset_id?: string | null;
   transition?: "none" | "crossfade";
   background?: "blur" | "black" | "solid";
+  background_mode?: "plain" | "auto_first_asset" | "bridge_blur" | "custom_blur";
+  background_source_path?: string | null;
+  background_source_position?: "first" | "last" | "middle" | null;
+  background_source_path_2?: string | null;
+  background_source_position_2?: "first" | "last" | "middle" | null;
+  overlay_text?: string | null;
+  overlay_subtitle?: string | null;
+  overlay_duration?: number | null;
   keep_audio?: boolean;
   cache_key?: string | null;
 }
@@ -234,6 +263,15 @@ export interface RenderV5Params {
   engine?: RenderEngine;
   cover?: boolean;
   fps?: number;
+
+  /** Optional custom background image for the opening title card.
+   * If omitted, the renderer uses the first visual frame in render_plan. */
+  title_background_path?: string | null;
+
+  /** Optional custom background image for the ending card.
+   * If omitted, the renderer uses the last visual frame in render_plan. */
+  end_background_path?: string | null;
+  chapter_background_mode?: V5ChapterBackgroundMode;
 }
 
 // =========================

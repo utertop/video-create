@@ -53,9 +53,12 @@ import {
   V5MediaLibrary,
   V5RenderPlan,
   V5RenderSegment,
+  V5Asset,
+  V5ChapterBackgroundMode,
   RenderV5Params,
   buildV5RenderCommandPreview
 } from "./lib/engine";
+import "./v5-background.css";
 
 interface VideoEvent {
   type?: string;
@@ -81,12 +84,20 @@ interface VideoEvent {
   mtime?: number;
 }
 
+type BackgroundPickerTarget =
+  | { kind: "title" }
+  | { kind: "end" }
+  | { kind: "section"; sectionId: string; sectionTitle: string };
+
 interface StudioState {
   inputFolder: string | null;
   outputFolder: string | null;
   title: string;
   titleSubtitle: string;
   endText: string;
+  titleBackgroundPath: string | null;
+  endBackgroundPath: string | null;
+  chapterBackgroundMode: V5ChapterBackgroundMode;
   outputName: string;
   aspectRatio: AspectRatio;
   quality: Quality;
@@ -136,6 +147,9 @@ const useStudio = create<StudioState>((set) => ({
   title: "福建旅行混剪",
   titleSubtitle: "Travel Video",
   endText: "To be continued!",
+  titleBackgroundPath: null,
+  endBackgroundPath: null,
+  chapterBackgroundMode: "auto_bridge",
   outputName: "travel_video",
   aspectRatio: "16:9",
   quality: "high",
@@ -151,7 +165,15 @@ const useStudio = create<StudioState>((set) => ({
   v5Blueprint: null,
   v5RenderPlan: null,
 
-  setInputFolder: (folder) => set({ inputFolder: folder, v5Stage: folder ? "INPUT" : "INPUT" }),
+  setInputFolder: (folder) => set({
+    inputFolder: folder,
+    v5Stage: "INPUT",
+    v5Library: null,
+    v5Blueprint: null,
+    v5RenderPlan: null,
+    titleBackgroundPath: null,
+    endBackgroundPath: null,
+  }),
   setOutputFolder: (folder) => set({ outputFolder: folder }),
   patch: (state) => set(state),
 }));
@@ -170,6 +192,8 @@ export function App() {
   const [selectedMaterial, setSelectedMaterial] = useState<VideoEvent | null>(null);
   const [showGalleryOverlay, setShowGalleryOverlay] = useState(false);
   const [galleryView, setGalleryView] = useState<"chapter" | "type" | "time">("chapter");
+  const [backgroundPickerTarget, setBackgroundPickerTarget] = useState<BackgroundPickerTarget | null>(null);
+  const [isPreparingBackgroundLibrary, setIsPreparingBackgroundLibrary] = useState(false);
   const logEndRef = useRef<HTMLDivElement>(null);
   const activeJobRef = useRef<string | null>(null);
   const [activeNav, setActiveNav] = useState("workspace");
@@ -186,6 +210,7 @@ export function App() {
     setMaterials([]);
     setSelectedMaterial(null);
     setShowGalleryOverlay(false);
+    setBackgroundPickerTarget(null);
     state.patch({ isDryRun: false });
   };
 
@@ -284,7 +309,10 @@ export function App() {
     engine: state.renderEngine,
     cover: state.cover,
     fps: 30,
-  }), [state.title, state.titleSubtitle, state.watermark, state.aspectRatio, state.quality, state.renderEngine, state.cover]);
+    title_background_path: state.titleBackgroundPath,
+    end_background_path: state.endBackgroundPath,
+    chapter_background_mode: state.chapterBackgroundMode,
+  }), [state.title, state.titleSubtitle, state.watermark, state.aspectRatio, state.quality, state.renderEngine, state.cover, state.titleBackgroundPath, state.endBackgroundPath, state.chapterBackgroundMode]);
 
   const v5CommandPreview = useMemo(() => buildV5RenderCommandPreview({
     planPath: v5PlanPath || "<render_plan.json>",
@@ -293,6 +321,88 @@ export function App() {
   }), [v5PlanPath, v5OutputPath, v5RenderParams]);
 
   const activeCommandPreview = state.v5Stage === "RENDER" ? v5CommandPreview : commandPreview;
+
+  async function ensureBackgroundLibrary(target: BackgroundPickerTarget) {
+    if (!state.inputFolder) {
+      setToast("请先选择素材目录，然后再选择片头/片尾背景图。");
+      return;
+    }
+
+    setBackgroundPickerTarget(target);
+
+    if (state.v5Library) {
+      return;
+    }
+
+    if (!state.outputFolder) {
+      setToast("请先选择输出目录。素材库 JSON 将写入输出目录下的 .video_create_project，避免污染原始素材目录。");
+      setHighlightOutput(true);
+      setBackgroundPickerTarget(null);
+      return;
+    }
+
+    setIsPreparingBackgroundLibrary(true);
+    setPhase("正在准备素材库...");
+    setProgress(10);
+    try {
+      const library = await scanV5(state.inputFolder, v5ProjectDir, state.recursive);
+      state.patch({ v5Library: library });
+      setToast(target.kind === "title" ? "请选择片头文案背景图片。" : target.kind === "end" ? "请选择片尾文案背景图片。" : `请选择章节「${target.sectionTitle}」背景图片或视频帧。`);
+    } catch (error) {
+      console.error("Prepare background library failed:", error);
+      setToast(`素材库准备失败: ${error}`);
+      setBackgroundPickerTarget(null);
+    } finally {
+      setIsPreparingBackgroundLibrary(false);
+    }
+  }
+
+  function onSelectBackgroundAsset(target: BackgroundPickerTarget, asset: V5Asset) {
+    if (target.kind === "title") {
+      state.patch({ titleBackgroundPath: asset.absolute_path });
+      setToast(`已选择片头背景：${asset.file.name}`);
+    } else if (target.kind === "end") {
+      state.patch({ endBackgroundPath: asset.absolute_path });
+      setToast(`已选择片尾背景：${asset.file.name}`);
+    } else if (state.v5Blueprint) {
+      const updated = updateBlueprintSection(state.v5Blueprint, target.sectionId, (section) => ({
+        ...section,
+        background: {
+          mode: "custom_asset",
+          custom_asset_id: asset.asset_id,
+          custom_path: asset.absolute_path,
+          user_overridden: true,
+        },
+        user_overridden: true,
+      }));
+      state.patch({ v5Blueprint: updated });
+      setToast(`已为章节「${target.sectionTitle}」选择背景：${asset.file.name}`);
+    }
+    setBackgroundPickerTarget(null);
+  }
+
+  function onClearBackgroundAsset(target: BackgroundPickerTarget) {
+    if (target.kind === "title") {
+      state.patch({ titleBackgroundPath: null });
+      setToast("片头背景已恢复默认：使用成片第一个画面首帧虚化。");
+    } else if (target.kind === "end") {
+      state.patch({ endBackgroundPath: null });
+      setToast("片尾背景已恢复默认：使用成片最后一个画面尾帧虚化。");
+    } else if (state.v5Blueprint) {
+      const updated = updateBlueprintSection(state.v5Blueprint, target.sectionId, (section) => ({
+        ...section,
+        background: {
+          mode: state.chapterBackgroundMode,
+          custom_asset_id: null,
+          custom_path: null,
+          user_overridden: false,
+        },
+      }));
+      state.patch({ v5Blueprint: updated });
+      setToast(`章节「${target.sectionTitle}」背景已恢复默认。`);
+    }
+    setBackgroundPickerTarget(null);
+  }
 
   async function onGenerate(dryRun: boolean = false) {
     if (isRendering) {
@@ -422,8 +532,12 @@ export function App() {
       const bpPath = `${v5ProjectDir}\\story_blueprint.json`;
       const libPath = `${v5ProjectDir}\\media_library.json`;
       
-      // 1. 保存
-      await saveBlueprintV5(bpPath, JSON.stringify(state.v5Blueprint, null, 2));
+      // 1. 保存：把全局章节背景模式写入故事蓝图，供 compile 阶段生成 Render Plan。
+      const blueprintForCompile = withBlueprintMetadata(state.v5Blueprint, {
+        chapter_background_mode: state.chapterBackgroundMode,
+        scenic_spot_title_mode: "overlay",
+      });
+      await saveBlueprintV5(bpPath, JSON.stringify(blueprintForCompile, null, 2));
       
       // 2. 编译
       setPhase("正在编译渲染计划...");
@@ -431,7 +545,7 @@ export function App() {
       const plan = await compileV5(bpPath, libPath, `${v5ProjectDir}\\render_plan.json`);
       
       // 3. 进入渲染阶段
-      state.patch({ v5RenderPlan: plan, v5Stage: "RENDER" });
+      state.patch({ v5Blueprint: blueprintForCompile, v5RenderPlan: plan, v5Stage: "RENDER" });
       setPhase("渲染计划就绪");
       setProgress(100);
     } catch (error) {
@@ -525,6 +639,14 @@ export function App() {
               <label>
                 片头主标题
                 <input value={state.title} onChange={(event) => state.patch({ title: event.target.value })} />
+                <div className="background-field-actions">
+                  <button type="button" className="background-pick-btn" disabled={!state.inputFolder} onClick={() => ensureBackgroundLibrary({ kind: "title" })}>
+                    <ImagePlus size={14} /> 选择片头背景
+                  </button>
+                  <span className="background-field-hint" title={state.titleBackgroundPath || ""}>
+                    {state.titleBackgroundPath ? shortPathName(state.titleBackgroundPath) : "默认：首个素材首帧虚化"}
+                  </span>
+                </div>
               </label>
               <label>
                 片头副标题
@@ -533,6 +655,14 @@ export function App() {
               <label>
                 片尾文字
                 <input value={state.endText} onChange={(event) => state.patch({ endText: event.target.value })} />
+                <div className="background-field-actions">
+                  <button type="button" className="background-pick-btn" disabled={!state.inputFolder} onClick={() => ensureBackgroundLibrary({ kind: "end" })}>
+                    <ImagePlus size={14} /> 选择片尾背景
+                  </button>
+                  <span className="background-field-hint" title={state.endBackgroundPath || ""}>
+                    {state.endBackgroundPath ? shortPathName(state.endBackgroundPath) : "默认：最后素材尾帧虚化"}
+                  </span>
+                </div>
               </label>
               <label>
                 输出文件名
@@ -587,6 +717,22 @@ export function App() {
               />
             </div>
 
+            <div className="option-row chapter-bg-option-row">
+              <SegmentedControl
+                label="章节卡背景"
+                value={state.chapterBackgroundMode}
+                options={[
+                  ["auto_bridge", "智能过渡"],
+                  ["auto_first_asset", "章节首图"],
+                  ["plain", "纯色极简"],
+                ]}
+                onChange={(value) => state.patch({ chapterBackgroundMode: value as V5ChapterBackgroundMode })}
+              />
+              <div className="chapter-bg-help">
+                城市 / 日期默认插入完整章节卡；景点默认使用首素材标题叠加，减少视频割裂。
+              </div>
+            </div>
+
             <div className="toggles">
               <Toggle checked={state.recursive} label="递归读取子目录" onChange={(recursive) => state.patch({ recursive })} />
               <Toggle
@@ -618,6 +764,8 @@ export function App() {
                   <BlueprintEditor 
                     blueprint={state.v5Blueprint} 
                     library={state.v5Library}
+                    chapterBackgroundMode={state.chapterBackgroundMode}
+                    onPickSectionBackground={(section) => ensureBackgroundLibrary({ kind: "section", sectionId: section.section_id, sectionTitle: section.title })}
                     onUpdate={(bp) => state.patch({ v5Blueprint: bp })}
                   />
                   <div className="blueprint-actions">
@@ -757,6 +905,18 @@ export function App() {
       </div>
     )}
 
+    {backgroundPickerTarget && (
+      <BackgroundAssetPicker
+        target={backgroundPickerTarget}
+        library={state.v5Library}
+        selectedPath={getSelectedBackgroundPath(backgroundPickerTarget, state)}
+        loading={isPreparingBackgroundLibrary}
+        onSelect={(asset) => onSelectBackgroundAsset(backgroundPickerTarget, asset)}
+        onUseDefault={() => onClearBackgroundAsset(backgroundPickerTarget)}
+        onClose={() => setBackgroundPickerTarget(null)}
+      />
+    )}
+
     {selectedMaterial && (
       <PreviewModal material={selectedMaterial} onClose={() => setSelectedMaterial(null)} />
     )}
@@ -887,7 +1047,19 @@ function Toast({ title = "缺少生成参数", message, onClose }: { title?: str
   );
 }
 
-function BlueprintEditor({ blueprint, library, onUpdate }: { blueprint: V5StoryBlueprint; library: V5MediaLibrary; onUpdate: (bp: V5StoryBlueprint) => void }) {
+function BlueprintEditor({
+  blueprint,
+  library,
+  chapterBackgroundMode,
+  onPickSectionBackground,
+  onUpdate,
+}: {
+  blueprint: V5StoryBlueprint;
+  library: V5MediaLibrary;
+  chapterBackgroundMode: V5ChapterBackgroundMode;
+  onPickSectionBackground: (section: V5StorySection) => void;
+  onUpdate: (bp: V5StoryBlueprint) => void;
+}) {
   if (!blueprint) return null;
 
   const updateSection = (id: string, updatedSection: V5StorySection) => {
@@ -909,7 +1081,9 @@ function BlueprintEditor({ blueprint, library, onUpdate }: { blueprint: V5StoryB
           <SectionCard 
             key={section.section_id} 
             section={section} 
-            library={library} 
+            library={library}
+            chapterBackgroundMode={chapterBackgroundMode}
+            onPickBackground={onPickSectionBackground}
             onUpdate={(upd) => updateSection(section.section_id, upd)}
           />
         ))}
@@ -918,13 +1092,26 @@ function BlueprintEditor({ blueprint, library, onUpdate }: { blueprint: V5StoryB
   );
 }
 
-function SectionCard({ section, library, onUpdate }: { section: V5StorySection; library: V5MediaLibrary; onUpdate: (updated: V5StorySection) => void }) {
+function SectionCard({
+  section,
+  library,
+  chapterBackgroundMode,
+  onPickBackground,
+  onUpdate,
+}: {
+  section: V5StorySection;
+  library: V5MediaLibrary;
+  chapterBackgroundMode: V5ChapterBackgroundMode;
+  onPickBackground: (section: V5StorySection) => void;
+  onUpdate: (updated: V5StorySection) => void;
+}) {
   const [isExpanded, setIsExpanded] = useState(false);
   const icon = section.section_type === 'city' ? <MapPin size={16} /> : 
                section.section_type === 'date' ? <Calendar size={16} /> : 
                section.section_type === 'scenic_spot' ? <Palmtree size={16} /> : <Layers size={16} />;
 
   const getAssetById = (id: string) => library?.assets.find(a => a.asset_id === id);
+  const bgState = sectionBackgroundLabel(section, chapterBackgroundMode);
 
   const toggleSection = () => onUpdate({ ...section, enabled: !section.enabled });
   
@@ -958,6 +1145,13 @@ function SectionCard({ section, library, onUpdate }: { section: V5StorySection; 
             />
             <Pencil size={12} className="edit-indicator" />
           </div>
+          <div className="section-bg-actions">
+             <span className={`section-bg-badge ${bgState.kind}`} title={bgState.description}>背景：{bgState.label}</span>
+             <button className="section-bg-btn" type="button" onClick={() => onPickBackground(section)}>选择背景</button>
+             {section.background?.user_overridden && (
+               <button className="section-bg-btn muted" type="button" onClick={() => onUpdate({ ...section, background: { mode: chapterBackgroundMode, custom_asset_id: null, custom_path: null, user_overridden: false } })}>默认</button>
+             )}
+          </div>
           <div className="section-actions">
              <button className="icon-btn" onClick={() => setIsExpanded(!isExpanded)} title={isExpanded ? "收起预览" : "放大预览"}>
                 {isExpanded ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
@@ -977,7 +1171,9 @@ function SectionCard({ section, library, onUpdate }: { section: V5StorySection; 
               <SectionCard 
                 key={child.section_id} 
                 section={child} 
-                library={library} 
+                library={library}
+                chapterBackgroundMode={chapterBackgroundMode}
+                onPickBackground={onPickBackground}
                 onUpdate={(upd) => updateChild(child.section_id, upd)}
               />
             ))}
@@ -1020,6 +1216,97 @@ function SectionCard({ section, library, onUpdate }: { section: V5StorySection; 
        )}
     </div>
   );
+}
+
+
+function updateBlueprintSection(
+  blueprint: V5StoryBlueprint,
+  sectionId: string,
+  updater: (section: V5StorySection) => V5StorySection,
+): V5StoryBlueprint {
+  return {
+    ...blueprint,
+    sections: updateSectionList(blueprint.sections || [], sectionId, updater),
+    metadata: {
+      ...(blueprint.metadata || {}),
+      updated_at: new Date().toISOString(),
+    },
+  };
+}
+
+function updateSectionList(
+  sections: V5StorySection[],
+  sectionId: string,
+  updater: (section: V5StorySection) => V5StorySection,
+): V5StorySection[] {
+  return sections.map((section) => {
+    if (section.section_id === sectionId) {
+      return updater(section);
+    }
+    return {
+      ...section,
+      children: updateSectionList(section.children || [], sectionId, updater),
+    };
+  });
+}
+
+function findSectionById(sections: V5StorySection[] | undefined, sectionId: string): V5StorySection | null {
+  for (const section of sections || []) {
+    if (section.section_id === sectionId) return section;
+    const found = findSectionById(section.children || [], sectionId);
+    if (found) return found;
+  }
+  return null;
+}
+
+function withBlueprintMetadata(
+  blueprint: V5StoryBlueprint,
+  patch: NonNullable<V5StoryBlueprint["metadata"]>,
+): V5StoryBlueprint {
+  return {
+    ...blueprint,
+    metadata: {
+      ...(blueprint.metadata || {}),
+      ...patch,
+      updated_at: new Date().toISOString(),
+    },
+  };
+}
+
+function getSelectedBackgroundPath(target: BackgroundPickerTarget, state: StudioState): string | null {
+  if (target.kind === "title") return state.titleBackgroundPath;
+  if (target.kind === "end") return state.endBackgroundPath;
+  const section = findSectionById(state.v5Blueprint?.sections, target.sectionId);
+  return section?.background?.custom_path || null;
+}
+
+function sectionBackgroundLabel(section: V5StorySection, globalMode: V5ChapterBackgroundMode): { label: string; kind: string; description: string } {
+  if (section.background?.user_overridden && section.background.custom_path) {
+    return { label: "已自定义", kind: "custom", description: section.background.custom_path };
+  }
+
+  if (section.section_type === "scenic_spot") {
+    return {
+      label: "标题叠加",
+      kind: "overlay",
+      description: "景点章节默认不插入完整章节卡，而是在首个素材上叠加标题。若手动选择背景，则会升级为完整章节卡。",
+    };
+  }
+
+  return {
+    label: chapterBackgroundModeLabel(globalMode),
+    kind: globalMode,
+    description: "城市 / 日期 / 普通章节默认使用完整章节卡。",
+  };
+}
+
+function chapterBackgroundModeLabel(mode: V5ChapterBackgroundMode): string {
+  return {
+    auto_bridge: "智能过渡",
+    auto_first_asset: "章节首图",
+    custom_asset: "已自定义",
+    plain: "纯色极简",
+  }[mode] || mode;
 }
 
 function getAssetThumbnailPath(asset: unknown): string | null {
@@ -1216,6 +1503,111 @@ function Toggle({ checked, label, onChange }: { checked: boolean; label: string;
     </label>
   );
 }
+function BackgroundAssetPicker({
+  target,
+  library,
+  selectedPath,
+  loading,
+  onSelect,
+  onUseDefault,
+  onClose,
+}: {
+  target: BackgroundPickerTarget;
+  library: V5MediaLibrary | null;
+  selectedPath: string | null;
+  loading: boolean;
+  onSelect: (asset: V5Asset) => void;
+  onUseDefault: () => void;
+  onClose: () => void;
+}) {
+  const visualAssets = useMemo(() => {
+    return (library?.assets || [])
+      .filter((asset) => (asset.type === "image" || asset.type === "video") && assetStatusState(asset) !== "error")
+      .sort((a, b) => a.relative_path.localeCompare(b.relative_path));
+  }, [library]);
+
+  const title = target.kind === "title"
+    ? "选择片头文案背景"
+    : target.kind === "end"
+      ? "选择片尾文案背景"
+      : `选择章节「${target.sectionTitle}」背景`;
+
+  const defaultHint = target.kind === "title"
+    ? "不选择时，默认使用成片第一个素材的首帧/首图作为虚化背景。"
+    : target.kind === "end"
+      ? "不选择时，默认使用成片最后一个素材的尾帧/末图作为虚化背景。"
+      : "不选择时，默认使用章节前后视觉素材生成智能过渡虚化背景；景点章节默认使用首素材标题叠加。";
+
+  const defaultButtonText = target.kind === "section" ? "恢复章节智能背景" : "恢复默认首/尾帧虚化";
+
+  return (
+    <div className="background-picker-overlay">
+      <div className="background-picker-modal">
+        <div className="background-picker-header">
+          <div>
+            <SectionTitle icon={<ImagePlus size={20} />} title={title} />
+            <p>{defaultHint}</p>
+          </div>
+          <button className="background-picker-close" type="button" onClick={onClose}>
+            <X size={18} /> 关闭
+          </button>
+        </div>
+
+        <div className="background-picker-toolbar">
+          <button className="secondary-action" type="button" onClick={onUseDefault}>
+            {defaultButtonText}
+          </button>
+          {selectedPath && (
+            <span className="background-picker-selected">当前：{shortPathName(selectedPath)}</span>
+          )}
+        </div>
+
+        {loading ? (
+          <div className="background-picker-empty">正在扫描素材库，请稍候...</div>
+        ) : visualAssets.length === 0 ? (
+          <div className="background-picker-empty">素材库里还没有可用图片或视频。请先确认素材目录下包含 JPG / PNG / WEBP / MP4 / MOV 等素材。</div>
+        ) : (
+          <div className="background-picker-grid">
+            {visualAssets.map((asset) => {
+              const thumb = asset.thumbnail_path || asset.thumbnail || asset.absolute_path;
+              const selected = selectedPath === asset.absolute_path;
+              return (
+                <button
+                  type="button"
+                  key={asset.asset_id}
+                  className={`background-asset-card${selected ? " selected" : ""}`}
+                  onClick={() => onSelect(asset)}
+                  title={asset.relative_path}
+                >
+                  <div className="background-asset-thumb">
+                    <img src={convertFileSrc(thumb)} alt={asset.file.name} loading="lazy" />
+                    {asset.type === "video" && <span className="background-video-badge">VIDEO</span>}
+                  </div>
+                  <div className="background-asset-info">
+                    <strong>{asset.file.name}</strong>
+                    <span>{asset.media.width || "?"}x{asset.media.height || "?"}</span>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function shortPathName(path: string | null | undefined): string {
+  if (!path) return "";
+  return path.split(/[\\/]/).pop() || path;
+}
+
+function assetStatusState(asset: V5Asset): string {
+  if (!asset.status) return "ready";
+  if (typeof asset.status === "string") return asset.status;
+  return asset.status.state || "ready";
+}
+
 function MaterialGallery({ materials, onSelect, viewMode }: { 
   materials: VideoEvent[]; 
   onSelect: (m: VideoEvent) => void;
