@@ -106,3 +106,25 @@ npm run build
 cargo check --manifest-path .\src-tauri\Cargo.toml
 npm run tauri dev
 ```
+
+## V5.3.2 稳定收口
+
+V5.3.2 的目标不是继续堆叠新剪辑能力，而是把 V5.3 已经具备的能力收口成可验证、可排查、可维护的工程版本。
+
+当前主流程：
+
+```text
+scan -> media_library.json -> plan -> story_blueprint.json -> compile -> render_plan.json -> render -> final mp4
+```
+
+关键能力：
+
+- 片头 / 片尾默认使用首帧 / 尾帧虚化背景。
+- 片头 / 片尾支持用户手动选择背景图片。
+- 投稿封面默认复用片头卡的虚化背景与标题布局。
+- 章节卡支持智能过渡背景、章节首图背景、纯色背景、自定义背景。
+- 景点章节默认使用标题叠加，减少完整章节卡造成的视频割裂感。
+- CI 增加 Python 依赖安装与 scan / plan / compile 最小烟测。
+
+V3 `make_bilibili_video_v3.py` 仅作为 Legacy 兼容路径保留；V5 主流程以 `video_engine_v5.py` 为准。
+

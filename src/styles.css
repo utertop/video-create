@@ -1338,7 +1338,7 @@ select:focus {
 
 .seg-time {
   text-align: right;
-  font-family: " Cascadia Mono\, Consolas, monospace;
+  font-family: "Cascadia Mono", Consolas, monospace;
  color: #4ade80;
  opacity: 0.8;
 }
@@ -1540,7 +1540,7 @@ select:focus {
 
 .current-progress-text {
   margin-left: auto;
-  font-family: " Cascadia Mono\, Consolas, monospace;
+  font-family: "Cascadia Mono", Consolas, monospace;
  background: #10b981;
  color: white;
  padding: 2px 10px;
@@ -1613,7 +1613,7 @@ select:focus {
 }
 
 .percent-number {
-  font-family: " Cascadia Mono\, Consolas, monospace;
+  font-family: "Cascadia Mono", Consolas, monospace;
  font-weight: 800;
  color: #10b981;
  font-size: 1.2rem;

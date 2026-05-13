@@ -49,3 +49,6 @@ jobs:
 
       - name: Python CLI smoke check
         run: python .\video_engine_v5.py --help
+
+      - name: Python V5 scan plan compile smoke test
+        run: python .\tests\smoke_v5.py

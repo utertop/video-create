@@ -31,6 +31,33 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+
+# V5.3.2 early help guard
+# Keep `python video_engine_v5.py --help` available even before optional media
+# dependencies such as numpy/moviepy/pillow are installed. Real scan/render work
+# still validates dependencies when the command continues past this point.
+def _print_early_help_without_optional_deps() -> None:
+    print("""Video Create Studio V5.3.2 Engine
+
+usage:
+  python video_engine_v5.py scan    --input_folder <folder> --output <media_library.json> [--recursive]
+  python video_engine_v5.py plan    --library <media_library.json> --output <story_blueprint.json>
+  python video_engine_v5.py compile --blueprint <story_blueprint.json> --library <media_library.json> --output <render_plan.json>
+  python video_engine_v5.py render  --plan <render_plan.json> --output <video.mp4> [--params <json>]
+
+Pipeline:
+  scan -> media_library.json -> plan -> story_blueprint.json -> compile -> render_plan.json -> render -> final mp4
+
+Notes:
+  - --help intentionally does not import heavy media dependencies.
+  - scan/render require dependencies from requirements.txt.
+""")
+
+
+if any(arg in {"-h", "--help"} for arg in sys.argv[1:]):
+    _print_early_help_without_optional_deps()
+    raise SystemExit(0)
+
 try:
     from proglog import ProgressBarLogger
 except Exception:  # pragma: no cover
@@ -65,8 +92,8 @@ except Exception:
 # Constants
 # =========================
 
-SCHEMA_VERSION = "5.0"
-ENGINE_VERSION = "video-create-engine-v5.1.1"
+SCHEMA_VERSION = "5.3"
+ENGINE_VERSION = "video-create-engine-v5.3.2"
 
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
 VIDEO_EXTS = (".mp4", ".mov", ".avi", ".mkv", ".m4v")
