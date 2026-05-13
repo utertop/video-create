@@ -37,7 +37,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 # dependencies such as numpy/moviepy/pillow are installed. Real scan/render work
 # still validates dependencies when the command continues past this point.
 def _print_early_help_without_optional_deps() -> None:
-    print("""Video Create Studio V5.3.2 Engine
+    print("""Video Create Studio V5.4.2 Engine
 
 usage:
   python video_engine_v5.py scan    --input_folder <folder> --output <media_library.json> [--recursive]
@@ -93,7 +93,7 @@ except Exception:
 # =========================
 
 SCHEMA_VERSION = "5.3"
-ENGINE_VERSION = "video-create-engine-v5.3.2"
+ENGINE_VERSION = "video-create-engine-v5.4.2"
 
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
 VIDEO_EXTS = (".mp4", ".mov", ".avi", ".mkv", ".m4v")
@@ -101,12 +101,40 @@ ALL_EXTS = IMAGE_EXTS + VIDEO_EXTS
 
 CITY_KEYWORDS = [
     "北京", "上海", "广州", "深圳", "杭州", "泉州", "厦门", "福州", "南京", "苏州",
-    "成都", "重庆", "西安", "东京", "京都", "巴黎", "伦敦", "纽约", "市", "州"
+    "成都", "重庆", "西安", "东京", "京都", "巴黎", "伦敦", "纽约",
 ]
-SPOT_KEYWORDS = [
-    "寺", "庙", "园", "山", "桥", "塔", "宫", "馆", "街", "巷", "岛", "湖", "海",
-    "湾", "西街", "开元寺", "鼓浪屿", "曾厝垵", "外滩"
+
+# V5.4.2 directory recognition strategy:
+# - Strong spot names can identify scenic spots when there is travel context.
+# - Suffix keywords are useful under city/date/chapter parents, but should not override
+#   first-level content categories by themselves.
+# - Weak one-character keywords such as "山" or "桥" are only signals, not decisions.
+SPOT_STRONG_KEYWORDS = [
+    "开元寺", "西街", "鼓浪屿", "曾厝垵", "清源山", "武夷山", "黄山", "泰山",
+    "外滩", "故宫", "天坛", "颐和园", "兵马俑", "环球影城", "迪士尼",
 ]
+
+SPOT_SUFFIX_KEYWORDS = [
+    "寺", "庙", "宫", "塔", "岛", "湖", "海", "湾", "街", "巷", "馆", "园",
+    "古城", "古镇", "公园", "博物馆", "美术馆", "植物园", "动物园",
+]
+
+SPOT_WEAK_KEYWORDS = [
+    "山", "桥", "路", "村", "城", "港", "江", "河",
+]
+
+THEME_KEYWORDS = [
+    "猫", "猫咪", "狗", "宠物", "美食", "登山", "滑雪", "雪崩", "日常", "人物",
+    "人像", "运动", "露营", "航拍", "街拍",
+]
+
+EVENT_KEYWORDS = [
+    "婚礼", "生日", "聚会", "毕业", "演出", "旅行", "团建", "年会",
+]
+
+# Backward-compatible alias for old code/comments.
+SPOT_KEYWORDS = SPOT_STRONG_KEYWORDS + SPOT_SUFFIX_KEYWORDS + SPOT_WEAK_KEYWORDS
+
 DATE_PATTERNS = [
     re.compile(r"^20\d{2}[-_.年]\d{1,2}[-_.月]\d{1,2}日?$"),
     re.compile(r"^\d{4}[-_.]\d{1,2}[-_.]\d{1,2}$"),
@@ -238,27 +266,106 @@ def is_ignored_file(path: Path) -> bool:
     return False
 
 
-def detect_directory_type(name: str, depth: int) -> Tuple[str, float, str]:
+def match_keywords(name: str, keywords: Iterable[str]) -> List[str]:
+    return [kw for kw in keywords if kw and kw in name]
+
+
+def detect_directory_type(
+    name: str,
+    depth: int,
+    parent_type: str = "project_root",
+    sibling_names: Optional[List[str]] = None,
+) -> Tuple[str, float, str, Dict[str, Any], str]:
+    """
+    V5.4.2 hierarchy-aware directory recognition.
+
+    Return:
+      detected_type, confidence, reason, signals, raw_detected_type
+
+    Important rules:
+      - First-level folders under project root default to chapter.
+      - scenic_spot requires travel context such as city/date parent, or a strong spot name.
+      - Weak single-character spot keywords never decide scenic_spot by themselves.
+      - Sibling normalization runs later in Scanner._normalize_directory_nodes().
+    """
     normalized = name.strip()
     lower = normalized.lower()
+    parent_type = parent_type or "project_root"
+
+    matched_city = match_keywords(normalized, CITY_KEYWORDS)
+    matched_spot_strong = match_keywords(normalized, SPOT_STRONG_KEYWORDS)
+    matched_spot_suffix = match_keywords(normalized, SPOT_SUFFIX_KEYWORDS)
+    matched_spot_weak = match_keywords(normalized, SPOT_WEAK_KEYWORDS)
+    matched_theme = match_keywords(normalized, THEME_KEYWORDS)
+    matched_event = match_keywords(normalized, EVENT_KEYWORDS)
+
+    signals: Dict[str, Any] = {
+        "parent_detected_type": parent_type,
+        "depth": depth,
+        "matched_city_keywords": matched_city,
+        "matched_spot_strong_keywords": matched_spot_strong,
+        "matched_spot_suffix_keywords": matched_spot_suffix,
+        "matched_spot_weak_keywords": matched_spot_weak,
+        "matched_theme_keywords": matched_theme,
+        "matched_event_keywords": matched_event,
+        "date_pattern_matched": False,
+        "sibling_names": sibling_names or [],
+    }
+
+    if depth == 0:
+        return "unknown", 0.35, "项目根目录，不作为叙事章节类型", signals, "project_root"
 
     for pattern in DATE_PATTERNS:
         if pattern.search(lower):
-            return "date", 0.96, "目录名匹配日期模式"
+            signals["date_pattern_matched"] = True
+            return "date", 0.96, "目录名匹配日期模式", signals, "date"
 
-    for kw in CITY_KEYWORDS:
-        if kw and kw in normalized:
-            return "city", 0.92, f"目录名匹配城市关键词: {kw}"
+    if matched_city:
+        return "city", 0.90, f"目录名匹配城市关键词: {matched_city[0]}", signals, "city"
 
-    for kw in SPOT_KEYWORDS:
-        if kw and kw in normalized:
-            return "scenic_spot", 0.88, f"目录名匹配景点关键词: {kw}"
+    has_travel_parent = parent_type in {"city", "date"}
+    has_story_parent = parent_type in {"chapter", "theme", "event"}
+    strong_spot = bool(matched_spot_strong)
+    suffix_spot = bool(matched_spot_suffix)
+    weak_only_spot = bool(matched_spot_weak) and not strong_spot and not suffix_spot
+
+    if has_travel_parent and (strong_spot or suffix_spot):
+        kw = (matched_spot_strong or matched_spot_suffix)[0]
+        return "scenic_spot", 0.88, f"父目录为 {parent_type}，且命中景点特征: {kw}", signals, "scenic_spot"
+
+    if has_travel_parent and depth >= 2 and not (matched_theme or matched_event):
+        return "scenic_spot", 0.64, "父目录为城市/日期，深层目录默认按景点候选处理", signals, "scenic_spot_candidate"
+
+    if strong_spot and depth >= 2:
+        kw = matched_spot_strong[0]
+        return "scenic_spot", 0.78, f"深层目录命中强景点名: {kw}", signals, "scenic_spot"
+
+    if depth == 1:
+        if matched_theme:
+            return "chapter", 0.74, f"一级目录默认作为内容章节；主题关键词: {matched_theme[0]}", signals, "theme"
+        if matched_event:
+            return "chapter", 0.74, f"一级目录默认作为内容章节；事件关键词: {matched_event[0]}", signals, "event"
+        if weak_only_spot:
+            return "chapter", 0.70, f"一级目录命中弱景点关键词 {matched_spot_weak[0]}，不足以判定为景点，按内容章节处理", signals, "scenic_spot_candidate"
+        if suffix_spot and not has_travel_parent:
+            return "chapter", 0.68, f"一级目录命中景点后缀 {matched_spot_suffix[0]}，但缺少城市/日期父级上下文，按章节处理", signals, "scenic_spot_candidate"
+        return "chapter", 0.65, "一级目录默认识别为内容章节", signals, "chapter"
+
+    if has_story_parent and (strong_spot or suffix_spot):
+        kw = (matched_spot_strong or matched_spot_suffix)[0]
+        return "scenic_spot", 0.72, f"章节下子目录命中景点特征: {kw}", signals, "scenic_spot"
+
+    if matched_theme:
+        return "chapter", 0.66, f"目录命中主题关键词: {matched_theme[0]}，按章节处理", signals, "theme"
+
+    if weak_only_spot:
+        return "chapter", 0.58, f"仅命中弱景点关键词 {matched_spot_weak[0]}，按章节处理", signals, "scenic_spot_candidate"
 
     if depth >= 2:
-        return "scenic_spot", 0.60, "基于目录深度推断为景点/子章节"
-    if depth == 1:
-        return "chapter", 0.55, "一级目录默认识别为章节"
-    return "unknown", 0.35, "根目录或未知目录"
+        return "chapter", 0.56, "深层目录未命中明确景点特征，按子章节处理", signals, "chapter"
+
+    return "unknown", 0.35, "未知目录类型", signals, "unknown"
+
 
 
 def get_exif_date(img: Image.Image) -> Optional[str]:
@@ -337,6 +444,9 @@ class DirectoryNode:
     confidence: float
     reason: str
     display_title: str
+    raw_detected_type: Optional[str] = None
+    signals: Dict[str, Any] = field(default_factory=dict)
+    user_override_fields: List[str] = field(default_factory=list)
     asset_count: int = 0
     children: List[str] = field(default_factory=list)
     auto_detected: bool = True
@@ -432,6 +542,8 @@ class Scanner:
 
         emit_event("phase", phase="scan", message="开始扫描素材", percent=5)
         self._scan_dir(self.root, depth=0, parent_id=None, inherited={})
+        self._normalize_directory_nodes()
+        self._refresh_asset_classification_context()
         emit_event("phase", phase="scan", message="素材扫描完成", percent=100)
 
         return {
@@ -461,7 +573,13 @@ class Scanner:
         inherited: Dict[str, Optional[str]],
     ) -> str:
         rel = "" if current == self.root else current.relative_to(self.root).as_posix()
-        dtype, confidence, reason = detect_directory_type(current.name, depth)
+        parent_type = self.nodes[parent_id].detected_type if parent_id and parent_id in self.nodes else "project_root"
+        sibling_names: List[str] = []
+        try:
+            sibling_names = [p.name for p in current.parent.iterdir() if p.is_dir()] if current.parent else []
+        except Exception:
+            sibling_names = []
+        dtype, confidence, reason, signals, raw_type = detect_directory_type(current.name, depth, parent_type, sibling_names)
         node_id = "dir_" + safe_id(rel or current.name)
         node = DirectoryNode(
             node_id=node_id,
@@ -473,6 +591,8 @@ class Scanner:
             confidence=confidence,
             reason=reason,
             display_title=current.name,
+            raw_detected_type=raw_type,
+            signals=signals,
         )
         self.nodes[node_id] = node
 
@@ -522,6 +642,92 @@ class Scanner:
                     )
 
         return node_id
+
+    def _normalize_directory_nodes(self) -> None:
+        """Second-pass normalization for sibling consistency and weak keyword false positives."""
+        for parent in list(self.nodes.values()):
+            children = [self.nodes[cid] for cid in parent.children if cid in self.nodes]
+            if not children:
+                continue
+
+            counts: Dict[str, int] = {}
+            for child in children:
+                counts[child.detected_type] = counts.get(child.detected_type, 0) + 1
+            majority_type = max(counts.items(), key=lambda item: item[1])[0] if counts else None
+            parent_type = parent.detected_type or "project_root"
+            parent_is_travel = parent_type in {"city", "date"}
+
+            for child in children:
+                if child.user_overridden:
+                    continue
+
+                signals = child.signals or {}
+                signals["sibling_majority_type"] = majority_type
+                signals["sibling_type_counts"] = counts
+                signals["parent_detected_type"] = parent_type
+
+                weak_only = bool(signals.get("matched_spot_weak_keywords")) and not signals.get("matched_spot_strong_keywords") and not signals.get("matched_spot_suffix_keywords")
+                no_strong_spot = not signals.get("matched_spot_strong_keywords")
+                first_level_under_root = parent.parent_id is None and child.depth == 1
+
+                if (
+                    child.detected_type == "scenic_spot"
+                    and not parent_is_travel
+                    and (first_level_under_root or majority_type == "chapter" or weak_only or no_strong_spot)
+                ):
+                    original = child.detected_type
+                    child.raw_detected_type = child.raw_detected_type or original
+                    child.detected_type = "chapter"
+                    child.confidence = max(float(child.confidence or 0), 0.72)
+                    child.reason = (
+                        "同级目录一致性修正：父目录不是城市/日期，"
+                        "弱景点关键词或单个景点候选不足以单独判定 scenic_spot，按章节处理"
+                    )
+                    signals["normalized_from"] = original
+                    signals["normalization_rule"] = "sibling_context_consistency"
+
+                if first_level_under_root and child.detected_type not in {"city", "date", "chapter"}:
+                    original = child.detected_type
+                    child.raw_detected_type = child.raw_detected_type or original
+                    child.detected_type = "chapter"
+                    child.confidence = max(float(child.confidence or 0), 0.70)
+                    child.reason = "一级同级素材目录统一作为内容章节，避免目录类型混杂"
+                    signals["normalized_from"] = original
+                    signals["normalization_rule"] = "first_level_content_chapter"
+
+                child.signals = signals
+
+    def _context_for_node(self, node_id: str) -> Dict[str, Optional[str]]:
+        city = None
+        date = None
+        scenic_spot = None
+        current = self.nodes.get(node_id)
+
+        while current:
+            if current.detected_type == "city" and city is None:
+                city = current.name
+            elif current.detected_type == "date" and date is None:
+                date = current.name
+            elif current.detected_type == "scenic_spot" and scenic_spot is None:
+                scenic_spot = current.name
+
+            if not current.parent_id:
+                break
+            current = self.nodes.get(current.parent_id)
+
+        return {"city": city, "date": date, "scenic_spot": scenic_spot}
+
+    def _refresh_asset_classification_context(self) -> None:
+        """Refresh asset city/date/scenic_spot after directory normalization."""
+        for asset in self.assets:
+            node_id = asset.classification.get("directory_node_id")
+            if not node_id:
+                continue
+            context = self._context_for_node(node_id)
+            asset.classification["city"] = context.get("city")
+            asset.classification["date"] = context.get("date")
+            asset.classification["scenic_spot"] = context.get("scenic_spot")
+
 
     def _scan_asset(self, path: Path, node_id: str, context: Dict[str, Optional[str]]) -> Asset:
         ext = path.suffix.lower()

@@ -128,3 +128,14 @@ scan -> media_library.json -> plan -> story_blueprint.json -> compile -> render_
 
 V3 `make_bilibili_video_v3.py` 仅作为 Legacy 兼容路径保留；V5 主流程以 `video_engine_v5.py` 为准。
 
+## V5.4.2 目录识别策略增强
+
+V5.4.2 将目录识别从简单关键词命中升级为“层级上下文 + 同级一致性 + 强/中/弱关键词 + 置信度解释”的策略。
+
+核心规则：
+
+- 根目录下一层素材目录默认作为 `chapter`，避免 `登山` 因单字 `山` 被误判为 `scenic_spot`。
+- `scenic_spot` 更依赖父级上下文：父目录是城市或日期时，子目录才更容易识别为景点。
+- 景点关键词分为强景点名、景点后缀、弱关键词；弱关键词不会单独决定类型。
+- 扫描后执行同级目录一致性修正，避免同一级目录出现一个 `SCENIC_SPOT`、其他都是 `CHAPTER` 的割裂结果。
+- `directory_nodes` 增加 `raw_detected_type` 与 `signals`，便于 GUI 展示识别依据，也方便用户覆盖自动识别结果。
