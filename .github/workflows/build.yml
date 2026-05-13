@@ -51,4 +51,4 @@ jobs:
         run: python .\video_engine_v5.py --help
 
       - name: Python V5 scan plan compile smoke test
-        run: python .\tests\smoke_v5.py
+        run: python .\tests\smoke_v5_4.py
