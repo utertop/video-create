@@ -256,8 +256,6 @@ export interface GenerateVideoResult {
 export interface RenderV5Params {
   title?: string;
   title_subtitle?: string;
-  /** Optional ending text. Real render text is compiled from story_blueprint before render. */
-  end_text?: string | null;
   watermark?: string;
   aspect_ratio?: AspectRatio;
   quality?: Quality;

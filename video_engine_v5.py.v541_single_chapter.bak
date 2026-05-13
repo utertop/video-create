@@ -712,7 +712,6 @@ class Compiler:
         self.time = 0.0
         self.segments: List[RenderSegment] = []
         self.last_visual_source_path: Optional[str] = None
-        self.single_auto_section_id: Optional[str] = None
 
     def compile(self) -> Dict[str, Any]:
         emit_event("phase", phase="compile", message="编译渲染计划", percent=20)
@@ -723,22 +722,6 @@ class Compiler:
             text=self.blueprint.get("title"),
             subtitle=self.blueprint.get("subtitle"),
         )
-
-        enabled_top_sections = [
-            section for section in self.blueprint.get("sections", [])
-            if section.get("enabled", True)
-        ]
-        if len(enabled_top_sections) == 1:
-            only_section = enabled_top_sections[0]
-            if (
-                only_section.get("auto_detected", True)
-                and not only_section.get("user_overridden", False)
-                and self.blueprint_metadata.get("single_section_chapter_card", "auto") == "auto"
-            ):
-                # Single automatic folder chapters, such as a one-off folder named "haha",
-                # are usually just containers. Suppress the extra chapter card to avoid
-                # confusing it with the opening title card.
-                self.single_auto_section_id = only_section.get("section_id")
 
         for section in self.blueprint.get("sections", []):
             self._section(section)
@@ -785,16 +768,11 @@ class Compiler:
         background = section.get("background") or {}
         has_custom_background = bool(background.get("user_overridden") and background.get("custom_path"))
         use_overlay_title = stype == "scenic_spot" and not has_custom_background and self.scenic_spot_title_mode == "overlay"
-        suppress_section_title = section.get("section_id") == self.single_auto_section_id
 
         pending_overlay_text = None
         pending_overlay_subtitle = None
 
-        if suppress_section_title:
-            # Only one automatic top-level section exists. Do not insert a chapter card
-            # and do not overlay the folder name. The opening title already introduces the video.
-            pass
-        elif stype in {"city", "date", "chapter"} or (stype == "scenic_spot" and not use_overlay_title):
+        if stype in {"city", "date", "chapter"} or (stype == "scenic_spot" and not use_overlay_title):
             bg_info = self._chapter_background_info(section)
             self._add(
                 "chapter",

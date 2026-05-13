@@ -360,7 +360,7 @@ export function App() {
   function onSelectBackgroundAsset(target: BackgroundPickerTarget, asset: V5Asset) {
     if (target.kind === "title") {
       state.patch({ titleBackgroundPath: asset.absolute_path });
-      setToast(`已选择片头背景：${asset.file.name}`);
+      setToast(`已选择片头卡背景：${asset.file.name}`);
     } else if (target.kind === "end") {
       state.patch({ endBackgroundPath: asset.absolute_path });
       setToast(`已选择片尾背景：${asset.file.name}`);
@@ -511,7 +511,18 @@ export function App() {
       
       const libPath = `${v5ProjectDir}\\media_library.json`;
       const blueprint = await planV5(libPath, `${v5ProjectDir}\\story_blueprint.json`);
-      state.patch({ v5Blueprint: blueprint, v5Stage: "BLUEPRINT" });
+      const blueprintWithGuiText = {
+        ...blueprint,
+        title: state.title,
+        subtitle: state.titleSubtitle,
+        end_text: state.endText,
+        metadata: {
+          ...(blueprint.metadata || {}),
+          end_text: state.endText,
+          gui_title_applied: true,
+        },
+      };
+      state.patch({ v5Blueprint: blueprintWithGuiText, v5Stage: "BLUEPRINT" });
       
       setPhase("蓝图就绪");
       setProgress(100);
@@ -637,19 +648,19 @@ export function App() {
             <SectionTitle icon={<Settings2 size={18} />} title="生成参数" />
             <div className="form-grid">
               <label>
-                片头主标题
+                视频片头标题（非封面）
                 <input value={state.title} onChange={(event) => state.patch({ title: event.target.value })} />
                 <div className="background-field-actions">
                   <button type="button" className="background-pick-btn" disabled={!state.inputFolder} onClick={() => ensureBackgroundLibrary({ kind: "title" })}>
                     <ImagePlus size={14} /> 选择片头背景
                   </button>
                   <span className="background-field-hint" title={state.titleBackgroundPath || ""}>
-                    {state.titleBackgroundPath ? shortPathName(state.titleBackgroundPath) : "默认：首个素材首帧虚化"}
+                    {state.titleBackgroundPath ? shortPathName(state.titleBackgroundPath) : "默认：首个素材首帧虚化；封面默认复用片头卡"}
                   </span>
                 </div>
               </label>
               <label>
-                片头副标题
+                视频片头副标题（可选，不填则不显示）
                 <input value={state.titleSubtitle} onChange={(event) => state.patch({ titleSubtitle: event.target.value })} />
               </label>
               <label>
