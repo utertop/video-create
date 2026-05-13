@@ -5,10 +5,16 @@ Minimal smoke test for Video Create Studio V5.x.
 This test intentionally does not run final video rendering. It only verifies that
 scan -> plan -> compile can complete with a tiny generated image. That keeps CI
 fast and avoids FFmpeg/MoviePy rendering flakiness in hosted runners.
+
+V5.3.2 unicode fix:
+- GitHub Actions Windows PowerShell may expose stdout/stderr as cp1252.
+- The smoke test uses Chinese folder names to verify Windows/Chinese-path behavior.
+- Therefore we force UTF-8 for this test process and child Python processes.
 """
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -21,8 +27,29 @@ ROOT = Path(__file__).resolve().parents[1]
 ENGINE = ROOT / "video_engine_v5.py"
 
 
+def configure_stdio() -> None:
+    """Make prints safe on Windows CI where console encoding may be cp1252."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+
+def format_cmd_for_log(args: list[str]) -> str:
+    """Return a readable command line without raising UnicodeEncodeError."""
+    return " ".join(str(x) for x in args)
+
+
 def run_cmd(args: list[str]) -> None:
-    print("RUN:", " ".join(str(x) for x in args))
+    print("RUN:", format_cmd_for_log(args))
+
+    env = os.environ.copy()
+    env.setdefault("PYTHONUTF8", "1")
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+
     completed = subprocess.run(
         args,
         cwd=str(ROOT),
@@ -31,7 +58,9 @@ def run_cmd(args: list[str]) -> None:
         errors="replace",
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        env=env,
     )
+
     if completed.stdout:
         print(completed.stdout)
     if completed.stderr:
@@ -53,11 +82,16 @@ def assert_document(path: Path, expected_type: str) -> dict:
 
 
 def main() -> None:
+    configure_stdio()
+
     if not ENGINE.exists():
         raise SystemExit(f"missing engine file: {ENGINE}")
 
     with tempfile.TemporaryDirectory(prefix="video_create_v5_smoke_") as tmp:
         base = Path(tmp)
+
+        # Keep Chinese names intentionally: this project targets Chinese Windows users,
+        # and this smoke test should catch path/encoding regressions early.
         input_dir = base / "素材" / "泉州" / "开元寺"
         project_dir = base / "output" / ".video_create_project"
         input_dir.mkdir(parents=True, exist_ok=True)

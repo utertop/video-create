@@ -32,7 +32,7 @@ jobs:
         run: npm run build
 
       - name: Check Python script syntax
-        run: python -m py_compile make_bilibili_video_v3.py
+        run: python -m py_compile video_engine_v5.py
 
       - name: Check Tauri backend
         working-directory: src-tauri
