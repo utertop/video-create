@@ -38,7 +38,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 # dependencies such as numpy/moviepy/pillow are installed. Real scan/render work
 # still validates dependencies when the command continues past this point.
 def _print_early_help_without_optional_deps() -> None:
-    print("""Video Create Studio V5.5.1 Engine
+    print("""Video Create Studio V5.5.0 Engine
 
 usage:
   python video_engine_v5.py scan    --input_folder <folder> --output <media_library.json> [--recursive]
@@ -94,7 +94,7 @@ except Exception:
 # =========================
 
 SCHEMA_VERSION = "5.5"
-ENGINE_VERSION = "video-create-engine-v5.5.1"
+ENGINE_VERSION = "video-create-engine-v5.5.0"
 
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
 VIDEO_EXTS = (".mp4", ".mov", ".avi", ".mkv", ".m4v")
@@ -1359,69 +1359,38 @@ class TitleStyleRenderer:
 
         return img
 
-    def _with_dynamic_opacity(self, clip: Any, opacity_fn: Any) -> Any:
-        # Apply time-varying opacity using a MoviePy mask.
-        # MoviePy 1.0.x set_opacity() only accepts numeric opacity.
-        try:
-            base_mask = getattr(clip, "mask", None)
-            if base_mask is None:
-                base_mask = ColorClip(clip.size, color=1, ismask=True).set_duration(clip.duration)
-
-            def mask_filter(get_frame: Any, t: float) -> Any:
-                try:
-                    alpha = float(opacity_fn(t))
-                except Exception:
-                    alpha = 1.0
-                alpha = max(0.0, min(1.0, alpha))
-                return get_frame(t) * alpha
-
-            return clip.set_mask(base_mask.fl(mask_filter))
-        except Exception:
-            return clip.set_opacity(1.0)
-
-    def _safe_resize(self, clip: Any, scale_fn: Any) -> Any:
-        try:
-            return clip.resize(scale_fn)
-        except Exception:
-            return clip
-
-    def _pop_scale(self, t: float) -> float:
-        if t < 0.18:
-            return 0.82 + (t / 0.18) * 0.28
-        if t < 0.36:
-            return 1.10 - ((t - 0.18) / 0.18) * 0.10
-        return 1.0
-
-    def _punch_scale(self, t: float) -> float:
-        if t < 0.16:
-            return 1.16 - (t / 0.16) * 0.16
-        return 1.0
-
-    def _soft_zoom_scale(self, t: float, duration: float) -> float:
-        span = max(min(duration, 1.2), 0.4)
-        ratio = max(0.0, min(1.0, t / span))
-        return 0.96 + ratio * 0.04
-
     def animate(self, clip: Any, motion: str, duration: float) -> Any:
-        motion = motion or "fade_slide_up"
-        duration = max(float(duration or 0.1), 0.1)
+        """Apply MoviePy time-based effects."""
+        if motion == "fade_only":
+            return clip.set_opacity(lambda t: self._fade_curve(t, duration))
+        
+        if motion == "fade_slide_up":
+            y_start = "center"
+            return clip.set_opacity(lambda t: self._fade_curve(t, duration)).set_position(
+                lambda t: ("center", self._slide_up(t, duration))
+            )
+            
+        if motion == "soft_zoom_in":
+            return clip.set_opacity(lambda t: self._fade_curve(t, duration)).resize(
+                lambda t: 0.96 + 0.04 * (t / duration)
+            )
 
-        animated = clip
+        if motion == "pop_bounce":
+            return clip.set_opacity(lambda t: self._fade_curve(t, duration)).resize(
+                lambda t: self._bounce(t, duration)
+            )
 
-        if motion in {"soft_zoom_in", "slow_fade_zoom"}:
-            animated = self._safe_resize(animated, lambda t: self._soft_zoom_scale(t, duration))
-        elif motion == "pop_bounce":
-            animated = self._safe_resize(animated, lambda t: self._pop_scale(t))
-        elif motion == "quick_zoom_punch":
-            animated = self._safe_resize(animated, lambda t: self._punch_scale(t))
+        if motion == "quick_zoom_punch":
+            return clip.set_opacity(lambda t: self._fade_curve(t, duration)).resize(
+                lambda t: 1.15 - 0.15 * min(1.0, t * 8)
+            )
 
-        # Dynamic opacity must be mask-based, not set_opacity(lambda...).
-        animated = self._with_dynamic_opacity(animated, lambda t: self._fade_curve(t, duration))
+        if motion == "slow_fade_zoom":
+            return clip.set_opacity(lambda t: self._fade_curve(t, duration)).resize(
+                lambda t: 1.0 + 0.05 * (t / duration)
+            )
 
-        try:
-            return animated.set_position(("center", "center"))
-        except Exception:
-            return animated
+        return clip.set_opacity(lambda t: self._fade_curve(t, duration))
 
     def _fade_curve(self, t: float, duration: float) -> float:
         in_t, out_t = 0.5, 0.4
