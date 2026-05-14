@@ -52,6 +52,3 @@ jobs:
 
       - name: Python V5 scan plan compile smoke test
         run: python .\tests\smoke_v5_4.py
-
-      - name: Python V5.6 long-video stability smoke test
-        run: python .\tests\smoke_v5_6_long_video_stability.py

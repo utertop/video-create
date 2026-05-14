@@ -117,10 +117,6 @@ export interface V5StoryBlueprint {
     updated_at?: string;
     source_library_path?: string;
     chapter_background_mode?: V5ChapterBackgroundMode;
-  /** auto | standard | long_stable. Auto uses V5.6 chunk rendering for long timelines. */
-  render_mode?: string | null;
-  /** Chunk size in seconds for V5.6 long-video stable renderer. */
-  chunk_seconds?: number | null;
     scenic_spot_title_mode?: V5SectionTitleMode;
   };
 }
