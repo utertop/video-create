@@ -29,6 +29,7 @@ import {
   AspectRatio,
   EditStrategy,
   GenerateVideoResult,
+  PerformanceMode,
   Quality,
   RenderEngine,
   cancelVideo,
@@ -55,6 +56,7 @@ import { Feature, SectionTitle, StatusItem } from "./components/common";
 import { EditStrategyPreview } from "./components/EditStrategyPreview";
 import { FolderSelector, OutputFolderSelector } from "./components/FolderSelector";
 import { MaterialGallery, PreviewModal } from "./components/MaterialGallery";
+import { PerformanceModeControl, PerformanceRecommendation, performanceModeLabel } from "./components/PerformanceModeControl";
 import { StudioState, useStudio } from "./store/studio";
 import { BackgroundPickerTarget, VideoEvent } from "./types/studio";
 import { applyStructuredEvent, detectPhase, formatProgressLine, parseProgress, parseVideoEvent } from "./lib/progress";
@@ -185,6 +187,11 @@ export function App() {
     return state.outputFolder ? `${state.outputFolder}\\${v5FinalOutputName}` : "";
   }, [state.outputFolder, v5FinalOutputName]);
 
+  const performanceRecommendation = useMemo(
+    () => recommendPerformanceMode(state.v5RenderPlan, state.v5Library, state.quality, state.editStrategy),
+    [state.v5RenderPlan, state.v5Library, state.quality, state.editStrategy],
+  );
+
   const v5RenderParams: RenderV5Params = useMemo(() => ({
     title: state.title,
     title_subtitle: state.titleSubtitle,
@@ -192,6 +199,10 @@ export function App() {
     aspect_ratio: state.aspectRatio,
     quality: state.quality,
     engine: state.renderEngine,
+    performance_mode: state.performanceMode,
+    render_mode: renderModeForPerformance(state.performanceMode, state.editStrategy),
+    chunk_seconds: chunkSecondsForPerformance(state.performanceMode),
+    stable_chunk_seconds: chunkSecondsForPerformance(state.performanceMode),
     edit_strategy: state.editStrategy,
     transition_profile: transitionProfileForStrategy(state.editStrategy),
     rhythm_profile: rhythmProfileForStrategy(state.editStrategy),
@@ -200,7 +211,7 @@ export function App() {
     title_background_path: state.titleBackgroundPath,
     end_background_path: state.endBackgroundPath,
     chapter_background_mode: state.chapterBackgroundMode,
-  }), [state.title, state.titleSubtitle, state.watermark, state.aspectRatio, state.quality, state.renderEngine, state.editStrategy, state.cover, state.titleBackgroundPath, state.endBackgroundPath, state.chapterBackgroundMode]);
+  }), [state.title, state.titleSubtitle, state.watermark, state.aspectRatio, state.quality, state.renderEngine, state.performanceMode, state.editStrategy, state.cover, state.titleBackgroundPath, state.endBackgroundPath, state.chapterBackgroundMode]);
 
   const v5CommandPreview = useMemo(() => buildV5RenderCommandPreview({
     planPath: v5PlanPath || "<render_plan.json>",
@@ -424,8 +435,9 @@ export function App() {
         edit_strategy: state.editStrategy,
         transition_profile: transitionProfileForStrategy(state.editStrategy),
         rhythm_profile: rhythmProfileForStrategy(state.editStrategy),
-        render_mode: renderModeForStrategy(state.editStrategy),
-        chunk_seconds: state.editStrategy === "long_stable" ? 240 : null,
+        performance_mode: state.performanceMode,
+        render_mode: renderModeForPerformance(state.performanceMode, state.editStrategy),
+        chunk_seconds: chunkSecondsForPerformance(state.performanceMode),
         chapter_background_mode: state.chapterBackgroundMode,
         scenic_spot_title_mode: "overlay",
       });
@@ -589,6 +601,11 @@ export function App() {
                   <option value="moviepy_crossfade">MoviePy 交叉淡化</option>
                 </select>
               </label>
+              <PerformanceModeControl
+                value={state.performanceMode}
+                recommendation={performanceRecommendation}
+                onChange={(performanceMode) => state.patch({ performanceMode })}
+              />
             </div>
 
             <div className="option-row">
@@ -746,6 +763,7 @@ export function App() {
                />
                <StatusItem label="当前画幅" value={state.aspectRatio} />
               <StatusItem label="渲染质量" value={qualityLabel(state.quality)} />
+              <StatusItem label="性能档位" value={performanceModeLabel(state.performanceMode)} />
             </div>
             {result && <ResultCard result={result} />}
           </section>
@@ -910,8 +928,75 @@ function rhythmProfileForStrategy(strategy: EditStrategy): string {
   }[strategy];
 }
 
-function renderModeForStrategy(strategy: EditStrategy): string {
-  return strategy === "long_stable" ? "long_stable" : "auto";
+function renderModeForPerformance(mode: PerformanceMode, strategy: EditStrategy): string {
+  if (mode === "stable") return "long_stable";
+  if (mode === "quality") return "standard";
+  if (strategy === "long_stable") return "long_stable";
+  return "auto";
+}
+
+function chunkSecondsForPerformance(mode: PerformanceMode): number {
+  return {
+    stable: 60,
+    balanced: 120,
+    quality: 180,
+  }[mode];
+}
+
+function recommendPerformanceMode(
+  plan: V5RenderPlan | null,
+  library: V5MediaLibrary | null,
+  quality: Quality,
+  strategy: EditStrategy,
+): PerformanceRecommendation {
+  const segmentCount = plan?.segments?.length || 0;
+  const totalDuration = Number(plan?.total_duration || 0);
+  const assetCount = library?.assets?.length || 0;
+  const videoCount = library?.assets?.filter((asset) => asset.type === "video").length || 0;
+
+  const isLarge =
+    strategy === "long_stable" ||
+    totalDuration >= 1800 ||
+    segmentCount >= 300 ||
+    assetCount >= 1000 ||
+    videoCount >= 80;
+  const isMedium =
+    totalDuration >= 600 ||
+    segmentCount >= 80 ||
+    assetCount >= 300 ||
+    videoCount >= 24 ||
+    quality === "high";
+
+  if (isLarge) {
+    return {
+      recommended: "stable",
+      level: "high",
+      estimatedChunkSeconds: 60,
+      shouldWarn: true,
+      summary: "检测到长视频或大量素材，建议启用稳定优先，保留章节动效但降低复杂转场风险。",
+      reason: "素材量较大，已建议稳定渲染；章节文字动效会保留，复杂转场和强镜头运动会更克制。",
+    };
+  }
+
+  if (isMedium) {
+    return {
+      recommended: "balanced",
+      level: "medium",
+      estimatedChunkSeconds: 120,
+      shouldWarn: false,
+      summary: "当前项目适合平衡推荐：保留主要动效，同时用分段策略控制内存。",
+      reason: "项目规模中等，平衡推荐能兼顾效果、速度和稳定性。",
+    };
+  }
+
+  return {
+    recommended: "quality",
+    level: "low",
+    estimatedChunkSeconds: 180,
+    shouldWarn: false,
+    summary: "当前项目较轻，可以优先保留完整转场、章节动效和高质量输出。",
+    reason: "素材规模较小，画质优先风险较低。",
+  };
 }
 
 function SegmentedControl({

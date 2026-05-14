@@ -2,6 +2,7 @@ import { create } from "zustand";
 import {
   AspectRatio,
   EditStrategy,
+  PerformanceMode,
   Quality,
   RenderEngine,
   V5ChapterBackgroundMode,
@@ -27,6 +28,7 @@ export interface StudioState {
   chaptersFromDirs: boolean;
   cover: boolean;
   editStrategy: EditStrategy;
+  performanceMode: PerformanceMode;
   renderEngine: RenderEngine;
   isDryRun: boolean;
 
@@ -57,6 +59,7 @@ export const useStudio = create<StudioState>((set) => ({
   chaptersFromDirs: true,
   cover: true,
   editStrategy: "smart_director",
+  performanceMode: "balanced",
   renderEngine: "auto",
   isDryRun: false,
 

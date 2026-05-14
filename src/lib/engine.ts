@@ -4,6 +4,7 @@ export type AspectRatio = "16:9" | "9:16";
 export type Quality = "draft" | "standard" | "high";
 export type PythonQuality = "normal" | "high" | "ultra";
 export type RenderEngine = "auto" | "ffmpeg_concat" | "moviepy_crossfade";
+export type PerformanceMode = "stable" | "balanced" | "quality";
 export type EditStrategy =
   | "smart_director"
   | "fast_assembly"
@@ -144,11 +145,12 @@ export interface V5StoryBlueprint {
     edit_strategy?: EditStrategy;
     transition_profile?: string | null;
     rhythm_profile?: string | null;
+    performance_mode?: PerformanceMode | string | null;
     chapter_background_mode?: V5ChapterBackgroundMode;
-  /** auto | standard | long_stable. Auto uses V5.6 chunk rendering for long timelines. */
-  render_mode?: string | null;
+    /** auto | standard | long_stable. Auto uses V5.6 chunk rendering for long timelines. */
+    render_mode?: string | null;
     /** Chunk size in seconds for V5.6 long-video stable renderer. */
-  chunk_seconds?: number | null;
+    chunk_seconds?: number | null;
     scenic_spot_title_mode?: V5SectionTitleMode;
     default_title_style?: V5TitleStyle | null;
   };
@@ -284,6 +286,9 @@ export interface V5RenderSettings {
   edit_strategy?: EditStrategy;
   transition_profile?: string | null;
   rhythm_profile?: string | null;
+  performance_mode?: PerformanceMode | string | null;
+  render_mode?: string | null;
+  chunk_seconds?: number | null;
   cover?: boolean;
 }
 
@@ -340,6 +345,10 @@ export interface RenderV5Params {
   quality?: Quality;
   python_quality?: PythonQuality;
   engine?: RenderEngine;
+  performance_mode?: PerformanceMode;
+  render_mode?: string | null;
+  chunk_seconds?: number | null;
+  stable_chunk_seconds?: number | null;
   edit_strategy?: EditStrategy;
   transition_profile?: string | null;
   rhythm_profile?: string | null;

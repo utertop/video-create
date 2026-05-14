@@ -1003,6 +1003,7 @@ class Compiler:
         self.edit_strategy = self.blueprint_metadata.get("edit_strategy", "smart_director")
         self.transition_profile = self.blueprint_metadata.get("transition_profile", "auto")
         self.rhythm_profile = self.blueprint_metadata.get("rhythm_profile", "auto")
+        self.performance_mode = self.blueprint_metadata.get("performance_mode", "balanced")
         self.time = 0.0
         self.segments: List[RenderSegment] = []
         self.last_visual_source_path: Optional[str] = None
@@ -1060,6 +1061,7 @@ class Compiler:
                 "edit_strategy": self.edit_strategy,
                 "transition_profile": self.transition_profile,
                 "rhythm_profile": self.rhythm_profile,
+                "performance_mode": self.performance_mode,
                 "render_mode": self.blueprint_metadata.get("render_mode", "auto"),
                 "chunk_seconds": self.blueprint_metadata.get("chunk_seconds"),
             },
@@ -2250,9 +2252,14 @@ def _v56_segment_cache_key(seg: Dict[str, Any], params: Dict[str, Any]) -> str:
         "overlay_text": seg.get("overlay_text"),
         "title_style": seg.get("title_style"),
         "overlay_title_style": seg.get("overlay_title_style"),
+        "transition_config": seg.get("transition_config"),
+        "motion_config": seg.get("motion_config"),
+        "rhythm_config": seg.get("rhythm_config"),
+        "keep_audio": seg.get("keep_audio"),
         "aspect_ratio": params.get("aspect_ratio"),
         "fps": params.get("fps"),
         "quality": params.get("quality"),
+        "python_quality": params.get("python_quality"),
     }
     return _v56_stable_json_hash(stable)
 
@@ -2263,7 +2270,7 @@ def _v56_build_chunk_groups(
     params: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     params = params or {}
-    chunk_seconds = max(float(chunk_seconds or 240), 30.0)
+    chunk_seconds = max(float(chunk_seconds or 120), 30.0)
 
     groups: List[Dict[str, Any]] = []
     current: List[Dict[str, Any]] = []
@@ -2459,6 +2466,12 @@ def _v56_write_chunk_video(
 
 
 def _v56_should_use_stable_renderer(plan: Dict[str, Any], params: Dict[str, Any]) -> bool:
+    performance_mode = str(params.get("performance_mode") or plan.get("render_settings", {}).get("performance_mode") or "").lower()
+    if performance_mode == "stable":
+        return True
+    if performance_mode == "quality":
+        return False
+
     mode = str(params.get("render_mode") or params.get("long_video_mode") or "auto").lower()
     if mode in {"stable", "long", "long_stable", "true", "1", "yes"}:
         return True
@@ -2488,7 +2501,7 @@ class V56StableRenderer:
         self.report_path = self.project_dir / "build_report.json"
 
         self.fps = int(self.params.get("fps") or self.plan.get("render_settings", {}).get("fps") or 30)
-        self.chunk_seconds = float(self.params.get("chunk_seconds") or self.params.get("stable_chunk_seconds") or 240)
+        self.chunk_seconds = float(self.params.get("chunk_seconds") or self.params.get("stable_chunk_seconds") or 120)
 
     def _load_manifest(self) -> Dict[str, Any]:
         if self.manifest_path.exists():
