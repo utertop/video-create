@@ -26,6 +26,7 @@ import re
 import shutil
 import sys
 import tempfile
+import gc
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -37,7 +38,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 # dependencies such as numpy/moviepy/pillow are installed. Real scan/render work
 # still validates dependencies when the command continues past this point.
 def _print_early_help_without_optional_deps() -> None:
-    print("""Video Create Studio V5.4.2 Engine
+    print("""Video Create Studio V5.5.0 Engine
 
 usage:
   python video_engine_v5.py scan    --input_folder <folder> --output <media_library.json> [--recursive]
@@ -92,8 +93,8 @@ except Exception:
 # Constants
 # =========================
 
-SCHEMA_VERSION = "5.3"
-ENGINE_VERSION = "video-create-engine-v5.4.2"
+SCHEMA_VERSION = "5.5"
+ENGINE_VERSION = "video-create-engine-v5.5.0"
 
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
 VIDEO_EXTS = (".mp4", ".mov", ".avi", ".mkv", ".m4v")
@@ -124,12 +125,13 @@ SPOT_WEAK_KEYWORDS = [
 ]
 
 THEME_KEYWORDS = [
-    "猫", "猫咪", "狗", "宠物", "美食", "登山", "滑雪", "雪崩", "日常", "人物",
-    "人像", "运动", "露营", "航拍", "街拍",
+    "猫", "猫咪", "狗", "宠物", "美食", "登山", "徒步", "滑雪", "雪山", "雪崩", "日常", "人物",
+    "人像", "运动", "露营", "航拍", "街拍", "风景", "自然", "森林", "湖泊", "大海", "沙滩",
+    "城市", "建筑", "科技", "赛博", "深夜", "酒吧", "展览", "博物馆", "艺术", "学习", "办公",
 ]
 
 EVENT_KEYWORDS = [
-    "婚礼", "生日", "聚会", "毕业", "演出", "旅行", "团建", "年会",
+    "婚礼", "生日", "聚会", "毕业", "演出", "旅行", "团建", "年会", "派对", "探店", "浪漫",
 ]
 
 # Backward-compatible alias for old code/comments.
@@ -434,6 +436,15 @@ def write_json(path: Optional[str], data: Dict[str, Any]) -> None:
 # =========================
 
 @dataclass
+class TitleStyle:
+    preset: str = "cinematic_bold"
+    motion: str = "fade_slide_up"
+    color_theme: str = "auto"
+    position: str = "center"
+    user_overridden: bool = False
+
+
+@dataclass
 class DirectoryNode:
     node_id: str
     name: str
@@ -449,6 +460,7 @@ class DirectoryNode:
     user_override_fields: List[str] = field(default_factory=list)
     asset_count: int = 0
     children: List[str] = field(default_factory=list)
+    title_style: Optional[TitleStyle] = None
     auto_detected: bool = True
     user_overridden: bool = False
 
@@ -493,6 +505,7 @@ class StorySection:
     rhythm: str = "standard"
     title_mode: str = "full_card"
     background: Optional[Dict[str, Any]] = None
+    title_style: Optional[TitleStyle] = None
 
 
 @dataclass
@@ -517,6 +530,8 @@ class RenderSegment:
     overlay_text: Optional[str] = None
     overlay_subtitle: Optional[str] = None
     overlay_duration: Optional[float] = None
+    overlay_title_style: Optional[Dict[str, Any]] = None
+    title_style: Optional[Dict[str, Any]] = None
     keep_audio: bool = True
     cache_key: Optional[str] = None
 
@@ -593,6 +608,7 @@ class Scanner:
             display_title=current.name,
             raw_detected_type=raw_type,
             signals=signals,
+            title_style=self._recommend_title_style(signals),
         )
         self.nodes[node_id] = node
 
@@ -642,6 +658,69 @@ class Scanner:
                     )
 
         return node_id
+
+    def _recommend_title_style(self, signals: Dict[str, Any]) -> TitleStyle:
+        """V5.5 Weighted Tag System for Title Style Recommendation.
+        
+        Calculates a score for each category based on keyword matches and weights.
+        """
+        themes = signals.get("matched_theme_keywords") or []
+        events = signals.get("matched_event_keywords") or []
+        all_keywords = list(set(themes + events))
+
+        if not all_keywords:
+            return TitleStyle(preset="cinematic_bold", motion="fade_slide_up")
+
+        # Category definitions: (preset, motion, keyword_weight_map)
+        categories = {
+            "playful": {
+                "preset": "playful_pop", "motion": "pop_bounce",
+                "keywords": {"猫": 2.0, "猫咪": 2.2, "狗": 2.0, "宠物": 2.0, "日常": 1.0, "萌": 1.5, "可爱": 1.5}
+            },
+            "romantic": {
+                "preset": "romantic_soft", "motion": "slow_fade_zoom",
+                "keywords": {"婚礼": 2.5, "浪漫": 2.0, "甜蜜": 2.0, "派对": 1.2, "生日": 1.5}
+            },
+            "tech": {
+                "preset": "tech_future", "motion": "quick_zoom_punch",
+                "keywords": {"科技": 2.0, "赛博": 2.5, "未来": 2.0, "办公": 1.0, "会议": 1.0, "学习": 1.0}
+            },
+            "nature": {
+                "preset": "nature_documentary", "motion": "slow_fade_zoom",
+                "keywords": {"登山": 1.5, "雪山": 2.0, "森林": 1.5, "风景": 1.0, "露营": 1.8, "自然": 1.2, "大海": 2.0, "湖泊": 1.5, "沙滩": 1.5}
+            },
+            "action": {
+                "preset": "impact_flash", "motion": "quick_zoom_punch",
+                "keywords": {"滑雪": 2.5, "运动": 1.5, "航拍": 1.5, "跑酷": 2.5, "极限": 2.0}
+            },
+            "travel": {
+                "preset": "travel_postcard", "motion": "soft_zoom_in",
+                "keywords": {"美食": 2.0, "街拍": 1.2, "古镇": 1.8, "旅行": 1.0, "探店": 2.0, "深夜": 1.5, "酒吧": 1.5}
+            },
+            "editorial": {
+                "preset": "minimal_editorial", "motion": "fade_only",
+                "keywords": {"人物": 1.5, "人像": 1.5, "展览": 1.8, "博物馆": 1.8, "艺术": 1.5, "建筑": 1.2, "城市": 1.0}
+            }
+        }
+
+        scores: Dict[str, float] = {}
+        for cat_name, config in categories.items():
+            score = 0.0
+            kw_map = config["keywords"]
+            for kw in all_keywords:
+                if kw in kw_map:
+                    score += kw_map[kw]
+            if score > 0:
+                scores[cat_name] = score
+
+        if not scores:
+            return TitleStyle(preset="cinematic_bold", motion="fade_slide_up")
+
+        # Pick the category with the highest score
+        best_cat = max(scores.items(), key=lambda x: x[1])[0]
+        winner = categories[best_cat]
+        
+        return TitleStyle(preset=winner["preset"], motion=winner["motion"])
 
     def _normalize_directory_nodes(self) -> None:
         """Second-pass normalization for sibling consistency and weak keyword false positives."""
@@ -893,6 +972,7 @@ class Planner:
                 "custom_path": None,
                 "user_overridden": False,
             },
+            title_style=node.get("title_style"),
         )
 
     def _asset_refs_for_node(self, node_id: str) -> List[AssetRef]:
@@ -995,6 +1075,7 @@ class Compiler:
 
         pending_overlay_text = None
         pending_overlay_subtitle = None
+        pending_overlay_title_style = None
 
         if suppress_section_title:
             # Only one automatic top-level section exists. Do not insert a chapter card
@@ -1008,11 +1089,13 @@ class Compiler:
                 text=section.get("title"),
                 subtitle=section.get("subtitle"),
                 section_id=section.get("section_id"),
+                title_style=section.get("title_style"),
                 **bg_info,
             )
         elif use_overlay_title:
             pending_overlay_text = section.get("title")
             pending_overlay_subtitle = section.get("subtitle")
+            pending_overlay_title_style = section.get("title_style")
 
         overlay_consumed = False
         for ref in section.get("asset_refs", []):
@@ -1041,6 +1124,7 @@ class Compiler:
                 overlay_text=overlay_text,
                 overlay_subtitle=overlay_subtitle,
                 overlay_duration=1.8 if overlay_text else None,
+                overlay_title_style=pending_overlay_title_style if overlay_text else None,
             )
 
         for child in section.get("children", []):
@@ -1134,7 +1218,14 @@ class Compiler:
         overlay_text: Optional[str] = None,
         overlay_subtitle: Optional[str] = None,
         overlay_duration: Optional[float] = None,
+        overlay_title_style: Optional[Dict[str, Any]] = None,
+        title_style: Optional[Dict[str, Any]] = None,
     ) -> None:
+        if isinstance(title_style, TitleStyle):
+            title_style = asdict(title_style)
+        if isinstance(overlay_title_style, TitleStyle):
+            overlay_title_style = asdict(overlay_title_style)
+
         seg = RenderSegment(
             segment_id=f"seg_{len(self.segments):05d}",
             type=seg_type,
@@ -1155,6 +1246,8 @@ class Compiler:
             overlay_text=overlay_text,
             overlay_subtitle=overlay_subtitle,
             overlay_duration=overlay_duration,
+            overlay_title_style=overlay_title_style,
+            title_style=title_style,
             cache_key=safe_id(f"{seg_type}|{source_path}|{duration}|{text}|{background_mode}|{ENGINE_VERSION}"),
         )
         self.segments.append(seg)
@@ -1166,6 +1259,156 @@ class Compiler:
 # =========================
 # render -> final mp4
 # =========================
+
+class TitleStyleRenderer:
+    """V5.5 Template-driven Text Animation Engine."""
+
+    def __init__(self, target_size: Tuple[int, int]):
+        self.target_size = target_size
+
+    def render_layer(
+        self,
+        title: str,
+        subtitle: Optional[str],
+        style: Dict[str, Any],
+        is_full_card: bool = True
+    ) -> Image.Image:
+        w, h = self.target_size
+        preset = style.get("preset", "cinematic_bold")
+        
+        # Base transparent layer
+        img = Image.new("RGBA", self.target_size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+
+        # Style definitions
+        if preset == "playful_pop":
+            # Round box + bright green text
+            box_w = min(int(w * 0.5), 800)
+            box_h = 160 if subtitle else 100
+            bx, by = (w - box_w) // 2, (h - box_h) // 2
+            draw.rounded_rectangle((bx, by, bx + box_w, by + box_h), radius=40, fill=(255, 255, 255, 200))
+            title_font = load_font(64)
+            sub_font = load_font(32)
+            tw, th = text_size(draw, title, title_font)
+            draw.text(((w - tw) // 2, by + 20), title, font=title_font, fill=(52, 211, 153, 255))
+            if subtitle:
+                sw, sh = text_size(draw, subtitle, sub_font)
+                draw.text(((w - sw) // 2, by + 90), subtitle, font=sub_font, fill=(30, 41, 59, 200))
+
+        elif preset == "travel_postcard":
+            # Bordered card effect
+            if is_full_card:
+                draw.rectangle((40, 40, w - 40, h - 40), outline=(255, 255, 255, 180), width=3)
+            title_font = load_font(72)
+            sub_font = load_font(36)
+            tw, th = text_size(draw, title, title_font)
+            draw.text(((w - tw) // 2, (h - th) // 2 - 20), title, font=title_font, fill=(255, 255, 240, 255))
+            if subtitle:
+                sw, sh = text_size(draw, subtitle, sub_font)
+                draw.text(((w - sw) // 2, (h - sh) // 2 + 60), subtitle, font=sub_font, fill=(251, 191, 36, 230))
+
+        elif preset == "nature_documentary":
+            # Minimal but elegant
+            title_font = load_font(84)
+            sub_font = load_font(32)
+            tw, th = text_size(draw, title, title_font)
+            draw.text(((w - tw) // 2, (h - th) // 2 - 30), title, font=title_font, fill=(255, 255, 255, 240))
+            if subtitle:
+                sw, sh = text_size(draw, subtitle, sub_font)
+                draw.text(((w - sw) // 2, (h - sh) // 2 + 70), subtitle, font=sub_font, fill=(167, 243, 208, 200))
+
+        elif preset == "minimal_editorial":
+            title_font = load_font(52)
+            sub_font = load_font(28)
+            tw, th = text_size(draw, title, title_font)
+            draw.text(((w - tw) // 2, (h - th) // 2 - 10), title, font=title_font, fill=(255, 255, 255, 220))
+            if subtitle:
+                sw, sh = text_size(draw, subtitle, sub_font)
+                draw.text(((w - sw) // 2, (h - sh) // 2 + 50), subtitle, font=sub_font, fill=(255, 255, 255, 160))
+
+        elif preset == "romantic_soft":
+            # Pink/Warm theme with elegant font
+            title_font = load_font(72)
+            sub_font = load_font(34)
+            tw, th = text_size(draw, title, title_font)
+            # Subtle glow effect would be nice, but simple fill for now
+            draw.text(((w - tw) // 2, (h - th) // 2 - 30), title, font=title_font, fill=(255, 192, 203, 255))
+            if subtitle:
+                sw, sh = text_size(draw, subtitle, sub_font)
+                draw.text(((w - sw) // 2, (h - sh) // 2 + 65), subtitle, font=sub_font, fill=(255, 240, 245, 200))
+
+        elif preset == "tech_future":
+            # Cyan/Blue theme with blocky layout
+            draw.rectangle((w // 2 - 150, h // 2 - 80, w // 2 + 150, h // 2 + 60), outline=(34, 211, 238, 180), width=2)
+            title_font = load_font(68)
+            sub_font = load_font(30)
+            tw, th = text_size(draw, title, title_font)
+            draw.text(((w - tw) // 2, (h - th) // 2 - 25), title, font=title_font, fill=(34, 211, 238, 255))
+            if subtitle:
+                sw, sh = text_size(draw, subtitle, sub_font)
+                draw.text(((w - sw) // 2, (h - sh) // 2 + 55), subtitle, font=sub_font, fill=(255, 255, 255, 200))
+
+        else: # cinematic_bold (default)
+            title_font = load_font(78)
+            sub_font = load_font(34)
+            tw, th = text_size(draw, title, title_font)
+            draw.text(((w - tw) // 2, (h - th) // 2 - 40), title, font=title_font, fill=(255, 255, 255, 255))
+            if subtitle:
+                sw, sh = text_size(draw, subtitle, sub_font)
+                draw.text(((w - sw) // 2, (h - sh) // 2 + 55), subtitle, font=sub_font, fill=(52, 211, 153, 255))
+
+        return img
+
+    def animate(self, clip: Any, motion: str, duration: float) -> Any:
+        """Apply MoviePy time-based effects."""
+        if motion == "fade_only":
+            return clip.set_opacity(lambda t: self._fade_curve(t, duration))
+        
+        if motion == "fade_slide_up":
+            y_start = "center"
+            return clip.set_opacity(lambda t: self._fade_curve(t, duration)).set_position(
+                lambda t: ("center", self._slide_up(t, duration))
+            )
+            
+        if motion == "soft_zoom_in":
+            return clip.set_opacity(lambda t: self._fade_curve(t, duration)).resize(
+                lambda t: 0.96 + 0.04 * (t / duration)
+            )
+
+        if motion == "pop_bounce":
+            return clip.set_opacity(lambda t: self._fade_curve(t, duration)).resize(
+                lambda t: self._bounce(t, duration)
+            )
+
+        if motion == "quick_zoom_punch":
+            return clip.set_opacity(lambda t: self._fade_curve(t, duration)).resize(
+                lambda t: 1.15 - 0.15 * min(1.0, t * 8)
+            )
+
+        if motion == "slow_fade_zoom":
+            return clip.set_opacity(lambda t: self._fade_curve(t, duration)).resize(
+                lambda t: 1.0 + 0.05 * (t / duration)
+            )
+
+        return clip.set_opacity(lambda t: self._fade_curve(t, duration))
+
+    def _fade_curve(self, t: float, duration: float) -> float:
+        in_t, out_t = 0.5, 0.4
+        if t < in_t: return t / in_t
+        if t > duration - out_t: return max(0, (duration - t) / out_t)
+        return 1.0
+
+    def _slide_up(self, t: float, duration: float) -> int:
+        h = self.target_size[1]
+        center_y = h // 2
+        offset = 20 * (1.0 - (t / duration))
+        return int(center_y - offset)
+
+    def _bounce(self, t: float, duration: float) -> float:
+        if t < 0.2: return 0.8 + (t / 0.2) * 0.28 # 0.8 -> 1.08
+        if t < 0.35: return 1.08 - ((t - 0.2) / 0.15) * 0.08 # 1.08 -> 1.0
+        return 1.0
+
 
 class Renderer:
     def __init__(self, plan: Dict[str, Any], output_path: str, params: Dict[str, Any]):
@@ -1179,6 +1422,8 @@ class Renderer:
         self.temp_dir = Path(tempfile.mkdtemp(prefix="vcs_v5_render_"))
         self.first_visual_source = self._find_visual_source("first")
         self.last_visual_source = self._find_visual_source("last")
+        self.renderer = TitleStyleRenderer(self.target_size)
+        self.gpu_accel = params.get("gpu_accel", "none") # none, nvenc, qsv
 
     def render(self) -> None:
         if not HAS_MOVIEPY:
@@ -1351,6 +1596,8 @@ class Renderer:
 
     def _chapter_card(self, seg: Dict[str, Any], duration: float):
         mode = seg.get("background_mode") or "bridge_blur"
+        title_style = seg.get("title_style")
+
         if mode == "plain":
             return self._text_card(
                 seg.get("text") or "",
@@ -1359,6 +1606,7 @@ class Renderer:
                 main=False,
                 background_source=None,
                 background_position="first",
+                title_style=title_style,
             )
 
         if mode == "bridge_blur":
@@ -1372,6 +1620,7 @@ class Renderer:
                 background_source_2=seg.get("background_source_path_2"),
                 background_position_2=seg.get("background_source_position_2") or "first",
                 blend_sources=True,
+                title_style=title_style,
             )
 
         return self._text_card(
@@ -1381,6 +1630,7 @@ class Renderer:
             main=False,
             background_source=seg.get("background_source_path"),
             background_position=seg.get("background_source_position") or "first",
+            title_style=title_style,
         )
 
     def _text_card(
@@ -1394,18 +1644,23 @@ class Renderer:
         background_source_2: Optional[str] = None,
         background_position_2: str = "first",
         blend_sources: bool = False,
+        title_style: Optional[Dict[str, Any]] = None,
     ):
-        img = self._text_card_image(
-            title=title,
-            subtitle=subtitle,
-            main=main,
-            background_source=background_source,
-            background_position=background_position,
-            background_source_2=background_source_2,
-            background_position_2=background_position_2,
+        bg = self._build_text_background(
+            background_source,
+            background_position,
+            background_source_2,
+            background_position_2,
             blend_sources=blend_sources,
         )
-        return ImageClip(np.array(img)).set_duration(duration)
+        bg_clip = ImageClip(np.array(bg)).set_duration(duration)
+        
+        style = title_style or {"preset": "cinematic_bold" if main else "cinematic_bold", "motion": "fade_slide_up"}
+        text_img = self.renderer.render_layer(title, subtitle, style, is_full_card=True)
+        text_clip = ImageClip(np.array(text_img), ismask=False).set_duration(duration)
+        text_clip = self.renderer.animate(text_clip, style.get("motion", "fade_slide_up"), duration)
+
+        return CompositeVideoClip([bg_clip, text_clip], size=self.target_size)
 
     def _text_card_image(
         self,
@@ -1478,23 +1733,29 @@ class Renderer:
             return clip
         subtitle = seg.get("overlay_subtitle")
         duration = min(float(seg.get("overlay_duration") or 1.8), float(clip.duration or 1.8))
-        overlay = self._overlay_title_clip(str(text), subtitle, duration)
+        style = seg.get("overlay_title_style")
+        overlay = self._overlay_title_clip(str(text), subtitle, duration, style=style)
         return CompositeVideoClip([clip, overlay], size=clip.size).set_duration(clip.duration)
 
-    def _overlay_title_clip(self, title: str, subtitle: Optional[str], duration: float):
+    def _overlay_title_clip(self, title: str, subtitle: Optional[str], duration: float, style: Optional[Dict[str, Any]] = None):
+        if not style:
+            style = {"preset": "cinematic_bold", "motion": "fade_slide_up", "position": "lower_left"}
+        
+        text_img = self.renderer.render_layer(title, subtitle, style, is_full_card=False)
+        text_clip = ImageClip(np.array(text_img), ismask=False).set_duration(duration)
+        text_clip = self.renderer.animate(text_clip, style.get("motion", "fade_slide_up"), duration)
+
+        # Handle positioning for overlays
+        pos = style.get("position", "lower_left")
         w, h = self.target_size
-        box_w = min(int(w * 0.48), 760)
-        box_h = 126 if subtitle else 86
-        img = Image.new("RGBA", (box_w, box_h), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(img)
-        draw.rounded_rectangle((0, 0, box_w, box_h), radius=22, fill=(10, 22, 17, 132))
-        draw.rectangle((0, 18, 6, box_h - 18), fill=(52, 211, 153, 210))
-        title_font = load_font(38)
-        sub_font = load_font(22)
-        draw.text((28, 20), title, font=title_font, fill=(255, 255, 255, 235))
-        if subtitle:
-            draw.text((30, 72), subtitle, font=sub_font, fill=(199, 245, 224, 215))
-        return ImageClip(np.array(img)).set_duration(duration).set_position((int(w * 0.06), int(h * 0.72)))
+        if pos == "lower_left":
+            text_clip = text_clip.set_position((int(w * 0.05), int(h * 0.70)))
+        elif pos == "lower_center":
+            text_clip = text_clip.set_position(("center", int(h * 0.75)))
+        else:
+            text_clip = text_clip.set_position("center")
+
+        return text_clip
 
     def _image_clip(self, source: Path, duration: float):
         fixed = self.temp_dir / f"fixed_{safe_id(str(source))}.jpg"
