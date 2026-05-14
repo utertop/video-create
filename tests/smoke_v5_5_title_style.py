@@ -1,7 +1,11 @@
 import os
 import json
 import shutil
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 import video_engine_v5 as engine
 
 def setup_mock_project(root: Path):

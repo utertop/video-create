@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import {
   AspectRatio,
+  EditStrategy,
   Quality,
   RenderEngine,
   V5ChapterBackgroundMode,
@@ -25,6 +26,7 @@ export interface StudioState {
   recursive: boolean;
   chaptersFromDirs: boolean;
   cover: boolean;
+  editStrategy: EditStrategy;
   renderEngine: RenderEngine;
   isDryRun: boolean;
 
@@ -54,6 +56,7 @@ export const useStudio = create<StudioState>((set) => ({
   recursive: true,
   chaptersFromDirs: true,
   cover: true,
+  editStrategy: "smart_director",
   renderEngine: "auto",
   isDryRun: false,
 

@@ -4,6 +4,13 @@ export type AspectRatio = "16:9" | "9:16";
 export type Quality = "draft" | "standard" | "high";
 export type PythonQuality = "normal" | "high" | "ultra";
 export type RenderEngine = "auto" | "ffmpeg_concat" | "moviepy_crossfade";
+export type EditStrategy =
+  | "smart_director"
+  | "fast_assembly"
+  | "travel_soft"
+  | "beat_cut"
+  | "documentary"
+  | "long_stable";
 
 // =========================
 // V5 common type definitions
@@ -134,6 +141,9 @@ export interface V5StoryBlueprint {
     created_at?: string;
     updated_at?: string;
     source_library_path?: string;
+    edit_strategy?: EditStrategy;
+    transition_profile?: string | null;
+    rhythm_profile?: string | null;
     chapter_background_mode?: V5ChapterBackgroundMode;
   /** auto | standard | long_stable. Auto uses V5.6 chunk rendering for long timelines. */
   render_mode?: string | null;
@@ -220,7 +230,10 @@ export interface V5RenderSegment {
   end_time: number;
   section_id?: string | null;
   asset_id?: string | null;
-  transition?: "none" | "crossfade";
+  transition?: string;
+  transition_config?: V5TransitionConfig | null;
+  motion_config?: V5MotionConfig | null;
+  rhythm_config?: V5RhythmConfig | null;
   background?: "blur" | "black" | "solid";
   background_mode?: "plain" | "auto_first_asset" | "bridge_blur" | "custom_blur";
   background_source_path?: string | null;
@@ -234,6 +247,33 @@ export interface V5RenderSegment {
   cache_key?: string | null;
 }
 
+export interface V5TransitionConfig {
+  type: string;
+  duration: number;
+  profile?: string | null;
+  strategy?: EditStrategy | string;
+  scope?: "boundary" | "asset" | string;
+  reason?: string;
+}
+
+export interface V5MotionConfig {
+  type: string;
+  intensity?: "none" | "low" | "soft" | "medium" | "high" | string;
+  strategy?: EditStrategy | string;
+  apply_to?: V5RenderSegmentType | string;
+  overlay_safe?: boolean;
+  reason?: string;
+}
+
+export interface V5RhythmConfig {
+  role: string;
+  pace: string;
+  importance?: number;
+  profile?: string | null;
+  strategy?: EditStrategy | string;
+  section_type?: V5StorySectionType | string;
+}
+
 export interface V5RenderSettings {
   aspect_ratio: AspectRatio;
   quality: Quality;
@@ -241,6 +281,9 @@ export interface V5RenderSettings {
   fps?: number;
   watermark?: string;
   engine?: RenderEngine;
+  edit_strategy?: EditStrategy;
+  transition_profile?: string | null;
+  rhythm_profile?: string | null;
   cover?: boolean;
 }
 
@@ -272,6 +315,7 @@ export interface GenerateVideoPayload {
   recursive: boolean;
   chaptersFromDirs: boolean;
   cover: boolean;
+  editStrategy?: EditStrategy;
   renderEngine: RenderEngine;
   dryRun?: boolean;
 }
@@ -296,6 +340,9 @@ export interface RenderV5Params {
   quality?: Quality;
   python_quality?: PythonQuality;
   engine?: RenderEngine;
+  edit_strategy?: EditStrategy;
+  transition_profile?: string | null;
+  rhythm_profile?: string | null;
   cover?: boolean;
   fps?: number;
 

@@ -523,6 +523,9 @@ class RenderSegment:
     section_id: Optional[str] = None
     asset_id: Optional[str] = None
     transition: str = "none"
+    transition_config: Optional[Dict[str, Any]] = None
+    motion_config: Optional[Dict[str, Any]] = None
+    rhythm_config: Optional[Dict[str, Any]] = None
     background: str = "blur"
     background_mode: Optional[str] = None
     background_source_path: Optional[str] = None
@@ -997,6 +1000,9 @@ class Compiler:
         self.blueprint_metadata = blueprint.get("metadata", {}) or {}
         self.default_chapter_background_mode = self.blueprint_metadata.get("chapter_background_mode", "auto_bridge")
         self.scenic_spot_title_mode = self.blueprint_metadata.get("scenic_spot_title_mode", "overlay")
+        self.edit_strategy = self.blueprint_metadata.get("edit_strategy", "smart_director")
+        self.transition_profile = self.blueprint_metadata.get("transition_profile", "auto")
+        self.rhythm_profile = self.blueprint_metadata.get("rhythm_profile", "auto")
         self.time = 0.0
         self.segments: List[RenderSegment] = []
         self.last_visual_source_path: Optional[str] = None
@@ -1051,6 +1057,11 @@ class Compiler:
                 "python_quality": "ultra",
                 "fps": 30,
                 "engine": "moviepy_crossfade",
+                "edit_strategy": self.edit_strategy,
+                "transition_profile": self.transition_profile,
+                "rhythm_profile": self.rhythm_profile,
+                "render_mode": self.blueprint_metadata.get("render_mode", "auto"),
+                "chunk_seconds": self.blueprint_metadata.get("chunk_seconds"),
             },
             "cache_policy": {
                 "enabled": True,
@@ -1092,6 +1103,7 @@ class Compiler:
                 subtitle=section.get("subtitle"),
                 section_id=section.get("section_id"),
                 title_style=section.get("title_style"),
+                section_type=stype,
                 **bg_info,
             )
         elif use_overlay_title:
@@ -1127,6 +1139,7 @@ class Compiler:
                 overlay_subtitle=overlay_subtitle,
                 overlay_duration=1.8 if overlay_text else None,
                 overlay_title_style=pending_overlay_title_style if overlay_text else None,
+                section_type=stype,
             )
 
         for child in section.get("children", []):
@@ -1222,11 +1235,29 @@ class Compiler:
         overlay_duration: Optional[float] = None,
         overlay_title_style: Optional[Dict[str, Any]] = None,
         title_style: Optional[Dict[str, Any]] = None,
+        section_type: Optional[str] = None,
     ) -> None:
         if isinstance(title_style, TitleStyle):
             title_style = asdict(title_style)
         if isinstance(overlay_title_style, TitleStyle):
             overlay_title_style = asdict(overlay_title_style)
+
+        transition_config, motion_config, rhythm_config = self._creative_segment_config(
+            seg_type=seg_type,
+            duration=float(duration),
+            section_type=section_type,
+            has_overlay=bool(overlay_text),
+        )
+        creative_cache_key = json.dumps(
+            {
+                "strategy": self.edit_strategy,
+                "transition": transition_config,
+                "motion": motion_config,
+                "rhythm": rhythm_config,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
 
         seg = RenderSegment(
             segment_id=f"seg_{len(self.segments):05d}",
@@ -1239,6 +1270,10 @@ class Compiler:
             end_time=round(self.time + duration, 3),
             section_id=section_id,
             asset_id=asset_id,
+            transition=transition_config.get("type", "none"),
+            transition_config=transition_config,
+            motion_config=motion_config,
+            rhythm_config=rhythm_config,
             keep_audio=keep_audio,
             background_mode=background_mode,
             background_source_path=background_source_path,
@@ -1250,12 +1285,155 @@ class Compiler:
             overlay_duration=overlay_duration,
             overlay_title_style=overlay_title_style,
             title_style=title_style,
-            cache_key=safe_id(f"{seg_type}|{source_path}|{duration}|{text}|{background_mode}|{ENGINE_VERSION}"),
+            cache_key=safe_id(
+                f"{seg_type}|{source_path}|{duration}|{text}|{background_mode}|{creative_cache_key}|{ENGINE_VERSION}"
+            ),
         )
         self.segments.append(seg)
         if seg_type in {"image", "video"} and source_path:
             self.last_visual_source_path = source_path
         self.time += duration
+
+    def _creative_segment_config(
+        self,
+        seg_type: str,
+        duration: float,
+        section_type: Optional[str],
+        has_overlay: bool,
+    ) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+        strategy = str(self.edit_strategy or "smart_director")
+        if strategy not in {
+            "smart_director",
+            "fast_assembly",
+            "travel_soft",
+            "beat_cut",
+            "documentary",
+            "long_stable",
+        }:
+            strategy = "smart_director"
+
+        section_type = section_type or "global"
+        is_boundary = seg_type in {"title", "chapter", "end"}
+        is_video = seg_type == "video"
+        is_image = seg_type == "image"
+
+        def transition(kind: str, seconds: float, reason: str) -> Dict[str, Any]:
+            if kind in {"none", "cut"}:
+                seconds = 0.0
+            else:
+                seconds = min(max(seconds, 0.0), max(duration * 0.28, 0.0), 0.8)
+            return {
+                "type": kind,
+                "duration": round(seconds, 3),
+                "profile": self.transition_profile,
+                "strategy": strategy,
+                "scope": "boundary" if is_boundary else "asset",
+                "reason": reason,
+            }
+
+        def motion(kind: str, intensity: str, reason: str) -> Dict[str, Any]:
+            return {
+                "type": kind,
+                "intensity": intensity,
+                "strategy": strategy,
+                "apply_to": seg_type,
+                "overlay_safe": has_overlay,
+                "reason": reason,
+            }
+
+        def rhythm(role: str, pace: str, importance: float) -> Dict[str, Any]:
+            return {
+                "role": role,
+                "pace": pace,
+                "importance": round(importance, 2),
+                "profile": self.rhythm_profile,
+                "strategy": strategy,
+                "section_type": section_type,
+            }
+
+        if is_boundary:
+            if strategy == "beat_cut":
+                return (
+                    transition("flash_cut", 0.16, "章节边界用短促闪切，强化卡点感"),
+                    motion("title_style", "medium", "章节文字动效主导画面运动"),
+                    rhythm("chapter_boundary", "fast_punchy", 0.9),
+                )
+            if strategy == "travel_soft":
+                return (
+                    transition("fade_through_white", 0.46, "旅拍章节用亮调柔化过渡"),
+                    motion("title_style", "soft", "保留章节文字动效，避免背景抢戏"),
+                    rhythm("chapter_boundary", "medium_soft", 0.86),
+                )
+            if strategy == "documentary":
+                return (
+                    transition("fade_through_dark", 0.34, "纪录叙事用稳重暗场分段"),
+                    motion("title_style", "low", "边界段保持信息清晰"),
+                    rhythm("chapter_boundary", "steady_story", 0.9),
+                )
+            if strategy == "long_stable":
+                return (
+                    transition("fade_through_dark", 0.24, "长片减少高频转场刺激"),
+                    motion("title_style", "low", "长片章节牌以低运动量为主"),
+                    rhythm("chapter_boundary", "long_consistent", 0.82),
+                )
+            if strategy == "fast_assembly":
+                return (
+                    transition("cut", 0.0, "快速成片优先效率和稳定"),
+                    motion("title_style", "low", "减少额外运动计算"),
+                    rhythm("chapter_boundary", "fast_review", 0.74),
+                )
+            return (
+                transition("fade_through_dark", 0.32, "智能导演默认用清晰章节分隔"),
+                motion("title_style", "medium", "章节文字动效承担主要表现"),
+                rhythm("chapter_boundary", "auto", 0.86),
+            )
+
+        if strategy == "fast_assembly":
+            return (
+                transition("cut", 0.0, "素材快速直切，适合批量审片和极速出片"),
+                motion("none" if is_video else "still_hold", "none", "快速成片减少逐段运动处理"),
+                rhythm("footage" if is_video else "visual", "fast_review", 0.62),
+            )
+        if strategy == "travel_soft":
+            return (
+                transition("soft_crossfade", 0.45, "旅拍素材用柔和交叉淡化保持流动感"),
+                motion("none" if is_video else "gentle_push", "soft", "轻推镜头增加旅行感但不抢主体"),
+                rhythm("footage" if is_video else "visual", "medium_soft", 0.72),
+            )
+        if strategy == "beat_cut":
+            return (
+                transition("quick_zoom" if is_image else "cut", 0.18, "节奏型剪辑用短促冲击转场"),
+                motion("micro_zoom" if is_video else "punch_zoom", "high", "增加卡点冲击和画面能量"),
+                rhythm("beat_asset", "fast_punchy", 0.82),
+            )
+        if strategy == "documentary":
+            return (
+                transition("soft_crossfade" if is_image else "cut", 0.28, "纪录叙事保持克制连贯"),
+                motion("none" if is_video else "slow_push", "low", "慢推帮助观众阅读画面信息"),
+                rhythm("story_asset", "steady_story", 0.78),
+            )
+        if strategy == "long_stable":
+            return (
+                transition("cut" if is_video else "soft_crossfade", 0.2, "长片降低转场复杂度，保证稳定输出"),
+                motion("none" if is_video else "subtle_ken_burns", "low", "长片保留轻微变化避免疲劳"),
+                rhythm("longform_asset", "long_consistent", 0.68),
+            )
+
+        if section_type in {"city", "date"}:
+            transition_type = "bridge_blur"
+            reason = "智能导演识别城市/日期段落，用桥接模糊增强段落感"
+        elif has_overlay:
+            transition_type = "soft_crossfade"
+            reason = "首个景点素材含标题叠加，使用柔和过渡保护文字可读性"
+        else:
+            transition_type = "soft_crossfade" if is_image else "cut"
+            reason = "智能导演根据素材类型选择默认连贯剪辑"
+
+        return (
+            transition(transition_type, 0.34, reason),
+            motion("none" if is_video else "ken_burns", "medium", "智能导演为静态图补充轻微镜头运动"),
+            rhythm("footage" if is_video else "visual", "auto", 0.72),
+        )
 
 
 # =========================
@@ -1467,6 +1645,7 @@ class Renderer:
 
         ensure_parent(self.output_path)
         clips: List[Any] = []
+        rendered_segments: List[Dict[str, Any]] = []
         final = None
 
         try:
@@ -1483,12 +1662,13 @@ class Renderer:
                 clip = self._segment(seg)
                 if clip is not None:
                     clips.append(clip)
+                    rendered_segments.append(seg)
 
             if not clips:
                 raise RuntimeError("No valid clips generated")
 
             emit_event("phase", phase="render", message="正在合成最终时间线", percent=91)
-            final = concatenate_videoclips(clips, method="compose")
+            final = self._compose_timeline(clips, rendered_segments)
 
             if self.params.get("watermark"):
                 emit_event("phase", phase="render", message="正在添加水印", percent=92)
@@ -1560,7 +1740,7 @@ class Renderer:
             return self._chapter_card(seg, duration)
 
         if stype == "image":
-            clip = self._image_clip(Path(seg["source_path"]), duration)
+            clip = self._image_clip(Path(seg["source_path"]), duration, seg.get("motion_config"))
             return self._apply_overlay_title(clip, seg)
 
         if stype == "video":
@@ -1568,10 +1748,81 @@ class Renderer:
                 Path(seg["source_path"]),
                 duration,
                 keep_audio=bool(seg.get("keep_audio", True)),
+                motion_config=seg.get("motion_config"),
             )
             return self._apply_overlay_title(clip, seg)
 
         return None
+
+    def _compose_timeline(self, clips: List[Any], segments: List[Dict[str, Any]]):
+        timeline = []
+        cursor = 0.0
+        max_end = 0.0
+
+        for idx, clip in enumerate(clips):
+            seg = segments[idx] if idx < len(segments) else {}
+            transition_config = seg.get("transition_config") or {}
+            transition_type = str(transition_config.get("type") or seg.get("transition") or "none")
+            transition_duration = self._effective_transition_duration(
+                clip,
+                transition_config,
+                seg.get("rhythm_config") or {},
+            )
+
+            start = cursor
+            if idx > 0 and transition_duration > 0:
+                start = max(0.0, cursor - transition_duration)
+                clip = self._apply_transition_in(clip, transition_type, transition_duration)
+
+            timeline.append(clip.set_start(start))
+            max_end = max(max_end, start + float(clip.duration or 0.0))
+            cursor = max_end
+
+        if len(timeline) == 1:
+            return timeline[0]
+        return CompositeVideoClip(timeline, size=self.target_size).set_duration(max_end)
+
+    def _effective_transition_duration(
+        self,
+        clip: Any,
+        transition_config: Dict[str, Any],
+        rhythm_config: Dict[str, Any],
+    ) -> float:
+        transition_type = str(transition_config.get("type") or "none")
+        if transition_type in {"none", "cut"}:
+            return 0.0
+
+        duration = float(transition_config.get("duration") or 0.0)
+        pace = str(rhythm_config.get("pace") or "")
+        if pace in {"fast_punchy", "fast_review"}:
+            duration *= 0.72
+        elif pace in {"medium_soft", "auto"}:
+            duration *= 1.0
+        elif pace in {"steady_story", "long_consistent"}:
+            duration *= 0.82
+
+        clip_duration = float(getattr(clip, "duration", None) or 0.0)
+        if clip_duration <= 0:
+            return 0.0
+        return max(0.0, min(duration, clip_duration * 0.35, 0.8))
+
+    def _apply_transition_in(self, clip: Any, transition_type: str, duration: float):
+        if duration <= 0:
+            return clip
+
+        if transition_type in {"quick_zoom", "flash_cut"}:
+            clip = self._resize_clip_safe(
+                clip,
+                lambda t: 1.08 - 0.08 * min(max(t / max(duration, 0.01), 0.0), 1.0),
+            )
+
+        try:
+            return clip.crossfadein(duration)
+        except Exception:
+            try:
+                return clip.fadein(duration)
+            except Exception:
+                return clip
 
     def _find_visual_source(self, direction: str) -> Optional[str]:
         """Find first/last image or video source from render_plan for title/end backgrounds."""
@@ -1790,16 +2041,22 @@ class Renderer:
 
         return text_clip
 
-    def _image_clip(self, source: Path, duration: float):
+    def _image_clip(self, source: Path, duration: float, motion_config: Optional[Dict[str, Any]] = None):
         fixed = self.temp_dir / f"fixed_{safe_id(str(source))}.jpg"
         with Image.open(source) as img:
             img = ImageOps.exif_transpose(img).convert("RGB")
             img.save(fixed, quality=95)
 
         fg = ImageClip(str(fixed)).set_duration(duration)
-        return self._compose_with_blur_bg(fg, duration, source_image=fixed)
+        return self._compose_with_blur_bg(fg, duration, source_image=fixed, motion_config=motion_config)
 
-    def _video_clip(self, source: Path, duration: float, keep_audio: bool = True):
+    def _video_clip(
+        self,
+        source: Path,
+        duration: float,
+        keep_audio: bool = True,
+        motion_config: Optional[Dict[str, Any]] = None,
+    ):
         raw = VideoFileClip(str(source))
         if raw.duration and raw.duration > duration:
             raw = raw.subclip(0, duration)
@@ -1811,15 +2068,27 @@ class Renderer:
         except Exception:
             frame_path = None
 
-        final = self._compose_with_blur_bg(raw, raw.duration or duration, source_image=frame_path)
+        final = self._compose_with_blur_bg(
+            raw,
+            raw.duration or duration,
+            source_image=frame_path,
+            motion_config=motion_config,
+        )
         if keep_audio and raw.audio is not None:
             final = final.set_audio(raw.audio)
         return final
 
-    def _compose_with_blur_bg(self, clip: Any, duration: float, source_image: Optional[Path]):
+    def _compose_with_blur_bg(
+        self,
+        clip: Any,
+        duration: float,
+        source_image: Optional[Path],
+        motion_config: Optional[Dict[str, Any]] = None,
+    ):
         tw, th = self.target_size
         scale = min(tw / clip.w, th / clip.h)
         fg = clip.resize((max(1, int(clip.w * scale)), max(1, int(clip.h * scale))))
+        fg = self._apply_visual_motion(fg, duration, motion_config)
 
         if source_image and Path(source_image).exists():
             bg_path = self._blur_bg(Path(source_image))
@@ -1831,6 +2100,40 @@ class Renderer:
             [bg, fg.set_position("center")],
             size=self.target_size,
         ).set_duration(duration)
+
+    def _apply_visual_motion(
+        self,
+        clip: Any,
+        duration: float,
+        motion_config: Optional[Dict[str, Any]],
+    ):
+        motion_type = str((motion_config or {}).get("type") or "none")
+        if motion_type in {"none", "still_hold"}:
+            return clip
+
+        duration = max(float(duration or 0.1), 0.1)
+
+        if motion_type in {"gentle_push", "slow_push"}:
+            return self._resize_clip_safe(clip, lambda t: 1.0 + 0.045 * min(max(t / duration, 0.0), 1.0))
+
+        if motion_type in {"ken_burns", "subtle_ken_burns"}:
+            amount = 0.06 if motion_type == "ken_burns" else 0.035
+            return self._resize_clip_safe(clip, lambda t: 1.0 + amount * min(max(t / duration, 0.0), 1.0))
+
+        if motion_type in {"punch_zoom", "micro_zoom"}:
+            amount = 0.10 if motion_type == "punch_zoom" else 0.045
+            return self._resize_clip_safe(
+                clip,
+                lambda t: 1.0 + amount * max(0.0, 1.0 - min(max(t / 0.35, 0.0), 1.0)),
+            )
+
+        return clip
+
+    def _resize_clip_safe(self, clip: Any, scale_fn: Any):
+        try:
+            return clip.resize(scale_fn)
+        except Exception:
+            return clip
 
     def _blur_bg(self, source_image: Path) -> Path:
         out = self.temp_dir / f"bg_{source_image.stem}.jpg"
@@ -2102,6 +2405,7 @@ def _v56_write_chunk_video(
     params: Dict[str, Any],
 ) -> None:
     clips = []
+    rendered_segments = []
     combined = None
     tmp_chunk = chunk_path.with_suffix(".rendering.tmp.mp4")
 
@@ -2114,12 +2418,14 @@ def _v56_write_chunk_video(
                 percent=min(94, 10 + chunk["index"]),
             )
             clip = renderer._segment(seg)
-            clips.append(clip)
+            if clip is not None:
+                clips.append(clip)
+                rendered_segments.append(seg)
 
         if not clips:
             raise RuntimeError(f"chunk_{chunk['index']:03d} 没有可渲染 clip")
 
-        combined = concatenate_videoclips(clips, method="compose")
+        combined = renderer._compose_timeline(clips, rendered_segments)
         crf = quality_to_crf(params.get("quality") or params.get("python_quality") or "high")
         combined.write_videofile(
             str(tmp_chunk),

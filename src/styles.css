@@ -407,6 +407,279 @@ label {
   font-weight: 700;
 }
 
+.field-hint {
+  color: #6d7d75;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.edit-strategy-card {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 14px;
+  padding: 14px;
+  background:
+    radial-gradient(circle at 16% 18%, rgb(214 244 226 / 92%), transparent 28%),
+    linear-gradient(135deg, #fbfdf9 0%, #eef6ef 100%);
+  border: 1px solid #cddfd2;
+  border-radius: 14px;
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 80%);
+}
+
+.edit-strategy-card-header {
+  display: grid;
+  grid-template-columns: minmax(220px, 320px) minmax(0, 1fr);
+  gap: 14px;
+  align-items: end;
+}
+
+.edit-strategy-summary {
+  display: grid;
+  gap: 5px;
+  min-height: 40px;
+  padding: 10px 12px;
+  background: rgb(255 255 255 / 72%);
+  border: 1px solid rgb(207 219 210 / 82%);
+  border-radius: 10px;
+}
+
+.edit-strategy-summary span,
+.strategy-effect-pill span {
+  color: #668075;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+
+.edit-strategy-summary strong {
+  color: #17362b;
+  font-size: 13px;
+}
+
+.edit-strategy-body {
+  display: grid;
+  grid-template-columns: minmax(220px, 340px) minmax(0, 1fr);
+  gap: 14px;
+  align-items: stretch;
+}
+
+.strategy-mini-preview {
+  position: relative;
+  min-height: 150px;
+  overflow: hidden;
+  background:
+    linear-gradient(135deg, rgb(18 47 39 / 72%), rgb(36 85 67 / 56%)),
+    repeating-linear-gradient(45deg, rgb(255 255 255 / 7%) 0 1px, transparent 1px 12px);
+  border: 1px solid rgb(23 54 43 / 12%);
+  border-radius: 14px;
+  box-shadow: 0 18px 40px rgb(20 58 45 / 12%);
+}
+
+.strategy-shot {
+  position: absolute;
+  inset: 20px;
+  display: grid;
+  place-items: center;
+  color: #f8fff7;
+  font-size: 13px;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  border: 1px solid rgb(255 255 255 / 22%);
+  border-radius: 12px;
+  box-shadow: 0 18px 28px rgb(0 0 0 / 18%);
+}
+
+.strategy-shot span {
+  padding: 6px 10px;
+  background: rgb(13 31 25 / 52%);
+  border-radius: 999px;
+}
+
+.strategy-shot.shot-a {
+  background:
+    radial-gradient(circle at 30% 30%, #c7f9d4, transparent 24%),
+    linear-gradient(135deg, #236d58, #102b25);
+  animation: strategyShotA 3.2s ease both;
+}
+
+.strategy-shot.shot-b {
+  background:
+    radial-gradient(circle at 68% 30%, #ffe7a8, transparent 22%),
+    linear-gradient(135deg, #b96440, #293f35);
+  animation: strategyShotB 3.2s ease both;
+}
+
+.strategy-mini-preview.fast .strategy-shot.shot-a,
+.strategy-mini-preview.fast .strategy-shot.shot-b {
+  animation-duration: 1.6s;
+  animation-timing-function: steps(2, end);
+}
+
+.strategy-mini-preview.travel .strategy-shot.shot-a,
+.strategy-mini-preview.travel .strategy-shot.shot-b {
+  animation-duration: 3.8s;
+  animation-timing-function: ease-in-out;
+}
+
+.strategy-mini-preview.beat .strategy-shot.shot-a,
+.strategy-mini-preview.beat .strategy-shot.shot-b {
+  animation-duration: 1.8s;
+  animation-timing-function: cubic-bezier(0.2, 1.1, 0.2, 1);
+}
+
+.strategy-mini-preview.doc .strategy-shot.shot-a,
+.strategy-mini-preview.doc .strategy-shot.shot-b,
+.strategy-mini-preview.long .strategy-shot.shot-a,
+.strategy-mini-preview.long .strategy-shot.shot-b {
+  animation-duration: 4.2s;
+}
+
+.strategy-mini-preview.beat .shot-b {
+  animation-name: strategyShotBBeat;
+}
+
+.strategy-playhead {
+  position: absolute;
+  right: 16px;
+  bottom: 14px;
+  left: 16px;
+  height: 4px;
+  overflow: hidden;
+  background: rgb(255 255 255 / 24%);
+  border-radius: 999px;
+}
+
+.strategy-playhead::after {
+  display: block;
+  width: 42%;
+  height: 100%;
+  content: "";
+  background: #d9f7c7;
+  border-radius: inherit;
+  animation: strategyPlayhead 3.2s linear both;
+}
+
+.strategy-mini-preview.fast .strategy-playhead::after,
+.strategy-mini-preview.beat .strategy-playhead::after {
+  animation-duration: 1.8s;
+}
+
+.strategy-mini-preview.travel .strategy-playhead::after {
+  animation-duration: 3.8s;
+}
+
+.strategy-mini-preview.doc .strategy-playhead::after,
+.strategy-mini-preview.long .strategy-playhead::after {
+  animation-duration: 4.2s;
+}
+
+.strategy-effect-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.strategy-effect-pill {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-height: 92px;
+  padding: 12px;
+  background: rgb(255 255 255 / 76%);
+  border: 1px solid rgb(207 219 210 / 82%);
+  border-radius: 12px;
+}
+
+.strategy-effect-pill strong {
+  color: #17362b;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.edit-strategy-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: #526b60;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.edit-strategy-footer button {
+  flex: 0 0 auto;
+  padding: 8px 12px;
+  color: #185b43;
+  font-size: 12px;
+  font-weight: 900;
+  cursor: pointer;
+  background: #f9fff7;
+  border: 1px solid #bdd7c3;
+  border-radius: 999px;
+}
+
+.edit-strategy-footer button:hover {
+  background: #e9f8e8;
+  border-color: #8fc19c;
+}
+
+@keyframes strategyShotA {
+  0% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  48% {
+    opacity: 1;
+    transform: scale(1.04);
+  }
+  62%,
+  100% {
+    opacity: 0;
+    transform: scale(1.08);
+  }
+}
+
+@keyframes strategyShotB {
+  0%,
+  42% {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+  64% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1.04);
+  }
+}
+
+@keyframes strategyShotBBeat {
+  0%,
+  45% {
+    opacity: 0;
+    transform: scale(1.18);
+  }
+  52% {
+    opacity: 1;
+    transform: scale(0.98);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1.02);
+  }
+}
+
+@keyframes strategyPlayhead {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(240%);
+  }
+}
+
 input,
 select {
   width: 100%;
@@ -1936,6 +2209,16 @@ select:focus {
   .blueprint-title-row {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .edit-strategy-card-header,
+  .edit-strategy-body,
+  .strategy-effect-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .strategy-mini-preview {
+    min-height: 180px;
   }
 }
 

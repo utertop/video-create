@@ -27,6 +27,7 @@ import { listen } from "@tauri-apps/api/event";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import {
   AspectRatio,
+  EditStrategy,
   GenerateVideoResult,
   Quality,
   RenderEngine,
@@ -51,6 +52,7 @@ import { findSectionById, getAssetThumbnailPath, updateBlueprintSection, withBlu
 import { BackgroundAssetPicker, shortPathName } from "./components/BackgroundAssetPicker";
 import { BlueprintEditor } from "./components/BlueprintEditor";
 import { Feature, SectionTitle, StatusItem } from "./components/common";
+import { EditStrategyPreview } from "./components/EditStrategyPreview";
 import { FolderSelector, OutputFolderSelector } from "./components/FolderSelector";
 import { MaterialGallery, PreviewModal } from "./components/MaterialGallery";
 import { StudioState, useStudio } from "./store/studio";
@@ -190,12 +192,15 @@ export function App() {
     aspect_ratio: state.aspectRatio,
     quality: state.quality,
     engine: state.renderEngine,
+    edit_strategy: state.editStrategy,
+    transition_profile: transitionProfileForStrategy(state.editStrategy),
+    rhythm_profile: rhythmProfileForStrategy(state.editStrategy),
     cover: state.cover,
     fps: 30,
     title_background_path: state.titleBackgroundPath,
     end_background_path: state.endBackgroundPath,
     chapter_background_mode: state.chapterBackgroundMode,
-  }), [state.title, state.titleSubtitle, state.watermark, state.aspectRatio, state.quality, state.renderEngine, state.cover, state.titleBackgroundPath, state.endBackgroundPath, state.chapterBackgroundMode]);
+  }), [state.title, state.titleSubtitle, state.watermark, state.aspectRatio, state.quality, state.renderEngine, state.editStrategy, state.cover, state.titleBackgroundPath, state.endBackgroundPath, state.chapterBackgroundMode]);
 
   const v5CommandPreview = useMemo(() => buildV5RenderCommandPreview({
     planPath: v5PlanPath || "<render_plan.json>",
@@ -416,6 +421,11 @@ export function App() {
       
       // 1. 保存：把全局章节背景模式写入故事蓝图，供 compile 阶段生成 Render Plan。
       const blueprintForCompile = withBlueprintMetadata(state.v5Blueprint, {
+        edit_strategy: state.editStrategy,
+        transition_profile: transitionProfileForStrategy(state.editStrategy),
+        rhythm_profile: rhythmProfileForStrategy(state.editStrategy),
+        render_mode: renderModeForStrategy(state.editStrategy),
+        chunk_seconds: state.editStrategy === "long_stable" ? 240 : null,
         chapter_background_mode: state.chapterBackgroundMode,
         scenic_spot_title_mode: "overlay",
       });
@@ -564,8 +574,12 @@ export function App() {
                 水印
                 <input value={state.watermark} onChange={(event) => state.patch({ watermark: event.target.value })} />
               </label>
+              <EditStrategyPreview
+                value={state.editStrategy}
+                onChange={(editStrategy) => state.patch({ editStrategy })}
+              />
               <label>
-                合成引擎
+                底层渲染方式
                 <select
                   value={state.renderEngine}
                   onChange={(event) => state.patch({ renderEngine: event.target.value as RenderEngine })}
@@ -861,6 +875,43 @@ function getSelectedBackgroundPath(target: BackgroundPickerTarget, state: Studio
   if (target.kind === "end") return state.endBackgroundPath;
   const section = findSectionById(state.v5Blueprint?.sections, target.sectionId);
   return section?.background?.custom_path || null;
+}
+
+function editStrategyHint(strategy: EditStrategy): string {
+  return {
+    smart_director: "根据素材规模自动选择节奏、转场和稳定渲染模式。",
+    fast_assembly: "优先速度和稳定，适合快速出样片或大素材库初稿。",
+    travel_soft: "柔和旅拍观感，适合风景、美食、生活记录。",
+    beat_cut: "快节奏和冲击感，适合短视频、运动和高能素材。",
+    documentary: "章节清晰、转场克制，适合中长叙事内容。",
+    long_stable: "优先分段缓存和失败恢复，适合长视频和大量素材。",
+  }[strategy];
+}
+
+function transitionProfileForStrategy(strategy: EditStrategy): string {
+  return {
+    smart_director: "auto",
+    fast_assembly: "minimal_fast",
+    travel_soft: "travel_soft",
+    beat_cut: "beat_cut",
+    documentary: "documentary",
+    long_stable: "stable_light",
+  }[strategy];
+}
+
+function rhythmProfileForStrategy(strategy: EditStrategy): string {
+  return {
+    smart_director: "auto",
+    fast_assembly: "fast_review",
+    travel_soft: "medium_soft",
+    beat_cut: "fast_punchy",
+    documentary: "steady_story",
+    long_stable: "long_consistent",
+  }[strategy];
+}
+
+function renderModeForStrategy(strategy: EditStrategy): string {
+  return strategy === "long_stable" ? "long_stable" : "auto";
 }
 
 function SegmentedControl({
