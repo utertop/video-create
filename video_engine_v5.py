@@ -46,6 +46,7 @@ usage:
   python video_engine_v5.py plan    --library <media_library.json> --output <story_blueprint.json>
   python video_engine_v5.py compile --blueprint <story_blueprint.json> --library <media_library.json> --output <render_plan.json>
   python video_engine_v5.py render  --plan <render_plan.json> --output <video.mp4> [--params <json>]
+  python video_engine_v5.py preview-title --title <text> --style_json <json> --output <preview.mp4>
 
 Pipeline:
   scan -> media_library.json -> plan -> story_blueprint.json -> compile -> render_plan.json -> render -> final mp4
@@ -2337,6 +2338,89 @@ def command_render(args: argparse.Namespace) -> None:
     render_with_v56_stability(args.plan, args.output, params)
 
 
+def preview_resolution(aspect_ratio: str) -> Tuple[int, int]:
+    if aspect_ratio == "9:16":
+        return 360, 640
+    if aspect_ratio == "1:1":
+        return 480, 480
+    return 640, 360
+
+
+def preview_background(size: Tuple[int, int], theme: str) -> Image.Image:
+    palettes = {
+        "nature": ((18, 54, 38), (106, 142, 69), (211, 238, 174)),
+        "city": ((7, 12, 28), (43, 63, 88), (47, 157, 210)),
+        "clean": ((248, 250, 252), (205, 220, 232), (164, 220, 190)),
+        "travel": ((40, 62, 57), (129, 171, 159), (201, 132, 87)),
+    }
+    c1, c2, c3 = palettes.get(theme, palettes["travel"])
+    w, h = size
+    img = Image.new("RGB", size, c1)
+    draw = ImageDraw.Draw(img)
+    for y in range(h):
+        ratio = y / max(h - 1, 1)
+        if ratio < 0.55:
+            local = ratio / 0.55
+            color = tuple(int(c1[i] + (c2[i] - c1[i]) * local) for i in range(3))
+        else:
+            local = (ratio - 0.55) / 0.45
+            color = tuple(int(c2[i] + (c3[i] - c2[i]) * local) for i in range(3))
+        draw.line([(0, y), (w, y)], fill=color)
+    draw.ellipse((int(w * 0.08), int(h * 0.12), int(w * 0.42), int(h * 0.68)), fill=(*c3[:3],))
+    overlay = Image.new("RGB", size, (8, 18, 14))
+    return Image.blend(img.filter(ImageFilter.GaussianBlur(radius=10)), overlay, 0.18)
+
+
+def command_preview_title(args: argparse.Namespace) -> None:
+    if not HAS_MOVIEPY:
+        raise RuntimeError(
+            "MoviePy not installed. Please run: "
+            "python -m pip install moviepy==1.0.3 pillow numpy imageio-ffmpeg"
+        )
+
+    output_path = Path(args.output)
+    ensure_parent(output_path)
+    duration = max(1.0, min(float(args.duration or 3.0), 6.0))
+    aspect_ratio = args.aspect_ratio or "16:9"
+    target_size = preview_resolution(aspect_ratio)
+    style = json.loads(args.style_json) if args.style_json else {}
+    style.setdefault("preset", "cinematic_bold")
+    style.setdefault("motion", "fade_slide_up")
+
+    renderer = TitleStyleRenderer(target_size)
+    bg = preview_background(target_size, args.background or "travel")
+    text_img = renderer.render_layer(args.title or "章节标题", args.subtitle or None, style, is_full_card=True)
+    bg_clip = ImageClip(np.array(bg)).set_duration(duration)
+    text_clip = ImageClip(np.array(text_img), ismask=False).set_duration(duration)
+    text_clip = renderer.animate(text_clip, style.get("motion", "fade_slide_up"), duration)
+    final = CompositeVideoClip([bg_clip, text_clip], size=target_size).set_duration(duration)
+    try:
+        final.write_videofile(
+            str(output_path),
+            fps=24,
+            codec="libx264",
+            audio=False,
+            preset="veryfast",
+            threads=2,
+            ffmpeg_params=["-pix_fmt", "yuv420p", "-movflags", "+faststart", "-crf", "28"],
+            logger=None,
+        )
+    finally:
+        for clip in (text_clip, bg_clip, final):
+            try:
+                clip.close()
+            except Exception:
+                pass
+
+    print(json.dumps({
+        "ok": True,
+        "output_path": str(output_path),
+        "duration": duration,
+        "width": target_size[0],
+        "height": target_size[1],
+    }, ensure_ascii=False))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Video Create Studio V5 Engine")
     sub = parser.add_subparsers(dest="command")
@@ -2364,6 +2448,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--output", required=True)
     p.add_argument("--params")
     p.set_defaults(func=command_render)
+
+    p = sub.add_parser("preview-title", help="Render a low-resolution title-style preview MP4")
+    p.add_argument("--title", required=True)
+    p.add_argument("--subtitle", default="")
+    p.add_argument("--style_json", required=True)
+    p.add_argument("--output", required=True)
+    p.add_argument("--aspect_ratio", default="16:9")
+    p.add_argument("--background", default="travel")
+    p.add_argument("--duration", default="3.0")
+    p.set_defaults(func=command_preview_title)
 
     return parser
 

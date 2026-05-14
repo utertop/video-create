@@ -14,23 +14,15 @@ import {
   X,
   Wand2,
   ListChecks,
-  Eye,
   PlayCircle,
-  FileWarning,
   Calendar,
   Folder,
   Layers,
   LayoutGrid,
   MapPin,
   Palmtree,
-  EyeOff,
-  Maximize2,
-  Minimize2,
-  Pencil
 } from "lucide-react";
 import { useMemo, useState, useEffect, useRef } from "react";
-import { create } from "zustand";
-import { open } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import {
@@ -55,66 +47,16 @@ import {
   RenderV5Params,
   buildV5RenderCommandPreview
 } from "./lib/engine";
+import { findSectionById, getAssetThumbnailPath, updateBlueprintSection, withBlueprintMetadata } from "./lib/blueprint";
+import { BackgroundAssetPicker, shortPathName } from "./components/BackgroundAssetPicker";
+import { BlueprintEditor } from "./components/BlueprintEditor";
+import { Feature, SectionTitle, StatusItem } from "./components/common";
+import { FolderSelector, OutputFolderSelector } from "./components/FolderSelector";
+import { MaterialGallery, PreviewModal } from "./components/MaterialGallery";
+import { StudioState, useStudio } from "./store/studio";
+import { BackgroundPickerTarget, VideoEvent } from "./types/studio";
+import { applyStructuredEvent, detectPhase, formatProgressLine, parseProgress, parseVideoEvent } from "./lib/progress";
 import "./v5-background.css";
-
-interface VideoEvent {
-  type?: string;
-  message?: string;
-  phase?: string;
-  percent?: number;
-  current?: number;
-  total?: number;
-  ok?: boolean;
-  output_path?: string;
-  output_dir?: string;
-  artifact?: string;
-  path?: string;
-  item_kind?: string;
-  rel_path?: string;
-  display_name?: string;
-  width?: number;
-  height?: number;
-  duration?: number;
-  thumbnail?: string;
-  error?: string;
-  chapter?: string;
-  mtime?: number;
-}
-
-type BackgroundPickerTarget =
-  | { kind: "title" }
-  | { kind: "end" }
-  | { kind: "section"; sectionId: string; sectionTitle: string };
-
-interface StudioState {
-  inputFolder: string | null;
-  outputFolder: string | null;
-  title: string;
-  titleSubtitle: string;
-  endText: string;
-  titleBackgroundPath: string | null;
-  endBackgroundPath: string | null;
-  chapterBackgroundMode: V5ChapterBackgroundMode;
-  outputName: string;
-  aspectRatio: AspectRatio;
-  quality: Quality;
-  watermark: string;
-  recursive: boolean;
-  chaptersFromDirs: boolean;
-  cover: boolean;
-  renderEngine: RenderEngine;
-  isDryRun: boolean;
-  
-  // V5 State
-  v5Stage: "INPUT" | "BLUEPRINT" | "RENDER";
-  v5Library: any | null;
-  v5Blueprint: any | null;
-  v5RenderPlan: any | null;
-
-  setInputFolder: (folder: string | null) => void;
-  setOutputFolder: (folder: string | null) => void;
-  patch: (data: Partial<StudioState>) => void;
-}
 
 function ProgressBar({ percent, phase, isDryRun }: { percent: number; phase: string; isDryRun: boolean }) {
   return (
@@ -138,48 +80,12 @@ function ProgressBar({ percent, phase, isDryRun }: { percent: number; phase: str
   );
 }
 
-const useStudio = create<StudioState>((set) => ({
-  inputFolder: null,
-  outputFolder: null,
-  title: "福建旅行混剪",
-  titleSubtitle: "Travel Video",
-  endText: "To be continued!",
-  titleBackgroundPath: null,
-  endBackgroundPath: null,
-  chapterBackgroundMode: "auto_bridge",
-  outputName: "travel_video",
-  aspectRatio: "16:9",
-  quality: "high",
-  watermark: "utertop",
-  recursive: true,
-  chaptersFromDirs: true,
-  cover: true,
-  renderEngine: "auto",
-  isDryRun: false,
-  
-  v5Stage: "INPUT",
-  v5Library: null,
-  v5Blueprint: null,
-  v5RenderPlan: null,
-
-  setInputFolder: (folder) => set({
-    inputFolder: folder,
-    v5Stage: "INPUT",
-    v5Library: null,
-    v5Blueprint: null,
-    v5RenderPlan: null,
-    titleBackgroundPath: null,
-    endBackgroundPath: null,
-  }),
-  setOutputFolder: (folder) => set({ outputFolder: folder }),
-  patch: (state) => set(state),
-}));
-
 export function App() {
   const state = useStudio();
   const [result, setResult] = useState<GenerateVideoResult | null>(null);
   const [isRendering, setIsRendering] = useState(false);
   const [isCancelling, setIsCancelling] = useState(false);
+  const [isPlanningWorkflow, setIsPlanningWorkflow] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [progress, setProgress] = useState<number | null>(null);
   const [phase, setPhase] = useState("就绪");
@@ -202,6 +108,7 @@ export function App() {
     setLogs([]);
     setProgress(null);
     setPhase("就绪");
+    setIsPlanningWorkflow(false);
     setHighlightOutput(false);
     setHasPreChecked(false);
     setMaterials([]);
@@ -450,6 +357,7 @@ export function App() {
   }
 
   async function onStartV5Workflow() {
+    if (isPlanningWorkflow) return;
     if (!state.inputFolder) return;
     if (!state.outputFolder) {
       const warning = "请先选择输出目录。V5.1 会把 media_library / story_blueprint / render_plan 放到输出目录下的 .video_create_project。";
@@ -460,6 +368,8 @@ export function App() {
     
     setPhase("智能扫描中...");
     setProgress(10);
+    setIsPlanningWorkflow(true);
+    setToast(null);
     try {
       const library = await scanV5(state.inputFolder, v5ProjectDir, state.recursive);
       state.patch({ v5Library: library });
@@ -487,7 +397,10 @@ export function App() {
       setToast("故事蓝图已生成，请开始编排您的旅行故事！");
     } catch (error) {
       console.error("V5 Workflow Error:", error);
+      setPhase("智能编排失败");
       setToast(`扫描失败: ${error}`);
+    } finally {
+      setIsPlanningWorkflow(false);
     }
   }
 
@@ -719,20 +632,29 @@ export function App() {
                   <div className="hero-icon"><Sparkles size={48} /></div>
                   <h2>欢迎使用 Video Create Studio V5</h2>
                   <p>选择素材文件夹后，我们将为您自动识别城市、日期与景点。</p>
-                  <button 
-                    className="primary-action pulse-guidance" 
-                    disabled={!state.inputFolder}
+                  <button
+                    className={`primary-action pulse-guidance${isPlanningWorkflow ? " busy" : ""}`}
+                    disabled={!state.inputFolder || isPlanningWorkflow}
                     onClick={onStartV5Workflow}
                   >
-                    <Wand2 size={20} /> 开始智能编排
+                    <Wand2 size={20} className={isPlanningWorkflow ? "spin" : undefined} />
+                    {isPlanningWorkflow ? "正在智能编排" : "开始智能编排"}
                   </button>
+                  {isPlanningWorkflow && (
+                    <div className="hero-planning-progress" role="status" aria-live="polite">
+                      <ProgressBar isDryRun={false} percent={progress || 0} phase={phase} />
+                      <p className="hero-progress-hint">
+                        素材较多时可能需要几十秒到几分钟，正在扫描素材并生成故事蓝图。
+                      </p>
+                    </div>
+                  )}
                </div>
             ) : state.v5Stage === "BLUEPRINT" ? (
                <div className="blueprint-editor-container">
                   <SectionTitle icon={<ListChecks size={18} />} title="故事蓝图审核" />
                   <BlueprintEditor 
-                    blueprint={state.v5Blueprint} 
-                    library={state.v5Library}
+                    blueprint={state.v5Blueprint!} 
+                    library={state.v5Library!}
                     chapterBackgroundMode={state.chapterBackgroundMode}
                     onPickSectionBackground={(section) => ensureBackgroundLibrary({ kind: "section", sectionId: section.section_id, sectionTitle: section.title })}
                     onUpdate={(bp) => state.patch({ v5Blueprint: bp })}
@@ -764,15 +686,15 @@ export function App() {
                   {state.v5RenderPlan && (
                     <div className="render-plan-preview">
                        <div className="plan-summary">
-                          <span>总时长: {state.v5RenderPlan.total_duration.toFixed(1)}s</span>
-                          <span>总片段数: {state.v5RenderPlan.segments.length}</span>
+                          <span>总时长: {state.v5RenderPlan!.total_duration.toFixed(1)}s</span>
+                          <span>总片段数: {state.v5RenderPlan!.segments.length}</span>
                           {isRendering && progress !== null && <span className="current-progress-text">进度: {progress}%</span>}
                        </div>
                        <div className="segments-timeline">
-                          {state.v5RenderPlan.segments.map((seg: V5RenderSegment, idx: number) => {
+                          {state.v5RenderPlan!.segments.map((seg: V5RenderSegment, idx: number) => {
                             const isCurrent = isRendering && progress !== null && 
-                              (progress / 100 * state.v5RenderPlan.total_duration >= seg.start_time) &&
-                              (progress / 100 * state.v5RenderPlan.total_duration < seg.end_time);
+                              (progress / 100 * state.v5RenderPlan!.total_duration >= seg.start_time) &&
+                              (progress / 100 * state.v5RenderPlan!.total_duration < seg.end_time);
                             
                             return (
                               <div key={seg.segment_id} className={`segment-strip ${seg.type}${isCurrent ? ' active-rendering' : ''}`}>
@@ -893,88 +815,6 @@ export function App() {
   );
 }
 
-function FolderSelector({ inputFolder, setInputFolder }: { inputFolder: string | null; setInputFolder: (folder: string | null) => void }) {
-  async function handleSelect() {
-    try {
-      const selected = await open({
-        directory: true,
-        multiple: false,
-      });
-      if (selected && typeof selected === "string") {
-        setInputFolder(selected);
-      }
-    } catch (error) {
-      console.error("Failed to select folder:", error);
-    }
-  }
-
-  return (
-    <div className="folder-selector">
-      {inputFolder ? (
-        <div className="selected-folder">
-          <FolderOpen size={24} />
-          <div className="folder-info">
-            <strong>已选择素材目录</strong>
-            <span className="folder-path" title={inputFolder}>{inputFolder}</span>
-          </div>
-          <button className="folder-change-btn" onClick={handleSelect}>更改目录</button>
-        </div>
-      ) : (
-        <div className="drop-zone" onClick={handleSelect}>
-          <ImagePlus size={30} />
-          <strong>点击选择照片/视频所在的文件夹</strong>
-          <span>脚本将自动扫描该目录下的素材</span>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function OutputFolderSelector({
-  disabled,
-  invalid,
-  outputFolder,
-  setOutputFolder,
-}: {
-  disabled: boolean;
-  invalid: boolean;
-  outputFolder: string | null;
-  setOutputFolder: (folder: string | null) => void;
-}) {
-  async function handleSelect() {
-    if (disabled) return;
-
-    try {
-      const selected = await open({
-        directory: true,
-        multiple: false,
-      });
-      if (selected && typeof selected === "string") {
-        setOutputFolder(selected);
-      }
-    } catch (error) {
-      console.error("Failed to select output folder:", error);
-    }
-  }
-
-  return (
-    <label className={invalid ? "folder-field invalid" : "folder-field"}>
-      输出目录
-      <div className="folder-input-row">
-        <input
-          readOnly
-          disabled={disabled}
-          title={outputFolder || ""}
-          value={outputFolder || (disabled ? "请先选择素材目录" : "请选择输出目录")}
-        />
-        <button disabled={disabled} type="button" onClick={handleSelect}>
-          选择目录
-        </button>
-      </div>
-    </label>
-  );
-}
-
 function ResultCard({ result }: { result: GenerateVideoResult }) {
   return (
     <div className={`result-card ${result.ok ? "success" : "warning"}`}>
@@ -1016,421 +856,11 @@ function Toast({ title = "缺少生成参数", message, onClose }: { title?: str
   );
 }
 
-function BlueprintEditor({
-  blueprint,
-  library,
-  chapterBackgroundMode,
-  onPickSectionBackground,
-  onUpdate,
-}: {
-  blueprint: V5StoryBlueprint;
-  library: V5MediaLibrary;
-  chapterBackgroundMode: V5ChapterBackgroundMode;
-  onPickSectionBackground: (section: V5StorySection) => void;
-  onUpdate: (bp: V5StoryBlueprint) => void;
-}) {
-  if (!blueprint) return null;
-
-  const updateSection = (id: string, updatedSection: V5StorySection) => {
-    const newSections = blueprint.sections.map(s => s.section_id === id ? updatedSection : s);
-    onUpdate({ ...blueprint, sections: newSections });
-  };
-
-  return (
-    <div className="blueprint-editor">
-      <div className="blueprint-header">
-         <input 
-           className="blueprint-main-title" 
-           value={blueprint.title} 
-           onChange={(e) => onUpdate({ ...blueprint, title: e.target.value })} 
-         />
-      </div>
-      <div className="blueprint-sections">
-        {blueprint.sections.map((section, idx) => (
-          <SectionCard 
-            key={section.section_id} 
-            section={section} 
-            library={library}
-            chapterBackgroundMode={chapterBackgroundMode}
-            onPickBackground={onPickSectionBackground}
-            onUpdate={(upd) => updateSection(section.section_id, upd)}
-          />
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function SectionCard({
-  section,
-  library,
-  chapterBackgroundMode,
-  onPickBackground,
-  onUpdate,
-}: {
-  section: V5StorySection;
-  library: V5MediaLibrary;
-  chapterBackgroundMode: V5ChapterBackgroundMode;
-  onPickBackground: (section: V5StorySection) => void;
-  onUpdate: (updated: V5StorySection) => void;
-}) {
-  const [isExpanded, setIsExpanded] = useState(false);
-  const icon = section.section_type === 'city' ? <MapPin size={16} /> : 
-               section.section_type === 'date' ? <Calendar size={16} /> : 
-               section.section_type === 'scenic_spot' ? <Palmtree size={16} /> : <Layers size={16} />;
-
-  const getAssetById = (id: string) => library?.assets.find(a => a.asset_id === id);
-  const bgState = sectionBackgroundLabel(section, chapterBackgroundMode);
-
-  const toggleSection = () => onUpdate({ ...section, enabled: !section.enabled });
-  
-  const handleTitleChange = (newTitle: string) => onUpdate({ ...section, title: newTitle });
-
-  const updateChild = (childId: string, updatedChild: V5StorySection) => {
-    const newChildren = section.children.map(c => c.section_id === childId ? updatedChild : c);
-    onUpdate({ ...section, children: newChildren });
-  };
-
-  const toggleAsset = (assetId: string) => {
-    const newRefs = section.asset_refs.map(ref => 
-      ref.asset_id === assetId ? { ...ref, enabled: !ref.enabled } : ref
-    );
-    onUpdate({ ...section, asset_refs: newRefs });
-  };
-
-  return (
-    <div className={`section-card ${section.section_type}${!section.enabled ? ' disabled' : ''}`}>
-       <div className="section-card-header">
-          <div className="section-type-badge">
-             {icon}
-             <span>{section.section_type.toUpperCase()}</span>
-          </div>
-          <div className="section-title-wrapper">
-            <input 
-              className="section-title-input" 
-              value={section.title} 
-              onChange={(e) => handleTitleChange(e.target.value)}
-              placeholder="输入章节标题..."
-            />
-            <Pencil size={12} className="edit-indicator" />
-          </div>
-          <div className="section-bg-actions">
-             <span className={`section-bg-badge ${bgState.kind}`} title={bgState.description}>背景：{bgState.label}</span>
-             <button className="section-bg-btn" type="button" onClick={() => onPickBackground(section)}>选择背景</button>
-             {section.background?.user_overridden && (
-               <button className="section-bg-btn muted" type="button" onClick={() => onUpdate({ ...section, background: { mode: chapterBackgroundMode, custom_asset_id: null, custom_path: null, user_overridden: false } })}>默认</button>
-             )}
-          </div>
-          <div className="section-actions">
-             <button className="icon-btn" onClick={() => setIsExpanded(!isExpanded)} title={isExpanded ? "收起预览" : "放大预览"}>
-                {isExpanded ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
-             </button>
-             <button className="icon-btn" onClick={toggleSection} title={section.enabled ? "禁用此章节" : "启用此章节"}>
-                {section.enabled ? <Eye size={16} /> : <EyeOff size={16} />}
-             </button>
-          </div>
-          <div className="section-meta">
-             {section.asset_refs.length} 个素材
-          </div>
-       </div>
-       
-       {section.enabled && section.children && section.children.length > 0 && (
-         <div className="section-children">
-            {section.children.map(child => (
-              <SectionCard 
-                key={child.section_id} 
-                section={child} 
-                library={library}
-                chapterBackgroundMode={chapterBackgroundMode}
-                onPickBackground={onPickBackground}
-                onUpdate={(upd) => updateChild(child.section_id, upd)}
-              />
-            ))}
-         </div>
-       )}
-
-       {section.enabled && section.asset_refs.length > 0 && !section.children.length && (
-          <div className={`section-assets-preview${isExpanded ? ' expanded-grid' : ''}`}>
-             {section.asset_refs.slice(0, isExpanded ? 50 : 15).map(ref => {
-               const asset = getAssetById(ref.asset_id);
-               return (
-                 <div 
-                   key={ref.asset_id} 
-                   className={`asset-mini-thumb${!ref.enabled ? ' asset-disabled' : ''}`}
-                   title={asset ? `${asset.file.name}\n点击${ref.enabled ? "禁用" : "启用"}` : ""}
-                 >
-                   <div className="asset-click-area" onClick={() => toggleAsset(ref.asset_id)}>
-                     {asset && (getAssetThumbnailPath(asset) || asset.type === 'image') ? (
-                       <img src={convertFileSrc(getAssetThumbnailPath(asset) || asset.absolute_path)} alt={asset.file.name} />
-                     ) : asset?.type === 'video' ? (
-                       <div className="video-placeholder">
-                         <PlayCircle size={isExpanded ? 24 : 14} />
-                         <span className="video-tag">{asset.file.extension.replace('.', '').toUpperCase()}</span>
-                       </div>
-                     ) : null}
-                   </div>
-                   
-                   <button 
-                     className="asset-toggle-badge" 
-                     onClick={(e) => { e.stopPropagation(); toggleAsset(ref.asset_id); }}
-                     title={ref.enabled ? "移除素材" : "恢复素材"}
-                   >
-                     {ref.enabled ? <X size={10} /> : <CheckCircle2 size={10} />}
-                   </button>
-                 </div>
-               );
-             })}
-             {section.asset_refs.length > (isExpanded ? 50 : 15) && <div className="asset-more">+{section.asset_refs.length - (isExpanded ? 50 : 15)}</div>}
-          </div>
-       )}
-    </div>
-  );
-}
-
-
-function updateBlueprintSection(
-  blueprint: V5StoryBlueprint,
-  sectionId: string,
-  updater: (section: V5StorySection) => V5StorySection,
-): V5StoryBlueprint {
-  return {
-    ...blueprint,
-    sections: updateSectionList(blueprint.sections || [], sectionId, updater),
-    metadata: {
-      ...(blueprint.metadata || {}),
-      updated_at: new Date().toISOString(),
-    },
-  };
-}
-
-function updateSectionList(
-  sections: V5StorySection[],
-  sectionId: string,
-  updater: (section: V5StorySection) => V5StorySection,
-): V5StorySection[] {
-  return sections.map((section) => {
-    if (section.section_id === sectionId) {
-      return updater(section);
-    }
-    return {
-      ...section,
-      children: updateSectionList(section.children || [], sectionId, updater),
-    };
-  });
-}
-
-function findSectionById(sections: V5StorySection[] | undefined, sectionId: string): V5StorySection | null {
-  for (const section of sections || []) {
-    if (section.section_id === sectionId) return section;
-    const found = findSectionById(section.children || [], sectionId);
-    if (found) return found;
-  }
-  return null;
-}
-
-function withBlueprintMetadata(
-  blueprint: V5StoryBlueprint,
-  patch: NonNullable<V5StoryBlueprint["metadata"]>,
-): V5StoryBlueprint {
-  return {
-    ...blueprint,
-    metadata: {
-      ...(blueprint.metadata || {}),
-      ...patch,
-      updated_at: new Date().toISOString(),
-    },
-  };
-}
-
 function getSelectedBackgroundPath(target: BackgroundPickerTarget, state: StudioState): string | null {
   if (target.kind === "title") return state.titleBackgroundPath;
   if (target.kind === "end") return state.endBackgroundPath;
   const section = findSectionById(state.v5Blueprint?.sections, target.sectionId);
   return section?.background?.custom_path || null;
-}
-
-function sectionBackgroundLabel(section: V5StorySection, globalMode: V5ChapterBackgroundMode): { label: string; kind: string; description: string } {
-  if (section.background?.user_overridden && section.background.custom_path) {
-    return { label: "已自定义", kind: "custom", description: section.background.custom_path };
-  }
-
-  if (section.section_type === "scenic_spot") {
-    return {
-      label: "标题叠加",
-      kind: "overlay",
-      description: "景点章节默认不插入完整章节卡，而是在首个素材上叠加标题。若手动选择背景，则会升级为完整章节卡。",
-    };
-  }
-
-  return {
-    label: chapterBackgroundModeLabel(globalMode),
-    kind: globalMode,
-    description: "城市 / 日期 / 普通章节默认使用完整章节卡。",
-  };
-}
-
-function chapterBackgroundModeLabel(mode: V5ChapterBackgroundMode): string {
-  return {
-    auto_bridge: "智能过渡",
-    auto_first_asset: "章节首图",
-    custom_asset: "已自定义",
-    plain: "纯色极简",
-  }[mode] || mode;
-}
-
-function getAssetThumbnailPath(asset: unknown): string | null {
-  if (!asset || typeof asset !== "object") return null;
-  const maybeAsset = asset as { thumbnail_path?: unknown; thumbnail?: unknown };
-
-  if (typeof maybeAsset.thumbnail_path === "string" && maybeAsset.thumbnail_path.length > 0) {
-    return maybeAsset.thumbnail_path;
-  }
-
-  if (typeof maybeAsset.thumbnail === "string" && maybeAsset.thumbnail.length > 0) {
-    return maybeAsset.thumbnail;
-  }
-
-  return null;
-}
-
-function formatProgressLine(line: string): string | null {
-  const trimmed = line.trim();
-  if (!trimmed || /^=+$/.test(trimmed)) return null;
-
-  const previewItem = trimmed.match(/^-\s+\[(title|chapter|end|video|image)\]\s+(.+?)\s+\|\s+(.+)$/);
-  if (previewItem) {
-    const [, kind, relPath, displayName] = previewItem;
-    return formatMediaItem(kind, relPath, displayName);
-  }
-
-  const segmentItem = trimmed.match(/^\[\d+\/\d+\].*?:\s+(title|chapter|end|video|image)\s+\|\s+(.+)$/);
-  if (segmentItem) {
-    const [, kind, displayName] = segmentItem;
-    return `生成片段：${mediaKindLabel(kind)} - ${displayName}`;
-  }
-
-  return trimmed;
-}
-
-function parseVideoEvent(line: string): VideoEvent | null {
-  const trimmed = line.trim();
-  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return null;
-  try {
-    const parsed = JSON.parse(trimmed) as VideoEvent;
-    return parsed.type ? parsed : null;
-  } catch {
-    return null;
-  }
-}
-
-function applyStructuredEvent(
-  event: VideoEvent,
-  setPhase: React.Dispatch<React.SetStateAction<string>>,
-  setProgress: React.Dispatch<React.SetStateAction<number | null>>,
-  setLogs: React.Dispatch<React.SetStateAction<string[]>>,
-  setMaterials: React.Dispatch<React.SetStateAction<VideoEvent[]>>,
-) {
-  if (event.type === "media") {
-    setMaterials((prev) => [...prev, event]);
-  }
-
-  if (typeof event.percent === "number") {
-    setProgress(Math.max(0, Math.min(100, event.percent)));
-  }
-
-  if (event.phase) {
-    setPhase(phaseLabel(event.phase));
-  }
-
-  const line = formatStructuredEvent(event);
-  if (!line) return;
-
-  setLogs((prev) => {
-    const next = [...prev, line];
-    if (next.length > 100) return next.slice(next.length - 100);
-    return next;
-  });
-}
-
-function formatStructuredEvent(event: VideoEvent): string | null {
-  if (event.type === "media") {
-    return formatMediaItem(event.item_kind || "media", event.rel_path || "", event.display_name || "");
-  }
-  if (event.type === "progress") {
-    const prefix = event.current && event.total ? `[${event.current}/${event.total}] ` : "";
-    return `${prefix}${event.message || phaseLabel(event.phase || "segment")}`;
-  }
-  if (event.type === "phase") {
-    return event.message || phaseLabel(event.phase || "");
-  }
-  if (event.type === "artifact") {
-    return `${event.message || `${event.artifact || "产物"} 已生成`}${event.path ? `: ${event.path}` : ""}`;
-  }
-  if (event.type === "result") {
-    return event.output_path ? `视频已生成：${event.output_path}` : event.message || "渲染完成";
-  }
-  if (event.type === "error") {
-    return `错误：${event.message || "未知错误"}`;
-  }
-  if (event.type === "log") {
-    return event.message || null;
-  }
-  return event.message || null;
-}
-
-function phaseLabel(phase: string): string {
-  return {
-    scan: "扫描素材",
-    segment: "生成片段",
-    render: "合成视频",
-    cover: "生成封面",
-    report: "生成报告",
-    complete: "完成",
-    fatal: "失败",
-  }[phase] || phase;
-}
-
-function formatMediaItem(kind: string, relPath: string, displayName: string): string {
-  if (kind === "title") return `片头标题卡：${displayName}`;
-  if (kind === "chapter") return `章节卡：${displayName}`;
-  if (kind === "end") return `片尾卡：${displayName}`;
-  return `${mediaKindLabel(kind)}：${displayName || relPath}`;
-}
-
-function mediaKindLabel(kind: string): string {
-  return {
-    image: "图片素材",
-    video: "视频素材",
-    title: "片头标题卡",
-    chapter: "章节卡",
-    end: "片尾卡",
-  }[kind] || "素材";
-}
-
-function parseProgress(line: string): { current: number; total: number } | null {
-  const match = line.match(/\[(\d+)\/(\d+)\]/);
-  if (!match) return null;
-  return { current: parseInt(match[1], 10), total: parseInt(match[2], 10) };
-}
-
-function detectPhase(line: string): string | null {
-  if (line.includes("素材预览")) return "扫描素材";
-  if (/\[\d+\/\d+\]\s*(生成片段|缓存命中)/.test(line)) return "生成片段";
-  if (line.includes("开始最终合成")) return "合成视频";
-  if (line.includes("视频生成完成")) return "完成";
-  if (line.includes("封面已生成")) return "生成封面";
-  if (line.includes("报告已生成")) return "生成报告";
-  return null;
-}
-
-
-function SectionTitle({ icon, title }: { icon: React.ReactNode; title: string }) {
-  return (
-    <div className="section-title">
-      {icon}
-      <h2>{title}</h2>
-    </div>
-  );
 }
 
 function SegmentedControl({
@@ -1472,262 +902,6 @@ function Toggle({ checked, label, onChange }: { checked: boolean; label: string;
     </label>
   );
 }
-function BackgroundAssetPicker({
-  target,
-  library,
-  selectedPath,
-  loading,
-  onSelect,
-  onUseDefault,
-  onClose,
-}: {
-  target: BackgroundPickerTarget;
-  library: V5MediaLibrary | null;
-  selectedPath: string | null;
-  loading: boolean;
-  onSelect: (asset: V5Asset) => void;
-  onUseDefault: () => void;
-  onClose: () => void;
-}) {
-  const visualAssets = useMemo(() => {
-    return (library?.assets || [])
-      .filter((asset) => (asset.type === "image" || asset.type === "video") && assetStatusState(asset) !== "error")
-      .sort((a, b) => a.relative_path.localeCompare(b.relative_path));
-  }, [library]);
-
-  const title = target.kind === "title"
-    ? "选择片头文案背景"
-    : target.kind === "end"
-      ? "选择片尾文案背景"
-      : `选择章节「${target.sectionTitle}」背景`;
-
-  const defaultHint = target.kind === "title"
-    ? "不选择时，默认使用成片第一个素材的首帧/首图作为虚化背景。"
-    : target.kind === "end"
-      ? "不选择时，默认使用成片最后一个素材的尾帧/末图作为虚化背景。"
-      : "不选择时，默认使用章节前后视觉素材生成智能过渡虚化背景；景点章节默认使用首素材标题叠加。";
-
-  const defaultButtonText = target.kind === "section" ? "恢复章节智能背景" : "恢复默认首/尾帧虚化";
-
-  return (
-    <div className="background-picker-overlay">
-      <div className="background-picker-modal">
-        <div className="background-picker-header">
-          <div>
-            <SectionTitle icon={<ImagePlus size={20} />} title={title} />
-            <p>{defaultHint}</p>
-          </div>
-          <button className="background-picker-close" type="button" onClick={onClose}>
-            <X size={18} /> 关闭
-          </button>
-        </div>
-
-        <div className="background-picker-toolbar">
-          <button className="secondary-action" type="button" onClick={onUseDefault}>
-            {defaultButtonText}
-          </button>
-          {selectedPath && (
-            <span className="background-picker-selected">当前：{shortPathName(selectedPath)}</span>
-          )}
-        </div>
-
-        {loading ? (
-          <div className="background-picker-empty">正在扫描素材库，请稍候...</div>
-        ) : visualAssets.length === 0 ? (
-          <div className="background-picker-empty">素材库里还没有可用图片或视频。请先确认素材目录下包含 JPG / PNG / WEBP / MP4 / MOV 等素材。</div>
-        ) : (
-          <div className="background-picker-grid">
-            {visualAssets.map((asset) => {
-              const thumb = asset.thumbnail_path || asset.thumbnail || asset.absolute_path;
-              const selected = selectedPath === asset.absolute_path;
-              return (
-                <button
-                  type="button"
-                  key={asset.asset_id}
-                  className={`background-asset-card${selected ? " selected" : ""}`}
-                  onClick={() => onSelect(asset)}
-                  title={asset.relative_path}
-                >
-                  <div className="background-asset-thumb">
-                    <img src={convertFileSrc(thumb)} alt={asset.file.name} loading="lazy" />
-                    {asset.type === "video" && <span className="background-video-badge">VIDEO</span>}
-                  </div>
-                  <div className="background-asset-info">
-                    <strong>{asset.file.name}</strong>
-                    <span>{asset.media.width || "?"}x{asset.media.height || "?"}</span>
-                  </div>
-                </button>
-              );
-            })}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function shortPathName(path: string | null | undefined): string {
-  if (!path) return "";
-  return path.split(/[\\/]/).pop() || path;
-}
-
-function assetStatusState(asset: V5Asset): string {
-  if (!asset.status) return "ready";
-  if (typeof asset.status === "string") return asset.status;
-  return asset.status.state || "ready";
-}
-
-function MaterialGallery({ materials, onSelect, viewMode }: { 
-  materials: VideoEvent[]; 
-  onSelect: (m: VideoEvent) => void;
-  viewMode: "chapter" | "type" | "time";
-}) {
-  // Group materials based on viewMode
-  const groups = useMemo(() => {
-    const res: Record<string, VideoEvent[]> = {};
-    
-    materials.forEach((m) => {
-      let key = "其他";
-      if (viewMode === "chapter") {
-        key = m.chapter || "默认章节";
-      } else if (viewMode === "type") {
-        key = m.item_kind === "video" ? "视频文件" : m.item_kind === "image" ? "图片素材" : "其他";
-      } else if (viewMode === "time") {
-        if (m.mtime) {
-          const date = new Date(m.mtime * 1000);
-          key = `${date.getFullYear()}/${date.getMonth() + 1}/${date.getDate()}`;
-        } else {
-          key = "未知时间";
-        }
-      }
-      
-      if (!res[key]) res[key] = [];
-      res[key].push(m);
-    });
-
-    // Sort items within groups by filename
-    Object.values(res).forEach(list => {
-      list.sort((a, b) => (a.display_name || "").localeCompare(b.display_name || ""));
-    });
-
-    return res;
-  }, [materials, viewMode]);
-
-  return (
-    <div className="material-gallery">
-      {Object.entries(groups).map(([groupName, items]) => (
-        <div className="gallery-section" key={groupName}>
-          <div className="gallery-section-header">
-            <div className="section-title">
-               <span className="dot"></span>
-               {groupName}
-            </div>
-            <span className="count">{items.length} 个项目</span>
-          </div>
-          <div className="gallery-grid">
-            {items.map((item, i) => (
-              <div 
-                className={`material-card ${item.error ? 'has-error' : ''}`} 
-                key={i}
-                onClick={() => onSelect(item)}
-              >
-                <div className="thumbnail-container">
-                  {item.thumbnail ? (
-                    <img src={convertFileSrc(item.thumbnail)} alt={item.display_name} loading="lazy" />
-                  ) : (
-                    <div className="thumbnail-placeholder">
-                      <FileWarning size={24} />
-                    </div>
-                  )}
-                  {item.item_kind === "video" && (
-                    <div className="video-overlay">
-                      <div className="play-icon-circle">
-                         <PlayCircle size={28} />
-                      </div>
-                      {item.duration && <span className="duration-tag">{Math.round(item.duration)}s</span>}
-                    </div>
-                  )}
-                  {item.error && (
-                    <div className="error-indicator" title={item.error}>
-                      <FileWarning size={14} />
-                    </div>
-                  )}
-                </div>
-                <div className="material-info">
-                  <div className="name-row">
-                     <span className="material-name">{item.display_name}</span>
-                  </div>
-                  <div className="meta-row">
-                    {item.width && item.height && (
-                      <span className="res-tag">{item.width}x{item.height}</span>
-                    )}
-                    {item.item_kind === "image" && <span className="type-tag">IMG</span>}
-                    {item.item_kind === "video" && <span className="type-tag">MOV</span>}
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function PreviewModal({ material, onClose }: { material: VideoEvent; onClose: () => void }) {
-  return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-        <button className="modal-close" onClick={onClose}><X size={24} /></button>
-        <div className="preview-container">
-          {material.item_kind === "video" ? (
-            <video src={convertFileSrc(material.path!)} controls autoPlay />
-          ) : (
-            <img src={convertFileSrc(material.path!)} alt={material.display_name} />
-          )}
-        </div>
-        <div className="preview-footer">
-          <h3>{material.display_name}</h3>
-          <p>{material.path}</p>
-          <div className="preview-stats">
-            {material.width && <span>分辨率: {material.width}x{material.height}</span>}
-            {material.duration && <span>时长: {material.duration.toFixed(1)}s</span>}
-            {material.error && <span className="error-text">错误: {material.error}</span>}
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function StatusItem({
-  label,
-  value,
-  highlight = false,
-}: {
-  label: string;
-  value: string;
-  highlight?: boolean;
-}) {
-  return (
-    <div className={highlight ? "status-item highlight" : "status-item"}>
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </div>
-  );
-}
-
-function Feature({ title, text }: { title: string; text: string }) {
-  return (
-    <article>
-      <strong>{title}</strong>
-      <p>{text}</p>
-    </article>
-  );
-}
-
-
-
 function qualityLabel(quality: Quality): string {
   return {
     draft: "草稿",

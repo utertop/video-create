@@ -19,6 +19,24 @@ export type V5DurationPolicy = "auto" | "custom";
 export type V5RenderSegmentType = "title" | "chapter" | "video" | "image" | "end";
 export type V5ChapterBackgroundMode = "auto_bridge" | "auto_first_asset" | "custom_asset" | "plain";
 export type V5SectionTitleMode = "full_card" | "overlay";
+export type V5TitlePreset =
+  | "cinematic_bold"
+  | "travel_postcard"
+  | "playful_pop"
+  | "impact_flash"
+  | "minimal_editorial"
+  | "nature_documentary"
+  | "romantic_soft"
+  | "tech_future"
+  | string;
+export type V5TitleMotion =
+  | "fade_only"
+  | "fade_slide_up"
+  | "soft_zoom_in"
+  | "pop_bounce"
+  | "quick_zoom_punch"
+  | "slow_fade_zoom"
+  | string;
 
 export const V5_SCHEMA_VERSION = "5.5";
 
@@ -119,9 +137,10 @@ export interface V5StoryBlueprint {
     chapter_background_mode?: V5ChapterBackgroundMode;
   /** auto | standard | long_stable. Auto uses V5.6 chunk rendering for long timelines. */
   render_mode?: string | null;
-  /** Chunk size in seconds for V5.6 long-video stable renderer. */
+    /** Chunk size in seconds for V5.6 long-video stable renderer. */
   chunk_seconds?: number | null;
     scenic_spot_title_mode?: V5SectionTitleMode;
+    default_title_style?: V5TitleStyle | null;
   };
 }
 
@@ -140,9 +159,16 @@ export interface V5StorySection {
   order_index?: number;
   rhythm?: "slow" | "standard" | "fast";
   title_mode?: V5SectionTitleMode;
+  title_style?: V5TitleStyle | null;
   background?: V5SectionBackground | null;
 }
 
+export interface V5TitleStyle {
+  preset?: V5TitlePreset;
+  motion?: V5TitleMotion;
+  color_theme?: string | null;
+  position?: string | null;
+}
 
 export interface V5SectionBackground {
   /**
@@ -353,6 +379,29 @@ export async function renderV5(planPath: string, outputPath: string, params: Ren
     outputPath,
     paramsJson: JSON.stringify(params),
     jobId: jobId || null,
+  });
+}
+
+/** Render a short low-resolution MP4 using the real Python/MoviePy title renderer. */
+export async function previewTitleV5({
+  title,
+  subtitle,
+  style,
+  aspectRatio = "16:9",
+  background = "travel",
+}: {
+  title: string;
+  subtitle?: string | null;
+  style: V5TitleStyle;
+  aspectRatio?: AspectRatio | "1:1";
+  background?: string;
+}): Promise<string> {
+  return await invoke<string>("preview_title_v5", {
+    title,
+    subtitle: subtitle || null,
+    styleJson: JSON.stringify(style),
+    aspectRatio,
+    background,
   });
 }
 

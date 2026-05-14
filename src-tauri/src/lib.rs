@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -545,6 +547,62 @@ async fn render_v5(
     .map_err(|e| format!("V5 render 后台任务异常: {}", e))?
 }
 
+#[tauri::command]
+async fn preview_title_v5(
+    app: AppHandle,
+    title: String,
+    subtitle: Option<String>,
+    style_json: String,
+    aspect_ratio: Option<String>,
+    background: Option<String>,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let script_path = find_v5_engine_script(&app)?;
+        let mut output_dir = app.path().app_cache_dir().unwrap_or_else(|_| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("scratch")
+        });
+        output_dir.push("title_previews");
+        std::fs::create_dir_all(&output_dir)
+            .map_err(|e| format!("æ— æ³•åˆ›å»ºé¢„è§ˆç¼“å­˜ç›®å½• {}: {}", output_dir.display(), e))?;
+
+        let aspect_ratio = aspect_ratio.unwrap_or_else(|| "16:9".to_string());
+        let background = background.unwrap_or_else(|| "travel".to_string());
+        let subtitle = subtitle.unwrap_or_default();
+        let cache_key = stable_hash(&format!(
+            "{}|{}|{}|{}|{}",
+            title, subtitle, style_json, aspect_ratio, background
+        ));
+        let output_path = output_dir.join(format!("title_preview_{}.mp4", cache_key));
+        if output_path.is_file() {
+            return Ok(output_path.display().to_string());
+        }
+
+        let args = vec![
+            "preview-title".to_string(),
+            "--title".to_string(),
+            title,
+            "--subtitle".to_string(),
+            subtitle,
+            "--style_json".to_string(),
+            style_json,
+            "--output".to_string(),
+            output_path.display().to_string(),
+            "--aspect_ratio".to_string(),
+            aspect_ratio,
+            "--background".to_string(),
+            background,
+            "--duration".to_string(),
+            "3.0".to_string(),
+        ];
+
+        run_python_preview_command(&script_path, &args, &output_path)
+    })
+    .await
+    .map_err(|e| format!("V5 title preview åŽå°ä»»åŠ¡å¼‚å¸¸: {}", e))?
+}
+
 fn render_v5_blocking(
     app: AppHandle,
     manager: JobManager,
@@ -706,6 +764,49 @@ fn run_python_to_json_file(
         .map_err(|e| format!("无法读取生成文件 {}: {}", output_path.display(), e))?;
 
     Ok(content)
+}
+
+fn run_python_preview_command(
+    script_path: &Path,
+    args: &[String],
+    output_path: &Path,
+) -> Result<String, String> {
+    let mut cmd = Command::new("python");
+    prepare_python_command(&mut cmd);
+    cmd.arg(script_path).args(args);
+
+    if let Some(script_dir) = script_path.parent() {
+        cmd.current_dir(script_dir);
+    }
+
+    let output = cmd
+        .output()
+        .map_err(|e| format!("å¯åŠ¨ V5 é¢„è§ˆå¼•æ“Žå¤±è´¥: {}", e))?;
+
+    if !output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "ç”ŸæˆçœŸå®žé¢„è§ˆå¤±è´¥: {}\n{}",
+            stderr.trim(),
+            stdout.trim()
+        ));
+    }
+
+    if !output_path.is_file() {
+        return Err(format!(
+            "é¢„è§ˆå¼•æ“Žå·²ç»“æŸï¼Œä½†æ²¡æœ‰æ‰¾åˆ°è¾“å‡ºæ–‡ä»¶: {}",
+            output_path.display()
+        ));
+    }
+
+    Ok(output_path.display().to_string())
+}
+
+fn stable_hash(value: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
 }
 
 fn pipe_child_output_to_frontend(app: &AppHandle, child: &mut std::process::Child) {
@@ -1011,6 +1112,7 @@ pub fn run() {
             plan_v5,
             save_blueprint_v5,
             compile_v5,
+            preview_title_v5,
             render_v5
         ])
         .run(tauri::generate_context!())
