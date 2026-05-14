@@ -1,10 +1,28 @@
-node_modules
-dist
-target
-src-tauri/target
-.cache_bilibili_video
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+target/
+src-tauri/target/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Local render/cache output
+.cache_bilibili_video/
+.cache_video_create_v5/
+.video_create_project/
+*.rendering.tmp.mp4
+*.tmp.mp4
 *.mp4
 *.mov
 *.avi
 *.mkv
 *.log
+
+# Local scratch space
+scratch/

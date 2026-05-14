@@ -2,9 +2,10 @@ name: Build and Check
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - master
   pull_request:
-    branches: [main]
 
 jobs:
   build-and-check:
@@ -42,7 +43,8 @@ jobs:
         run: npm run build
 
       - name: Rust check
-        run: cargo check --manifest-path .\src-tauri\Cargo.toml
+        working-directory: src-tauri
+        run: cargo check --locked
 
       - name: Python syntax check
         run: python -m py_compile .\video_engine_v5.py

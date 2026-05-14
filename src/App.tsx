@@ -35,13 +35,10 @@ import { listen } from "@tauri-apps/api/event";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import {
   AspectRatio,
-  GenerateVideoPayload,
   GenerateVideoResult,
   Quality,
   RenderEngine,
-  buildCommandPreview,
   cancelVideo,
-  generateVideo,
   openInExplorer,
   scanV5,
   planV5,
@@ -263,27 +260,6 @@ export function App() {
     logEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [logs]);
 
-  const payload: GenerateVideoPayload = useMemo(
-    () => ({
-      inputPaths: state.inputFolder ? [state.inputFolder] : [],
-      outputDir: state.outputFolder || "",
-      title: state.title,
-      titleSubtitle: state.titleSubtitle,
-      endText: state.endText,
-      outputName: state.outputName,
-      aspectRatio: state.aspectRatio,
-      quality: state.quality,
-      watermark: state.watermark,
-      recursive: state.recursive,
-      chaptersFromDirs: state.chaptersFromDirs,
-      cover: state.cover,
-      renderEngine: state.renderEngine,
-    }),
-    [state],
-  );
-
-  const commandPreview = useMemo(() => buildCommandPreview(payload), [payload]);
-
   const v5ProjectDir = useMemo(() => {
     const base = state.outputFolder || state.inputFolder || "";
     return base ? `${base}\\.video_create_project` : "";
@@ -319,8 +295,6 @@ export function App() {
     outputPath: v5OutputPath || "<输出视频路径>",
     params: v5RenderParams,
   }), [v5PlanPath, v5OutputPath, v5RenderParams]);
-
-  const activeCommandPreview = state.v5Stage === "RENDER" ? v5CommandPreview : commandPreview;
 
   async function ensureBackgroundLibrary(target: BackgroundPickerTarget) {
     if (!state.inputFolder) {
@@ -415,7 +389,7 @@ export function App() {
       setResult({
         ok: false,
         message: warning,
-        commandPreview: activeCommandPreview,
+        commandPreview: v5CommandPreview,
       });
       setToast(warning);
       setHighlightOutput(Boolean(state.inputFolder && !state.outputFolder && !dryRun));
@@ -465,30 +439,14 @@ export function App() {
       return;
     }
 
-    const jobId = crypto.randomUUID();
-    activeJobRef.current = jobId;
-    setIsRendering(true);
-    setIsCancelling(false);
-    setResult(null);
-    setToast(null);
-    setHighlightOutput(false);
-    setLogs([]);
-    setProgress(null);
-    setPhase("就绪");
-    state.patch({ isDryRun: dryRun });
-    const response = await generateVideo({ ...payload, jobId, dryRun });
-    if (activeJobRef.current !== jobId) return;
-    
-    if (response.ok && dryRun) {
-      setProgress(100);
-      setPhase("预检完成");
-      setHasPreChecked(true);
-    }
-    
-    setResult(response);
-    setIsRendering(false);
-    setIsCancelling(false);
-    activeJobRef.current = null;
+    const message = "请先完成 V5 扫描、故事蓝图审核和渲染计划编译，再开始最终合成。";
+    setToast(message);
+    setResult({
+      ok: false,
+      message,
+      commandPreview: v5CommandPreview,
+      isDryRun: dryRun,
+    });
   }
 
   async function onStartV5Workflow() {
@@ -570,8 +528,8 @@ export function App() {
     if (!jobId || isCancelling) return;
 
     setIsCancelling(true);
-    setPhase("Stopping");
-    setLogs((prev) => [...prev, "Stopping current render job..."]);
+    setPhase("正在停止");
+    setLogs((prev) => [...prev, "正在停止当前渲染任务..."]);
     const response = await cancelVideo(jobId);
     if (!response.ok) {
       setToast(response.message);
@@ -832,7 +790,7 @@ export function App() {
                     </div>
                   )}
 
-                  <div className="command-box">{activeCommandPreview}</div>
+                  <div className="command-box">{v5CommandPreview}</div>
                   
                   {(isRendering || logs.length > 0) && (
                     <div className="log-viewer">
@@ -1406,13 +1364,13 @@ function formatStructuredEvent(event: VideoEvent): string | null {
     return event.message || phaseLabel(event.phase || "");
   }
   if (event.type === "artifact") {
-    return `${event.message || `${event.artifact || "Artifact"} generated`}${event.path ? `: ${event.path}` : ""}`;
+    return `${event.message || `${event.artifact || "产物"} 已生成`}${event.path ? `: ${event.path}` : ""}`;
   }
   if (event.type === "result") {
-    return event.output_path ? `Video generated: ${event.output_path}` : event.message || "Render complete";
+    return event.output_path ? `视频已生成：${event.output_path}` : event.message || "渲染完成";
   }
   if (event.type === "error") {
-    return `Error: ${event.message || "Unknown error"}`;
+    return `错误：${event.message || "未知错误"}`;
   }
   if (event.type === "log") {
     return event.message || null;

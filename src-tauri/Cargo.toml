@@ -1,6 +1,6 @@
 [package]
 name = "video-create-studio"
-version = "0.1.0"
+version = "5.6.0"
 description = "Desktop GUI for the Bilibili travel video generator."
 authors = ["Video Create Studio"]
 edition = "2021"

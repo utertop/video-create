@@ -1486,14 +1486,14 @@ class Renderer:
             if not clips:
                 raise RuntimeError("No valid clips generated")
 
-            emit_event("phase", phase="render", message="Compositing final timeline", percent=91)
+            emit_event("phase", phase="render", message="正在合成最终时间线", percent=91)
             final = concatenate_videoclips(clips, method="compose")
 
             if self.params.get("watermark"):
-                emit_event("phase", phase="render", message="Adding watermark", percent=92)
+                emit_event("phase", phase="render", message="正在添加水印", percent=92)
                 final = self._add_watermark(final, str(self.params.get("watermark")))
 
-            emit_event("phase", phase="render", message="Exporting final video", percent=92)
+            emit_event("phase", phase="render", message="正在导出最终视频", percent=92)
 
             logger = JsonMoviePyLogger(base_percent=92, span_percent=7)
             final.write_videofile(
@@ -1519,8 +1519,8 @@ class Renderer:
             if self.params.get("cover"):
                 self._create_cover()
 
-            emit_event("artifact", artifact="video", path=str(self.output_path), message="Final video is ready")
-            emit_event("phase", phase="complete", message="Video exported successfully", percent=100)
+            emit_event("artifact", artifact="video", path=str(self.output_path), message="最终视频已生成")
+            emit_event("phase", phase="complete", message="视频导出成功", percent=100)
 
         finally:
             if final is not None:
@@ -1903,21 +1903,21 @@ def command_scan(args: argparse.Namespace) -> None:
     result = scanner.scan()
     write_json(args.output, result)
     if args.output:
-        emit_event("artifact", artifact="media_library", path=args.output, message="Media Library saved")
+        emit_event("artifact", artifact="media_library", path=args.output, message="素材库已保存")
 
 
 def command_plan(args: argparse.Namespace) -> None:
     result = Planner(read_json(args.library)).plan(strategy=args.strategy)
     write_json(args.output, result)
     if args.output:
-        emit_event("artifact", artifact="story_blueprint", path=args.output, message="Story Blueprint saved")
+        emit_event("artifact", artifact="story_blueprint", path=args.output, message="故事蓝图已保存")
 
 
 def command_compile(args: argparse.Namespace) -> None:
     result = Compiler(read_json(args.blueprint), read_json(args.library)).compile()
     write_json(args.output, result)
     if args.output:
-        emit_event("artifact", artifact="render_plan", path=args.output, message="Render Plan saved")
+        emit_event("artifact", artifact="render_plan", path=args.output, message="渲染计划已保存")
 
 
 

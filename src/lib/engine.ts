@@ -20,7 +20,7 @@ export type V5RenderSegmentType = "title" | "chapter" | "video" | "image" | "end
 export type V5ChapterBackgroundMode = "auto_bridge" | "auto_first_asset" | "custom_asset" | "plain";
 export type V5SectionTitleMode = "full_card" | "overlay";
 
-export const V5_SCHEMA_VERSION = "5.4";
+export const V5_SCHEMA_VERSION = "5.5";
 
 // =========================
 // V5 data structure definitions
