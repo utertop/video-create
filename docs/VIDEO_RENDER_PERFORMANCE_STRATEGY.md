@@ -186,6 +186,13 @@
 - 大量图片项目会明显减少重复 PIL 处理。
 - 失败重跑时速度更稳定。
 
+当前状态：
+
+- 已加入基础预处理磁盘缓存。
+- 缓存位置：输出目录下 `.video_create_project/render_cache`。
+- 已缓存项目：图片 EXIF/RGB 修正、视频中帧、标题卡背景帧、模糊背景、显示比例归一化视频。
+- 缓存 key 已绑定源文件路径、大小、mtime、目标分辨率和引擎版本，素材变化后会自动失效。
+
 ### P3：渲染质量自适应
 
 目标：同一套软件适配不同机器。
@@ -300,6 +307,17 @@ UI 关系建议：
 
 - MoviePy 负责“生成复杂片段”。
 - FFmpeg 负责“批量编码和最终拼接”。
+
+当前状态：
+
+- 已加入 FFmpeg 优先的简单视频段预适配路径。
+- 触发条件：`快速成片`、`长片稳定`、`稳定优先` 或 `FFmpeg 快速拼接` 场景下，且该视频段为直切、无叠加标题、无复杂镜头运动。
+- 执行方式：先用 FFmpeg 将视频缩放补边到目标画布、统一 `setsar=1`、统一 fps/pix_fmt，并写入 `.video_create_project/render_cache/fitted_videos`。
+- MoviePy 后续只读取已适配好的视频段，减少 Python 级 resize/composite 压力。
+- 如果 FFmpeg 预适配失败，会自动回退原 MoviePy 路径，不中断生成。
+- 已加入 chunk 级 FFmpeg 直出：当一个 chunk 全部是直切、无叠加、无复杂运动、且不需要源音频的视频段时，直接用 FFmpeg concat copy 生成 chunk，完全跳过 MoviePy chunk timeline。
+- 当前 chunk 直出第一版暂不处理源音频，避免混合音轨导致 concat-copy 不稳定；后续可增加统一音频重采样或静音轨补齐。
+- 所有 FFmpeg 优先路径必须遵守 `PROJECT_IRON_RULES.md` 的“素材显示比例零拉伸、零畸变”铁律：只能等比缩放、补边、`setsar=1`，不得为了速度强制拉满画布。
 
 ## 6. Python 打包分发方案
 
@@ -499,3 +517,49 @@ macOS 可选：
 - FFmpeg 做它擅长的拼接和编码，MoviePy 只做复杂视觉片段。
 
 这样才能同时兼顾效果、效率和普通机器的稳定性。
+## 2026-05-15 实施补充：FFmpeg 优先路径增强
+
+本轮已落地的性能优化重点是“让简单视频段尽量不进入 MoviePy 时间线”，并且继续遵守 `PROJECT_IRON_RULES.md` 的零拉伸、零畸变规则。
+
+### 已完成
+
+- `video_engine_v5.py` 增加 `video_has_audio_stream()`，用于识别源视频是否带音频流。
+- FFmpeg fitted segment 缓存升级为 `fit_v2`，缓存 key 纳入音频模式，避免复用旧规格缓存。
+- 简单直切视频 chunk 可直接走 FFmpeg concat copy。
+- 当 chunk 需要保留源音频时，所有分段统一输出 AAC / 48kHz / stereo。
+- 无音频视频或关闭源音频的分段，会在需要统一音频轨时自动补静音轨，避免 concat 时音轨不一致。
+- FFmpeg 视频预处理继续使用 `force_original_aspect_ratio=decrease + pad + setsar=1`，不允许拉伸填满画布。
+- 增加 `detect_ffmpeg_hardware_encoders()`，可探测 `h264_nvenc / h264_qsv / h264_amf / h264_videotoolbox`。
+- 增加 `select_ffmpeg_video_encoder()`，硬件编码暂时保持显式 opt-in：`hardware_encoder=auto/nvenc/qsv/amf/videotoolbox`。
+- 硬件编码失败会自动回退 `libx264`，不让长视频任务因为驱动或设备不可用而失败。
+
+### 当前边界
+
+- FFmpeg 直出 chunk 当前优先支持直切、无复杂文字叠加、无复杂镜头运动的视频段。
+- 真实交叉淡化、复杂转场、章节文字动效仍交给 MoviePy 路径，保证创作效果不被错误降级。
+- “简单淡化”后续建议单独做 FFmpeg filter_complex / xfade 路径，不能用假淡出替代真实转场，否则创作者预期会不一致。
+
+### 下一步建议
+
+- 在 UI 的性能档位旁增加“硬件编码：关闭 / 自动 / NVENC / QSV / AMF”，默认关闭或自动但带风险提示。
+- 做真实低清预览：用同一份 render plan，降低分辨率、fps、片段数量，生成 480p/540p 小样。
+- Python worker / 打包分发放在性能链路稳定后再做，因为它改变的是产品部署形态，不是单次渲染算法。
+
+## 2026-05-15 实施补充：真实低清预览与本地 Worker
+
+### 真实低清预览
+
+- 新增 `preview-render` 命令：使用同一份 `render_plan.json` 生成真实低清小样。
+- 预览默认只抽取前 `20s / 8 个 segment`，分辨率默认 `540p`，fps 默认 `15`。
+- 预览仍走真实 `Renderer`，因此能提前检查画幅、防拉伸、章节文字、转场和镜头运动的大致效果。
+- UI 在正式生成按钮附近增加“生成低清小样”，生成后直接显示 `<video controls>`，减少正式长视频试错。
+
+### Python Worker / 打包基础
+
+- 新增 `video_engine_worker.py`，提供 JSON-line 本地 worker 协议。
+- worker 只传路径和 JSON 参数，不传图片/视频二进制，避免 IPC 内存暴涨。
+- 当前支持 `health / render / preview-render / stop`。
+- Tauri 最终渲染已优先切到常驻 worker：首次渲染启动 worker，后续任务复用该进程，减少重复 Python 启动成本。
+- 取消任务会杀掉当前 worker 并清空句柄，下一次渲染自动拉起新 worker，避免复用异常进程。
+- `src-tauri/tauri.conf.json` 已把 `video_engine_worker.py` 纳入 Tauri resource，后续可替换为 PyInstaller/Nuitka 产物。
+- 详细打包路线见 `docs/PYTHON_WORKER_PACKAGING.md`。

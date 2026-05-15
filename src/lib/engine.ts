@@ -281,6 +281,9 @@ export interface V5RenderSettings {
   quality: Quality;
   python_quality?: PythonQuality;
   fps?: number;
+  preview?: boolean;
+  preview_height?: number;
+  hardware_encoder?: "off" | "auto" | "nvenc" | "qsv" | "amf" | "videotoolbox" | string;
   watermark?: string;
   engine?: RenderEngine;
   edit_strategy?: EditStrategy;
@@ -354,6 +357,9 @@ export interface RenderV5Params {
   rhythm_profile?: string | null;
   cover?: boolean;
   fps?: number;
+  preview?: boolean;
+  preview_height?: number;
+  hardware_encoder?: "off" | "auto" | "nvenc" | "qsv" | "amf" | "videotoolbox" | string;
 
   /** Optional custom background image for the opening title card.
    * If omitted, the renderer uses the first visual frame in render_plan. */
@@ -435,6 +441,32 @@ export async function renderV5(planPath: string, outputPath: string, params: Ren
     outputPath,
     paramsJson: JSON.stringify(params),
     jobId: jobId || null,
+  });
+}
+
+/** Render a short, real low-resolution preview from the same V5 render plan. */
+export async function previewRenderV5({
+  planPath,
+  params,
+  maxDuration = 20,
+  maxSegments = 8,
+  height = 540,
+  fps = 15,
+}: {
+  planPath: string;
+  params: RenderV5Params;
+  maxDuration?: number;
+  maxSegments?: number;
+  height?: number;
+  fps?: number;
+}): Promise<string> {
+  return await invoke<string>("preview_render_v5", {
+    planPath,
+    paramsJson: JSON.stringify(params),
+    maxDuration,
+    maxSegments,
+    height,
+    fps,
   });
 }
 

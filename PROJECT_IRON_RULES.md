@@ -34,6 +34,41 @@
 
 ---
 
+## 铁律四：素材显示比例零拉伸、零畸变 (No Stretch / No Distortion)
+
+**规则**：所有照片、视频素材在最终合成视频中的显示比例必须与用户原始看到的显示效果一致。任何渲染路径、性能优化、缓存、FFmpeg 快路径、MoviePy 合成、章节动效、转场策略，都不得造成素材画面横向或纵向拉伸、压扁、人物变形、画面畸变。
+
+**强制要求**：
+
+- 图片必须先做 EXIF 方向修正，再按原始宽高比例缩放。
+- 视频必须尊重显示宽高，不得只信任编码宽高。
+- 遇到 `rotation / displaymatrix / sample_aspect_ratio / display_aspect_ratio` 等视频显示元数据时，必须先归一化显示几何，再进入 MoviePy 或 FFmpeg 合成。
+- 缩放只能使用等比缩放：`min(target_w / source_w, target_h / source_h)` 或 FFmpeg `force_original_aspect_ratio=decrease`。
+- 不足画布的区域只能用补边、模糊背景、纯色背景或设计背景填充。
+- 禁止为了填满画布直接把素材强制 resize 到目标宽高。
+- 任何新的视频快路径必须显式设置 `setsar=1`，避免非方形像素导致最终显示变形。
+- 性能优化只能降级转场复杂度或运动强度，不能牺牲素材显示比例。
+
+**正确做法**：
+
+- 横屏素材进入 16:9：等比缩放后居中，不足区域补背景。
+- 竖屏素材进入 16:9：等比缩放后左右补模糊背景或设计背景。
+- 16:9 素材进入 9:16：等比缩放后上下或左右按规则补背景，不得拉伸填满。
+- 带 SAR/DAR/旋转信息的视频：先用 FFmpeg 归一化显示比例，再参与合成。
+
+**禁止做法**：
+
+- `clip.resize((target_w, target_h))` 直接强制拉满画布。
+- FFmpeg `scale=target_w:target_h` 但没有 `force_original_aspect_ratio=decrease`。
+- 忽略 `sample_aspect_ratio` 后直接按编码宽高合成。
+- 为了速度跳过显示比例检测。
+
+**回归验证**：
+
+- 修改渲染、转场、缓存、FFmpeg、MoviePy 相关代码后，必须运行视频几何保护测试：`python tests\smoke_v5_video_geometry.py`。
+
+---
+
 ## 历史问题与防退化清单 (Past Bug Registry)
 
 触碰相关模块前必须自检，确保不重蹈覆辙。

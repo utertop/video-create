@@ -46,6 +46,7 @@ usage:
   python video_engine_v5.py plan    --library <media_library.json> --output <story_blueprint.json>
   python video_engine_v5.py compile --blueprint <story_blueprint.json> --library <media_library.json> --output <render_plan.json>
   python video_engine_v5.py render  --plan <render_plan.json> --output <video.mp4> [--params <json>]
+  python video_engine_v5.py preview-render --plan <render_plan.json> --output <preview.mp4>
   python video_engine_v5.py preview-title --title <text> --style_json <json> --output <preview.mp4>
 
 Pipeline:
@@ -232,7 +233,20 @@ def get_resolution(aspect_ratio: str) -> Tuple[int, int]:
         return 1080, 1920
     if aspect_ratio == "1:1":
         return 1080, 1080
+    if aspect_ratio == "16:9":
+        return 1920, 1080
     return 1920, 1080
+
+
+def get_preview_resolution(aspect_ratio: str, height: int = 540) -> Tuple[int, int]:
+    height = max(240, min(int(height or 540), 720))
+    if aspect_ratio == "9:16":
+        width = int(round(height * 9 / 16))
+    elif aspect_ratio == "1:1":
+        width = height
+    else:
+        width = int(round(height * 16 / 9))
+    return max(2, width // 2 * 2), max(2, height // 2 * 2)
 
 
 def ensure_parent(path: Path) -> None:
@@ -410,11 +424,106 @@ def quality_to_crf(quality: Any) -> str:
     return mapping.get(str(quality), "20")
 
 
+def detect_ffmpeg_hardware_encoders() -> List[str]:
+    """List available H.264 hardware encoders reported by the bundled FFmpeg."""
+    candidates = ["h264_nvenc", "h264_qsv", "h264_amf", "h264_videotoolbox"]
+    try:
+        import imageio_ffmpeg
+
+        completed = subprocess.run(
+            [imageio_ffmpeg.get_ffmpeg_exe(), "-hide_banner", "-encoders"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        text = completed.stdout + completed.stderr
+        return [encoder for encoder in candidates if encoder in text]
+    except Exception:
+        return []
+
+
+def select_ffmpeg_video_encoder(params: Dict[str, Any]) -> Tuple[str, List[str]]:
+    """Choose an FFmpeg encoder.
+
+    Hardware encoding is opt-in for now. Some FFmpeg builds list an encoder even
+    when the matching driver/device is unavailable, so callers still keep a
+    libx264 fallback.
+    """
+    requested = str(params.get("hardware_encoder") or params.get("hardware_encoding") or "off").lower()
+    if requested in {"", "off", "false", "none", "libx264", "cpu"}:
+        return "libx264", ["-preset", "veryfast"]
+
+    available = detect_ffmpeg_hardware_encoders()
+    aliases = {
+        "auto": available[0] if available else "",
+        "true": available[0] if available else "",
+        "nvenc": "h264_nvenc",
+        "qsv": "h264_qsv",
+        "amf": "h264_amf",
+        "videotoolbox": "h264_videotoolbox",
+    }
+    selected = aliases.get(requested, requested)
+    if selected and selected in available:
+        if selected == "h264_nvenc":
+            return selected, ["-preset", "p4"]
+        if selected == "h264_qsv":
+            return selected, ["-preset", "veryfast"]
+        if selected == "h264_amf":
+            return selected, ["-quality", "speed"]
+        return selected, []
+    return "libx264", ["-preset", "veryfast"]
+
+
 def close_clip(clip: Any) -> None:
     try:
         clip.close()
     except Exception:
         pass
+
+
+def video_needs_display_normalization(source: Path) -> bool:
+    """Detect mp4 files whose encoded size differs from display geometry.
+
+    MoviePy 1.0.x often trusts encoded width/height and can miss sample aspect
+    ratio or rotation metadata. Those files need an FFmpeg normalization pass
+    before composition, otherwise they can look stretched in the final timeline.
+    """
+    try:
+        import imageio_ffmpeg
+
+        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        completed = subprocess.run(
+            [ffmpeg, "-hide_banner", "-i", str(source)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        probe_text = completed.stderr or ""
+        lower = probe_text.lower()
+        if "displaymatrix" in lower or "rotate" in lower or "rotation of" in lower:
+            return True
+        return bool(re.search(r"\bSAR\s+(?!1:1\b)\d+:\d+", probe_text))
+    except Exception:
+        return False
+
+
+def video_has_audio_stream(source: Path) -> bool:
+    """Return True when FFmpeg sees at least one audio stream in the source."""
+    try:
+        import imageio_ffmpeg
+
+        completed = subprocess.run(
+            [imageio_ffmpeg.get_ffmpeg_exe(), "-hide_banner", "-i", str(source)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        return "Audio:" in (completed.stderr or "")
+    except Exception:
+        return False
 
 
 def read_json(path: str) -> Dict[str, Any]:
@@ -1629,14 +1738,37 @@ class Renderer:
         self.output_path = Path(output_path)
         self.params = params
         settings = plan.get("render_settings", {})
-        self.target_size = get_resolution(
-            params.get("aspect_ratio") or settings.get("aspect_ratio") or "16:9"
-        )
+        aspect_ratio = params.get("aspect_ratio") or settings.get("aspect_ratio") or "16:9"
+        if params.get("preview_height"):
+            self.target_size = get_preview_resolution(aspect_ratio, int(params.get("preview_height") or 540))
+        else:
+            self.target_size = get_resolution(aspect_ratio)
         self.temp_dir = Path(tempfile.mkdtemp(prefix="vcs_v5_render_"))
+        self.render_cache_dir = self._init_render_cache_dir()
         self.first_visual_source = self._find_visual_source("first")
         self.last_visual_source = self._find_visual_source("last")
         self.renderer = TitleStyleRenderer(self.target_size)
         self.gpu_accel = params.get("gpu_accel", "none") # none, nvenc, qsv
+        self.prefer_ffmpeg_segments = self._should_prefer_ffmpeg_segments(settings)
+
+    def _init_render_cache_dir(self) -> Path:
+        configured = self.params.get("cache_root") or self.params.get("render_cache_root")
+        cache_dir = Path(configured) if configured else self.output_path.parent / ".video_create_project" / "render_cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        return cache_dir
+
+    def _cache_path(self, kind: str, source: Path, suffix: str, extra: str = "") -> Path:
+        bucket = self.render_cache_dir / kind
+        bucket.mkdir(parents=True, exist_ok=True)
+        key_extra = f"{extra}|target={self.target_size[0]}x{self.target_size[1]}"
+        key = file_hash_light(source, key_extra) if source.exists() else safe_id(f"{source}|{key_extra}")
+        return bucket / f"{key}{suffix}"
+
+    def _should_prefer_ffmpeg_segments(self, settings: Dict[str, Any]) -> bool:
+        performance_mode = str(self.params.get("performance_mode") or settings.get("performance_mode") or "").lower()
+        edit_strategy = str(self.params.get("edit_strategy") or settings.get("edit_strategy") or "").lower()
+        engine = str(self.params.get("engine") or settings.get("engine") or "").lower()
+        return performance_mode == "stable" or edit_strategy in {"fast_assembly", "long_stable"} or engine == "ffmpeg_concat"
 
     def render(self) -> None:
         if not HAS_MOVIEPY:
@@ -1751,6 +1883,7 @@ class Renderer:
                 duration,
                 keep_audio=bool(seg.get("keep_audio", True)),
                 motion_config=seg.get("motion_config"),
+                prefer_ffmpeg=self._can_use_ffmpeg_fitted_video(seg),
             )
             return self._apply_overlay_title(clip, seg)
 
@@ -1850,7 +1983,7 @@ class Renderer:
             return None
 
         suffix = source.suffix.lower()
-        out = self.temp_dir / f"text_bg_{position}_{safe_id(str(source))}.jpg"
+        out = self._cache_path("text_frames", source, ".jpg", f"text_bg|position={position}")
         if out.exists():
             return out
 
@@ -1862,7 +1995,8 @@ class Renderer:
                 return out
 
             if suffix in VIDEO_EXTS:
-                clip = VideoFileClip(str(source))
+                render_source = self._normalize_video_display_geometry(source)
+                clip = VideoFileClip(str(render_source))
                 try:
                     duration = float(clip.duration or 0)
                     if position == "last":
@@ -2044,10 +2178,11 @@ class Renderer:
         return text_clip
 
     def _image_clip(self, source: Path, duration: float, motion_config: Optional[Dict[str, Any]] = None):
-        fixed = self.temp_dir / f"fixed_{safe_id(str(source))}.jpg"
-        with Image.open(source) as img:
-            img = ImageOps.exif_transpose(img).convert("RGB")
-            img.save(fixed, quality=95)
+        fixed = self._cache_path("fixed_images", source, ".jpg", "exif_rgb_v1")
+        if not fixed.exists():
+            with Image.open(source) as img:
+                img = ImageOps.exif_transpose(img).convert("RGB")
+                img.save(fixed, quality=95)
 
         fg = ImageClip(str(fixed)).set_duration(duration)
         return self._compose_with_blur_bg(fg, duration, source_image=fixed, motion_config=motion_config)
@@ -2058,15 +2193,23 @@ class Renderer:
         duration: float,
         keep_audio: bool = True,
         motion_config: Optional[Dict[str, Any]] = None,
+        prefer_ffmpeg: bool = False,
     ):
-        raw = VideoFileClip(str(source))
+        if prefer_ffmpeg:
+            fitted = self._ffmpeg_fit_video_segment(source, duration, keep_audio=keep_audio)
+            if fitted:
+                return VideoFileClip(str(fitted))
+
+        render_source = self._normalize_video_display_geometry(source)
+        raw = VideoFileClip(str(render_source))
         if raw.duration and raw.duration > duration:
             raw = raw.subclip(0, duration)
         raw = raw.set_duration(min(duration, raw.duration or duration))
 
-        frame_path: Optional[Path] = self.temp_dir / f"frame_{safe_id(str(source))}.jpg"
+        frame_path: Optional[Path] = self._cache_path("video_frames", source, ".jpg", "middle_frame_v1")
         try:
-            raw.save_frame(str(frame_path), t=min(1.0, (raw.duration or 1.0) / 2))
+            if not frame_path.exists():
+                raw.save_frame(str(frame_path), t=min(1.0, (raw.duration or 1.0) / 2))
         except Exception:
             frame_path = None
 
@@ -2079,6 +2222,169 @@ class Renderer:
         if keep_audio and raw.audio is not None:
             final = final.set_audio(raw.audio)
         return final
+
+    def _normalize_video_display_geometry(self, source: Path) -> Path:
+        if not video_needs_display_normalization(source):
+            return source
+
+        normalized = self._cache_path("normalized_videos", source, ".mp4", "display_geometry_v1")
+        if normalized.exists():
+            return normalized
+
+        try:
+            import imageio_ffmpeg
+
+            ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+            cmd = [
+                ffmpeg,
+                "-y",
+                "-i",
+                str(source),
+                "-vf",
+                "scale=trunc(iw*sar/2)*2:trunc(ih/2)*2,setsar=1",
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a?",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "18",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "160k",
+                "-movflags",
+                "+faststart",
+                str(normalized),
+            ]
+            emit_event("log", message=f"检测到视频显示比例元数据，正在归一化以避免画面拉伸: {source.name}")
+            completed = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            if completed.returncode == 0 and normalized.exists() and normalized.stat().st_size > 1024:
+                return normalized
+            emit_event("log", message=f"视频显示比例归一化失败，回退原始文件: {source.name}: {completed.stderr[-600:]}")
+        except Exception as exc:
+            emit_event("log", message=f"视频显示比例归一化异常，回退原始文件: {source.name}: {exc}")
+
+        return source
+
+    def _can_use_ffmpeg_fitted_video(self, seg: Dict[str, Any]) -> bool:
+        if not self.prefer_ffmpeg_segments:
+            return False
+        if seg.get("type") != "video" or seg.get("overlay_text"):
+            return False
+
+        transition = seg.get("transition_config") or {}
+        transition_type = str(transition.get("type") or seg.get("transition") or "none")
+        transition_duration = float(transition.get("duration") or 0.0)
+        if transition_type not in {"none", "cut"} or transition_duration > 0.05:
+            return False
+
+        motion = seg.get("motion_config") or {}
+        motion_type = str(motion.get("type") or "none")
+        return motion_type in {"none", "still_hold"}
+
+    def _ffmpeg_fit_video_segment(
+        self,
+        source: Path,
+        duration: float,
+        keep_audio: bool = True,
+        force_audio_track: bool = False,
+    ) -> Optional[Path]:
+        fps = int(self.params.get("fps") or self.plan.get("render_settings", {}).get("fps") or 30)
+        audio_mode = "source" if keep_audio else "silent" if force_audio_track else "none"
+        extra = f"fit_v2|duration={round(float(duration or 0), 3)}|audio={audio_mode}|fps={fps}"
+        out = self._cache_path("fitted_videos", source, ".mp4", extra)
+        if out.exists() and out.stat().st_size > 1024:
+            return out
+
+        render_source = self._normalize_video_display_geometry(source)
+        segment_duration = max(float(duration or 0.1), 0.1)
+        use_source_audio = bool(keep_audio and video_has_audio_stream(render_source))
+        needs_audio_track = bool(keep_audio or force_audio_track)
+        tw, th = self.target_size
+        vf = (
+            f"scale={tw}:{th}:force_original_aspect_ratio=decrease,"
+            f"pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2:color=black,"
+            f"setsar=1,fps={fps},format=yuv420p"
+        )
+
+        try:
+            import imageio_ffmpeg
+
+            ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+            selected_encoder, encoder_args = select_ffmpeg_video_encoder(self.params)
+
+            def build_cmd(video_encoder: str, video_encoder_args: List[str]) -> List[str]:
+                cmd = [ffmpeg, "-y", "-i", str(render_source)]
+                if needs_audio_track and not use_source_audio:
+                    cmd += [
+                        "-f",
+                        "lavfi",
+                        "-t",
+                        str(segment_duration),
+                        "-i",
+                        "anullsrc=channel_layout=stereo:sample_rate=48000",
+                    ]
+                cmd += ["-t", str(segment_duration), "-vf", vf, "-map", "0:v:0"]
+                if needs_audio_track:
+                    cmd += ["-map", "0:a:0" if use_source_audio else "1:a:0"]
+                    cmd += [
+                        "-af",
+                        "aresample=48000,apad",
+                        "-ac",
+                        "2",
+                        "-ar",
+                        "48000",
+                        "-shortest",
+                        "-c:a",
+                        "aac",
+                        "-b:a",
+                        "160k",
+                    ]
+                else:
+                    cmd += ["-an"]
+                cmd += ["-c:v", video_encoder]
+                cmd += video_encoder_args
+                if video_encoder == "libx264":
+                    cmd += ["-crf", quality_to_crf(self.params.get("python_quality") or self.params.get("quality") or "standard")]
+                else:
+                    cmd += ["-b:v", "8M"]
+                cmd += ["-movflags", "+faststart", str(out)]
+                return cmd
+
+            completed = subprocess.run(build_cmd(selected_encoder, encoder_args), capture_output=True, text=True, encoding="utf-8", errors="replace")
+            if completed.returncode != 0 and selected_encoder != "libx264":
+                emit_event("log", message=f"硬件编码 {selected_encoder} 不可用，回退 libx264: {completed.stderr[-600:]}")
+                completed = subprocess.run(
+                    build_cmd("libx264", ["-preset", "veryfast"]),
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+            if completed.returncode == 0 and out.exists() and out.stat().st_size > 1024:
+                return out
+            emit_event("log", message=f"FFmpeg 视频段预适配失败，回退 MoviePy: {source.name}: {completed.stderr[-600:]}")
+        except Exception as exc:
+            emit_event("log", message=f"FFmpeg 视频段预适配异常，回退 MoviePy: {source.name}: {exc}")
+
+        try:
+            if out.exists():
+                out.unlink()
+        except Exception:
+            pass
+        return None
 
     def _compose_with_blur_bg(
         self,
@@ -2138,7 +2444,7 @@ class Renderer:
             return clip
 
     def _blur_bg(self, source_image: Path) -> Path:
-        out = self.temp_dir / f"bg_{source_image.stem}.jpg"
+        out = self._cache_path("blur_backgrounds", source_image, ".jpg", "blur30_dark28_v1")
         if out.exists():
             return out
 
@@ -2404,6 +2710,85 @@ def _v56_concat_chunks_moviepy(chunks: List[Path], tmp_output: Path, fps: int, p
             close_clip(clip)
 
 
+def _v56_try_write_ffmpeg_direct_chunk(
+    renderer: Any,
+    chunk: Dict[str, Any],
+    tmp_chunk: Path,
+    params: Dict[str, Any],
+) -> bool:
+    segments = chunk.get("segments") or []
+    if not segments:
+        return False
+
+    sources: List[Path] = []
+    for seg in segments:
+        source_path = seg.get("source_path")
+        if not source_path:
+            return False
+        source = Path(source_path)
+        if not source.exists() or not renderer._can_use_ffmpeg_fitted_video(seg):
+            return False
+        sources.append(source)
+
+    keep_audio_flags = [bool(seg.get("keep_audio", True)) for seg in segments]
+    needs_audio_track = any(keep_audio_flags)
+    fitted_segments: List[Path] = []
+    for seg, source, keep_audio in zip(segments, sources, keep_audio_flags):
+        fitted = renderer._ffmpeg_fit_video_segment(
+            source,
+            float(seg.get("duration") or 0.1),
+            keep_audio=keep_audio,
+            force_audio_track=needs_audio_track,
+        )
+        if not fitted or not fitted.exists():
+            return False
+        fitted_segments.append(fitted)
+
+    concat_list = tmp_chunk.with_suffix(".concat.txt")
+    try:
+        with concat_list.open("w", encoding="utf-8", newline="\n") as f:
+            for fitted in fitted_segments:
+                escaped = fitted.resolve().as_posix().replace("'", r"'\''")
+                f.write(f"file '{escaped}'\n")
+
+        import imageio_ffmpeg
+
+        cmd = [
+            imageio_ffmpeg.get_ffmpeg_exe(),
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(concat_list),
+            "-c",
+            "copy",
+            "-movflags",
+            "+faststart",
+            str(tmp_chunk),
+        ]
+        emit_event("phase", phase="render", message=f"使用 FFmpeg 直出轻量分段 {chunk['index'] + 1}", percent=min(94, 10 + chunk["index"]))
+        completed = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if completed.returncode != 0:
+            emit_event("log", message=f"FFmpeg chunk 直出失败，回退 MoviePy: {completed.stderr[-800:]}")
+            return False
+        ok, reason, _duration = _v56_validate_video(tmp_chunk)
+        if not ok:
+            emit_event("log", message=f"FFmpeg chunk 直出校验失败，回退 MoviePy: {reason}")
+            return False
+        return True
+    except Exception as exc:
+        emit_event("log", message=f"FFmpeg chunk 直出异常，回退 MoviePy: {exc}")
+        return False
+    finally:
+        try:
+            if concat_list.exists():
+                concat_list.unlink()
+        except Exception:
+            pass
+
+
 def _v56_write_chunk_video(
     renderer: Any,
     chunk: Dict[str, Any],
@@ -2417,6 +2802,10 @@ def _v56_write_chunk_video(
     tmp_chunk = chunk_path.with_suffix(".rendering.tmp.mp4")
 
     try:
+        if _v56_try_write_ffmpeg_direct_chunk(renderer, chunk, tmp_chunk, params):
+            _v56_atomic_replace(tmp_chunk, chunk_path)
+            return
+
         for seg in chunk["segments"]:
             emit_event(
                 "phase",
@@ -2651,6 +3040,83 @@ def render_with_v56_stability(plan_path: str, output: str, params: Dict[str, Any
         _v56_atomic_replace(tmp_output, final_output)
 
 
+def build_low_res_preview_plan(
+    plan: Dict[str, Any],
+    max_duration: float = 20.0,
+    max_segments: int = 8,
+) -> Dict[str, Any]:
+    """Create a short render-plan sample for real low-res previews."""
+    preview_plan = dict(plan)
+    source_segments = list(plan.get("segments") or [])
+    remaining = max(1.0, float(max_duration or 20.0))
+    limit = max(1, int(max_segments or 8))
+    cursor = 0.0
+    segments: List[Dict[str, Any]] = []
+
+    for source in source_segments:
+        if len(segments) >= limit or remaining <= 0:
+            break
+        duration = max(0.1, float(source.get("duration") or 0.1))
+        used_duration = min(duration, remaining)
+        seg = dict(source)
+        seg["duration"] = used_duration
+        seg["start_time"] = cursor
+        seg["end_time"] = cursor + used_duration
+        segments.append(seg)
+        cursor += used_duration
+        remaining -= used_duration
+
+    if not segments and source_segments:
+        seg = dict(source_segments[0])
+        used_duration = min(max(0.1, float(seg.get("duration") or 0.1)), max_duration)
+        seg["duration"] = used_duration
+        seg["start_time"] = 0.0
+        seg["end_time"] = used_duration
+        segments.append(seg)
+        cursor = used_duration
+
+    preview_plan["segments"] = segments
+    preview_plan["total_duration"] = cursor
+    preview_settings = dict(plan.get("render_settings") or {})
+    preview_settings["preview"] = True
+    preview_settings["fps"] = min(int(preview_settings.get("fps") or 24), 15)
+    preview_settings["quality"] = "draft"
+    preview_settings["python_quality"] = "draft"
+    preview_settings["render_mode"] = "standard"
+    preview_settings["performance_mode"] = "balanced"
+    preview_plan["render_settings"] = preview_settings
+    return preview_plan
+
+
+def command_preview_render(args: argparse.Namespace) -> None:
+    plan = read_json(args.plan)
+    params = json.loads(args.params) if getattr(args, "params", None) else {}
+    aspect_ratio = params.get("aspect_ratio") or plan.get("render_settings", {}).get("aspect_ratio") or "16:9"
+    params.update({
+        "aspect_ratio": aspect_ratio,
+        "preview": True,
+        "preview_height": int(args.height or 540),
+        "fps": int(args.fps or 15),
+        "quality": "draft",
+        "python_quality": "draft",
+        "render_mode": "standard",
+        "performance_mode": "balanced",
+        "cover": False,
+    })
+    preview_plan = build_low_res_preview_plan(
+        plan,
+        max_duration=float(args.max_duration or 20.0),
+        max_segments=int(args.max_segments or 8),
+    )
+    emit_event(
+        "phase",
+        phase="preview",
+        message=f"Generating low-res preview: {len(preview_plan.get('segments', []))} segments",
+        percent=5,
+    )
+    Renderer(preview_plan, args.output, params).render()
+
+
 
 def command_render(args: argparse.Namespace) -> None:
     params = json.loads(args.params) if getattr(args, "params", None) else {}
@@ -2767,6 +3233,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--output", required=True)
     p.add_argument("--params")
     p.set_defaults(func=command_render)
+
+    p = sub.add_parser("preview-render", help="Render a real low-resolution preview from render_plan.json")
+    p.add_argument("--plan", required=True)
+    p.add_argument("--output", required=True)
+    p.add_argument("--params")
+    p.add_argument("--height", type=int, default=540)
+    p.add_argument("--fps", type=int, default=15)
+    p.add_argument("--max_duration", type=float, default=20.0)
+    p.add_argument("--max_segments", type=int, default=8)
+    p.set_defaults(func=command_preview_render)
 
     p = sub.add_parser("preview-title", help="Render a low-resolution title-style preview MP4")
     p.add_argument("--title", required=True)

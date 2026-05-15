@@ -39,6 +39,7 @@ import {
   saveBlueprintV5,
   compileV5,
   renderV5,
+  previewRenderV5,
   V5StoryBlueprint,
   V5StorySection,
   V5MediaLibrary,
@@ -88,6 +89,8 @@ export function App() {
   const state = useStudio();
   const [result, setResult] = useState<GenerateVideoResult | null>(null);
   const [isRendering, setIsRendering] = useState(false);
+  const [isPreviewRendering, setIsPreviewRendering] = useState(false);
+  const [renderPreviewPath, setRenderPreviewPath] = useState<string | null>(null);
   const [isCancelling, setIsCancelling] = useState(false);
   const [isPlanningWorkflow, setIsPlanningWorkflow] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
@@ -118,6 +121,7 @@ export function App() {
     setMaterials([]);
     setSelectedMaterial(null);
     setShowGalleryOverlay(false);
+    setRenderPreviewPath(null);
     setBackgroundPickerTarget(null);
     state.patch({ isDryRun: false });
   };
@@ -370,6 +374,44 @@ export function App() {
       commandPreview: v5CommandPreview,
       isDryRun: dryRun,
     });
+  }
+
+  async function onPreviewRenderSample() {
+    if (!v5PlanPath || !state.v5RenderPlan) {
+      setToast("请先完成智能编排并生成 render_plan.json。");
+      return;
+    }
+    setIsPreviewRendering(true);
+    setToast(null);
+    try {
+      const previewPath = await previewRenderV5({
+        planPath: v5PlanPath,
+        params: v5RenderParams,
+        maxDuration: 20,
+        maxSegments: 8,
+        height: 540,
+        fps: 15,
+      });
+      setRenderPreviewPath(previewPath);
+      setResult({
+        ok: true,
+        message: `低清预览已生成：${previewPath}`,
+        commandPreview: buildV5RenderCommandPreview({
+          planPath: v5PlanPath,
+          outputPath: previewPath,
+          params: { ...v5RenderParams, preview: true },
+        }),
+        outputPath: previewPath,
+      });
+    } catch (err: any) {
+      setResult({
+        ok: false,
+        message: `低清预览生成失败: ${err}`,
+        commandPreview: v5CommandPreview,
+      });
+    } finally {
+      setIsPreviewRendering(false);
+    }
   }
 
   async function onStartV5Workflow() {
@@ -707,6 +749,18 @@ export function App() {
 
                   {!isRendering && (
                     <div className="v5-render-trigger">
+                       <button className="secondary-action" disabled={!state.v5RenderPlan || isPreviewRendering} onClick={onPreviewRenderSample}>
+                          <Play size={18} /> {isPreviewRendering ? "正在生成低清预览..." : "生成低清小样"}
+                       </button>
+                       {renderPreviewPath && (
+                         <div className="render-real-preview">
+                           <div className="render-real-preview-header">
+                             <strong>真实低清预览</strong>
+                             <span>同一份 render plan，低分辨率快速审核</span>
+                           </div>
+                           <video src={convertFileSrc(renderPreviewPath)} controls />
+                         </div>
+                       )}
                        <button className="primary-action pulse-guidance" disabled={!state.outputFolder || isRendering} onClick={() => onGenerate(false)}>
                           <PlayCircle size={24} /> 立即开始最终合成
                        </button>

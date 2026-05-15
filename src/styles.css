@@ -2818,6 +2818,37 @@ select:focus {
   line-height: 1.5;
 }
 
+.render-real-preview {
+  width: min(760px, 100%);
+  margin: 0.75rem auto 0;
+  padding: 0.85rem;
+  border: 1px solid rgba(45, 96, 73, 0.18);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.72);
+  box-shadow: 0 18px 48px rgba(25, 67, 48, 0.1);
+}
+
+.render-real-preview-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.7rem;
+  color: #10271f;
+}
+
+.render-real-preview-header span {
+  color: #64748b;
+  font-size: 0.82rem;
+}
+
+.render-real-preview video {
+  display: block;
+  width: 100%;
+  max-height: 420px;
+  border-radius: 14px;
+  background: #0e1713;
+}
+
 .pulse-guidance {
   animation: button-pulse 2s infinite;
 }

@@ -35,7 +35,8 @@
     "targets": "all",
     "icon": [],
     "resources": {
-      "../video_engine_v5.py": "video_engine_v5.py"
+      "../video_engine_v5.py": "video_engine_v5.py",
+      "../video_engine_worker.py": "video_engine_worker.py"
     }
   }
 }

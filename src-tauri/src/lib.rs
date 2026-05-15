@@ -2,9 +2,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
@@ -14,6 +14,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 #[derive(Clone, Default)]
 struct JobManager {
     current: Arc<Mutex<Option<ActiveJob>>>,
+    worker: Arc<Mutex<Option<WorkerProcess>>>,
 }
 
 #[derive(Clone)]
@@ -21,6 +22,12 @@ struct ActiveJob {
     id: String,
     pid: u32,
     cancelled: Arc<AtomicBool>,
+}
+
+struct WorkerProcess {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -365,6 +372,9 @@ fn cancel_video(manager: State<'_, JobManager>, job_id: String) -> GenerateVideo
 
     job.cancelled.store(true, Ordering::SeqCst);
     kill_process_tree(job.pid);
+    if let Ok(mut worker) = manager.worker.lock() {
+        *worker = None;
+    }
 
     GenerateVideoResult {
         ok: true,
@@ -541,7 +551,7 @@ async fn render_v5(
 ) -> Result<(), String> {
     let manager = manager.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        render_v5_blocking(app, manager, plan_path, output_path, params_json, job_id)
+        render_v5_with_worker_blocking(app, manager, plan_path, output_path, params_json, job_id)
     })
     .await
     .map_err(|e| format!("V5 render 后台任务异常: {}", e))?
@@ -603,6 +613,129 @@ async fn preview_title_v5(
     .map_err(|e| format!("V5 title preview åŽå°ä»»åŠ¡å¼‚å¸¸: {}", e))?
 }
 
+#[tauri::command]
+async fn preview_render_v5(
+    app: AppHandle,
+    plan_path: String,
+    params_json: String,
+    max_duration: Option<f64>,
+    max_segments: Option<u32>,
+    height: Option<u32>,
+    fps: Option<u32>,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let script_path = find_v5_engine_script(&app)?;
+        let mut output_dir = app.path().app_cache_dir().unwrap_or_else(|_| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("scratch")
+        });
+        output_dir.push("render_previews");
+        std::fs::create_dir_all(&output_dir)
+            .map_err(|e| format!("failed to create render preview cache {}: {}", output_dir.display(), e))?;
+
+        let plan_meta = std::fs::metadata(&plan_path)
+            .map_err(|e| format!("cannot read render plan metadata {}: {}", plan_path, e))?;
+        let modified_key = plan_meta
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        let cache_key = stable_hash(&format!(
+            "{}|{}|{}|{}|{}|{}|{}|{}",
+            plan_path,
+            plan_meta.len(),
+            modified_key,
+            params_json,
+            max_duration.unwrap_or(20.0),
+            max_segments.unwrap_or(8),
+            height.unwrap_or(540),
+            fps.unwrap_or(15)
+        ));
+        let output_path = output_dir.join(format!("render_preview_{}.mp4", cache_key));
+        if output_path.is_file() {
+            return Ok(output_path.display().to_string());
+        }
+
+        let args = vec![
+            "preview-render".to_string(),
+            "--plan".to_string(),
+            plan_path,
+            "--output".to_string(),
+            output_path.display().to_string(),
+            "--params".to_string(),
+            params_json,
+            "--height".to_string(),
+            height.unwrap_or(540).to_string(),
+            "--fps".to_string(),
+            fps.unwrap_or(15).to_string(),
+            "--max_duration".to_string(),
+            max_duration.unwrap_or(20.0).to_string(),
+            "--max_segments".to_string(),
+            max_segments.unwrap_or(8).to_string(),
+        ];
+
+        run_python_preview_command(&script_path, &args, &output_path)
+    })
+    .await
+    .map_err(|e| format!("V5 render preview task failed: {}", e))?
+}
+
+fn render_v5_with_worker_blocking(
+    app: AppHandle,
+    manager: JobManager,
+    plan_path: String,
+    output_path: String,
+    params_json: String,
+    job_id: Option<String>,
+) -> Result<(), String> {
+    let output_file = PathBuf::from(&output_path);
+    if let Some(parent) = output_file.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create output directory {}: {}", parent.display(), e))?;
+    }
+
+    let job_id = job_id.unwrap_or_else(|| "v5-render-worker".to_string());
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let task_params = serde_json::from_str::<serde_json::Value>(&params_json)
+        .unwrap_or_else(|_| json!({}));
+
+    let result = run_v5_worker_task(
+        &app,
+        &manager,
+        &job_id,
+        cancelled.clone(),
+        json!({
+            "type": "render",
+            "id": job_id,
+            "plan_path": plan_path,
+            "output_path": output_path,
+            "params": task_params
+        }),
+    );
+    clear_job(&manager, &job_id);
+
+    if cancelled.load(Ordering::SeqCst) {
+        return Err("V5 render was cancelled.".to_string());
+    }
+    result?;
+
+    if !output_file.is_file() {
+        return Err(format!("V5 worker finished but output file was not created: {}", output_file.display()));
+    }
+
+    let payload = json!({
+        "type": "result",
+        "ok": true,
+        "output_path": output_file.display().to_string(),
+        "message": "V5 render completed by local worker"
+    });
+    let _ = app.emit("video-progress", payload.to_string());
+    Ok(())
+}
+
+#[allow(dead_code)]
 fn render_v5_blocking(
     app: AppHandle,
     manager: JobManager,
@@ -721,6 +854,128 @@ fn render_v5_blocking(
 // =========================
 // Shared helpers
 // =========================
+
+fn run_v5_worker_task(
+    app: &AppHandle,
+    manager: &JobManager,
+    job_id: &str,
+    cancelled: Arc<AtomicBool>,
+    task: serde_json::Value,
+) -> Result<(), String> {
+    let mut worker_guard = manager
+        .worker
+        .lock()
+        .map_err(|_| "worker lock poisoned".to_string())?;
+
+    if worker_guard.is_none() {
+        *worker_guard = Some(start_v5_worker(app)?);
+    }
+
+    let worker = worker_guard.as_mut().ok_or_else(|| "worker not available".to_string())?;
+    let pid = worker.child.id();
+    if let Ok(mut current) = manager.current.lock() {
+        if current.is_some() {
+            return Err("another render task is already running".to_string());
+        }
+        *current = Some(ActiveJob {
+            id: job_id.to_string(),
+            pid,
+            cancelled,
+        });
+    }
+
+    let line = serde_json::to_string(&task).map_err(|e| format!("serialize worker task failed: {}", e))?;
+    if let Err(err) = writeln!(worker.stdin, "{}", line).and_then(|_| worker.stdin.flush()) {
+        *worker_guard = None;
+        return Err(format!("write worker task failed: {}", err));
+    }
+
+    loop {
+        let mut line = String::new();
+        let bytes = match worker.stdout.read_line(&mut line) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                *worker_guard = None;
+                return Err(format!("read worker output failed: {}", err));
+            }
+        };
+        if bytes == 0 {
+            *worker_guard = None;
+            return Err("worker exited before completing render task".to_string());
+        }
+
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let _ = app.emit("video-progress", trimmed.to_string());
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
+        let event_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if event_type == "result" {
+            if value.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+                return Ok(());
+            }
+            return Err(value.get("message").and_then(|v| v.as_str()).unwrap_or("worker task failed").to_string());
+        }
+        if event_type == "error" {
+            *worker_guard = None;
+            return Err(value.get("message").and_then(|v| v.as_str()).unwrap_or("worker task failed").to_string());
+        }
+    }
+}
+
+fn start_v5_worker(app: &AppHandle) -> Result<WorkerProcess, String> {
+    let script_path = find_v5_worker_script(app)?;
+    let mut cmd = Command::new("python");
+    prepare_python_command(&mut cmd);
+    cmd.arg(&script_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    if let Some(script_dir) = script_path.parent() {
+        cmd.current_dir(script_dir);
+    }
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("failed to start V5 worker: {}", e))?;
+    let stdin = child.stdin.take().ok_or_else(|| "worker stdin unavailable".to_string())?;
+    let stdout = child.stdout.take().ok_or_else(|| "worker stdout unavailable".to_string())?;
+
+    if let Some(stderr) = child.stderr.take() {
+        let app_stderr = app.clone();
+        std::thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines().flatten() {
+                let payload = json!({
+                    "type": "log",
+                    "message": format!("WORKER ERROR: {}", line)
+                });
+                let _ = app_stderr.emit("video-progress", payload.to_string());
+            }
+        });
+    }
+
+    let mut worker = WorkerProcess {
+        child,
+        stdin,
+        stdout: BufReader::new(stdout),
+    };
+
+    let mut ready = String::new();
+    worker
+        .stdout
+        .read_line(&mut ready)
+        .map_err(|e| format!("failed to read worker ready event: {}", e))?;
+    if !ready.trim().is_empty() {
+        let _ = app.emit("video-progress", ready.trim().to_string());
+    }
+    Ok(worker)
+}
 
 fn project_workspace(input_folder: &str, project_dir: Option<String>) -> Result<PathBuf, String> {
     if let Some(dir) = project_dir {
@@ -1030,6 +1285,14 @@ fn find_v5_engine_script(app: &AppHandle) -> Result<PathBuf, String> {
     )
 }
 
+fn find_v5_worker_script(app: &AppHandle) -> Result<PathBuf, String> {
+    find_script(
+        app,
+        "video_engine_worker.py",
+        "Cannot find V5 worker script video_engine_worker.py.",
+    )
+}
+
 fn find_generator_script(app: &AppHandle) -> Result<PathBuf, String> {
     find_script(
         app,
@@ -1113,6 +1376,7 @@ pub fn run() {
             save_blueprint_v5,
             compile_v5,
             preview_title_v5,
+            preview_render_v5,
             render_v5
         ])
         .run(tauri::generate_context!())
