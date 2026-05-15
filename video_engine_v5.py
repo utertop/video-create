@@ -1152,36 +1152,36 @@ class Scanner:
         all_keywords = list(set(themes + events))
 
         if not all_keywords:
-            return TitleStyle(preset="cinematic_bold", motion="fade_slide_up")
+            return TitleStyle(preset="cinematic_bold", motion="cinematic_reveal")
 
         # Category definitions: (preset, motion, keyword_weight_map)
         categories = {
             "playful": {
-                "preset": "playful_pop", "motion": "pop_bounce",
+                "preset": "playful_pop", "motion": "playful_bounce",
                 "keywords": {"猫": 2.0, "猫咪": 2.2, "狗": 2.0, "宠物": 2.0, "日常": 1.0, "萌": 1.5, "可爱": 1.5}
             },
             "romantic": {
-                "preset": "romantic_soft", "motion": "slow_fade_zoom",
+                "preset": "handwritten_note", "motion": "handwritten_draw",
                 "keywords": {"婚礼": 2.5, "浪漫": 2.0, "甜蜜": 2.0, "派对": 1.2, "生日": 1.5}
             },
             "tech": {
-                "preset": "tech_future", "motion": "quick_zoom_punch",
+                "preset": "neon_night", "motion": "neon_flicker",
                 "keywords": {"科技": 2.0, "赛博": 2.5, "未来": 2.0, "办公": 1.0, "会议": 1.0, "学习": 1.0}
             },
             "nature": {
-                "preset": "nature_documentary", "motion": "slow_fade_zoom",
+                "preset": "documentary_lower_third", "motion": "lower_third_slide",
                 "keywords": {"登山": 1.5, "雪山": 2.0, "森林": 1.5, "风景": 1.0, "露营": 1.8, "自然": 1.2, "大海": 2.0, "湖泊": 1.5, "沙滩": 1.5}
             },
             "action": {
-                "preset": "impact_flash", "motion": "quick_zoom_punch",
+                "preset": "impact_flash", "motion": "impact_slam",
                 "keywords": {"滑雪": 2.5, "运动": 1.5, "航拍": 1.5, "跑酷": 2.5, "极限": 2.0}
             },
             "travel": {
-                "preset": "travel_postcard", "motion": "soft_zoom_in",
+                "preset": "travel_postcard", "motion": "postcard_drift",
                 "keywords": {"美食": 2.0, "街拍": 1.2, "古镇": 1.8, "旅行": 1.0, "探店": 2.0, "深夜": 1.5, "酒吧": 1.5}
             },
             "editorial": {
-                "preset": "minimal_editorial", "motion": "fade_only",
+                "preset": "minimal_editorial", "motion": "editorial_fade",
                 "keywords": {"人物": 1.5, "人像": 1.5, "展览": 1.8, "博物馆": 1.8, "艺术": 1.5, "建筑": 1.2, "城市": 1.0}
             }
         }
@@ -1197,7 +1197,7 @@ class Scanner:
                 scores[cat_name] = score
 
         if not scores:
-            return TitleStyle(preset="cinematic_bold", motion="fade_slide_up")
+            return TitleStyle(preset="cinematic_bold", motion="cinematic_reveal")
 
         # Pick the category with the highest score
         best_cat = max(scores.items(), key=lambda x: x[1])[0]
@@ -1536,6 +1536,7 @@ class Compiler:
             duration=4.0,
             text=self.blueprint.get("title"),
             subtitle=self.blueprint.get("subtitle"),
+            title_style=self.blueprint_metadata.get("title_style"),
         )
 
         enabled_top_sections = [
@@ -1562,7 +1563,12 @@ class Compiler:
             or self.blueprint_metadata.get("end_text")
             or "To be continued!"
         )
-        self._add("end", duration=3.0, text=end_text)
+        self._add(
+            "end",
+            duration=3.0,
+            text=end_text,
+            title_style=self.blueprint_metadata.get("end_title_style"),
+        )
 
         emit_event("phase", phase="compile", message="渲染计划完成", percent=100)
         return {
@@ -1977,6 +1983,12 @@ class TitleStyleRenderer:
     ) -> Image.Image:
         w, h = self.target_size
         preset = style.get("preset", "cinematic_bold")
+        preset_aliases = {
+            "nature_documentary": "documentary_lower_third",
+            "romantic_soft": "handwritten_note",
+            "tech_future": "neon_night",
+        }
+        preset = preset_aliases.get(preset, preset)
         
         # Base transparent layer
         img = Image.new("RGBA", self.target_size, (0, 0, 0, 0))
@@ -2001,54 +2013,109 @@ class TitleStyleRenderer:
             # Bordered card effect
             if is_full_card:
                 draw.rectangle((40, 40, w - 40, h - 40), outline=(255, 255, 255, 180), width=3)
+                draw.rectangle((56, 56, w - 56, h - 56), outline=(251, 191, 36, 120), width=2)
             title_font = load_font(72)
             sub_font = load_font(36)
             tw, th = text_size(draw, title, title_font)
-            draw.text(((w - tw) // 2, (h - th) // 2 - 20), title, font=title_font, fill=(255, 255, 240, 255))
+            draw.text(((w - tw) // 2 + 3, (h - th) // 2 - 17), title, font=title_font, fill=(35, 24, 18, 190))
+            draw.text(((w - tw) // 2, (h - th) // 2 - 20), title, font=title_font, fill=(255, 245, 210, 255))
             if subtitle:
                 sw, sh = text_size(draw, subtitle, sub_font)
                 draw.text(((w - sw) // 2, (h - sh) // 2 + 60), subtitle, font=sub_font, fill=(251, 191, 36, 230))
 
-        elif preset == "nature_documentary":
-            # Minimal but elegant
-            title_font = load_font(84)
-            sub_font = load_font(32)
+        elif preset == "impact_flash":
+            title_font = load_font(92)
+            sub_font = load_font(38)
             tw, th = text_size(draw, title, title_font)
-            draw.text(((w - tw) // 2, (h - th) // 2 - 30), title, font=title_font, fill=(255, 255, 255, 240))
+            x, y = (w - tw) // 2, (h - th) // 2 - 26
+            for offset in [(6, 6), (-5, 4), (4, -5), (-4, -4)]:
+                draw.text((x + offset[0], y + offset[1]), title, font=title_font, fill=(17, 24, 39, 240))
+            draw.text((x + 2, y + 2), title, font=title_font, fill=(239, 68, 68, 210))
+            draw.text((x, y), title, font=title_font, fill=(255, 255, 255, 255))
             if subtitle:
                 sw, sh = text_size(draw, subtitle, sub_font)
-                draw.text(((w - sw) // 2, (h - sh) // 2 + 70), subtitle, font=sub_font, fill=(167, 243, 208, 200))
+                draw.rounded_rectangle(((w - sw) // 2 - 18, y + th + 16, (w + sw) // 2 + 18, y + th + 62), radius=8, fill=(15, 23, 42, 210))
+                draw.text(((w - sw) // 2, y + th + 22), subtitle, font=sub_font, fill=(255, 255, 255, 235))
+
+        elif preset == "documentary_lower_third":
+            band_h = 170 if subtitle else 126
+            y0 = h - band_h - int(h * 0.08) if not is_full_card else int(h * 0.62)
+            draw.rectangle((0, y0, w, y0 + band_h), fill=(10, 14, 12, 190))
+            draw.rectangle((0, y0, 12, y0 + band_h), fill=(214, 182, 107, 255))
+            title_font = load_font(60)
+            sub_font = load_font(30)
+            draw.text((56, y0 + 28), title, font=title_font, fill=(250, 246, 235, 255))
+            if subtitle:
+                draw.text((58, y0 + 98), subtitle, font=sub_font, fill=(214, 182, 107, 230))
 
         elif preset == "minimal_editorial":
-            title_font = load_font(52)
+            title_font = load_font(56)
             sub_font = load_font(28)
             tw, th = text_size(draw, title, title_font)
-            draw.text(((w - tw) // 2, (h - th) // 2 - 10), title, font=title_font, fill=(255, 255, 255, 220))
+            x = int(w * 0.12) if is_full_card else int(w * 0.07)
+            y = (h - th) // 2 - 10
+            draw.rectangle((x, y - 28, x + 2, y + th + 80), fill=(255, 255, 255, 190))
+            draw.text((x + 28, y), title, font=title_font, fill=(255, 255, 255, 235))
             if subtitle:
-                sw, sh = text_size(draw, subtitle, sub_font)
-                draw.text(((w - sw) // 2, (h - sh) // 2 + 50), subtitle, font=sub_font, fill=(255, 255, 255, 160))
+                draw.text((x + 30, y + th + 24), subtitle, font=sub_font, fill=(255, 255, 255, 170))
 
-        elif preset == "romantic_soft":
-            # Pink/Warm theme with elegant font
-            title_font = load_font(72)
-            sub_font = load_font(34)
+        elif preset == "handwritten_note":
+            box_w = min(int(w * 0.62), 980)
+            box_h = 190 if subtitle else 136
+            bx, by = (w - box_w) // 2, (h - box_h) // 2
+            draw.rounded_rectangle((bx, by, bx + box_w, by + box_h), radius=34, fill=(255, 251, 235, 225), outline=(255, 255, 255, 240), width=5)
+            title_font = load_font(66)
+            sub_font = load_font(32)
             tw, th = text_size(draw, title, title_font)
-            # Subtle glow effect would be nice, but simple fill for now
-            draw.text(((w - tw) // 2, (h - th) // 2 - 30), title, font=title_font, fill=(255, 192, 203, 255))
+            draw.text(((w - tw) // 2 + 3, by + 28 + 3), title, font=title_font, fill=(14, 165, 233, 110))
+            draw.text(((w - tw) // 2, by + 28), title, font=title_font, fill=(31, 41, 55, 255))
             if subtitle:
                 sw, sh = text_size(draw, subtitle, sub_font)
-                draw.text(((w - sw) // 2, (h - sh) // 2 + 65), subtitle, font=sub_font, fill=(255, 240, 245, 200))
+                draw.text(((w - sw) // 2, by + 106), subtitle, font=sub_font, fill=(234, 88, 12, 220))
 
-        elif preset == "tech_future":
-            # Cyan/Blue theme with blocky layout
-            draw.rectangle((w // 2 - 150, h // 2 - 80, w // 2 + 150, h // 2 + 60), outline=(34, 211, 238, 180), width=2)
-            title_font = load_font(68)
+        elif preset == "neon_night":
+            title_font = load_font(74)
+            sub_font = load_font(32)
+            tw, th = text_size(draw, title, title_font)
+            x, y = (w - tw) // 2, (h - th) // 2 - 22
+            for radius, alpha in [(10, 70), (5, 120), (2, 210)]:
+                glow = Image.new("RGBA", self.target_size, (0, 0, 0, 0))
+                glow_draw = ImageDraw.Draw(glow)
+                glow_draw.text((x, y), title, font=title_font, fill=(244, 114, 182, alpha))
+                img.alpha_composite(glow.filter(ImageFilter.GaussianBlur(radius)))
+            draw.text((x, y), title, font=title_font, fill=(255, 240, 252, 255))
+            if subtitle:
+                sw, sh = text_size(draw, subtitle, sub_font)
+                draw.text(((w - sw) // 2, y + th + 32), subtitle, font=sub_font, fill=(125, 211, 252, 230))
+
+        elif preset == "film_subtitle":
+            title_font = load_font(56)
+            sub_font = load_font(28)
+            tw, th = text_size(draw, title, title_font)
+            y = int(h * 0.68) if is_full_card else int(h * 0.72)
+            draw.rectangle((0, y - 34, w, y + 116), fill=(0, 0, 0, 115))
+            draw.text(((w - tw) // 2, y), title, font=title_font, fill=(248, 240, 220, 245))
+            if subtitle:
+                sw, sh = text_size(draw, subtitle, sub_font)
+                draw.text(((w - sw) // 2, y + 62), subtitle, font=sub_font, fill=(248, 240, 220, 190))
+            for i in range(8):
+                yy = 40 + i * 52
+                draw.rectangle((32, yy, 48, yy + 20), outline=(248, 240, 220, 80), width=1)
+
+        elif preset == "route_marker":
+            title_font = load_font(64)
             sub_font = load_font(30)
+            x0, y0 = int(w * 0.22), int(h * 0.58)
+            x1, y1 = int(w * 0.72), int(h * 0.38)
+            draw.line((x0, y0, int(w * 0.44), y0 - 70, x1, y1), fill=(47, 111, 143, 220), width=5)
+            draw.ellipse((x1 - 18, y1 - 18, x1 + 18, y1 + 18), fill=(37, 99, 235, 240))
+            draw.ellipse((x1 - 7, y1 - 7, x1 + 7, y1 + 7), fill=(255, 255, 255, 240))
             tw, th = text_size(draw, title, title_font)
-            draw.text(((w - tw) // 2, (h - th) // 2 - 25), title, font=title_font, fill=(34, 211, 238, 255))
+            draw.rounded_rectangle(((w - tw) // 2 - 32, y0 + 28, (w + tw) // 2 + 32, y0 + 118), radius=18, fill=(255, 251, 235, 220))
+            draw.text(((w - tw) // 2, y0 + 42), title, font=title_font, fill=(23, 32, 26, 255))
             if subtitle:
                 sw, sh = text_size(draw, subtitle, sub_font)
-                draw.text(((w - sw) // 2, (h - sh) // 2 + 55), subtitle, font=sub_font, fill=(255, 255, 255, 200))
+                draw.text(((w - sw) // 2, y0 + 112), subtitle, font=sub_font, fill=(47, 111, 143, 230))
 
         else: # cinematic_bold (default)
             title_font = load_font(78)
@@ -2106,19 +2173,34 @@ class TitleStyleRenderer:
 
     def animate(self, clip: Any, motion: str, duration: float) -> Any:
         motion = motion or "fade_slide_up"
+        motion_aliases = {
+            "fade_slide_up": "cinematic_reveal",
+            "soft_zoom_in": "postcard_drift",
+            "pop_bounce": "playful_bounce",
+            "quick_zoom_punch": "impact_slam",
+            "slow_fade_zoom": "film_burn",
+            "fade_only": "editorial_fade",
+        }
+        motion = motion_aliases.get(motion, motion)
         duration = max(float(duration or 0.1), 0.1)
 
         animated = clip
 
-        if motion in {"soft_zoom_in", "slow_fade_zoom"}:
+        if motion == "static_hold":
+            return animated.set_position(("center", "center"))
+
+        if motion in {"soft_zoom_in", "slow_fade_zoom", "cinematic_reveal", "postcard_drift", "film_burn"}:
             animated = self._safe_resize(animated, lambda t: self._soft_zoom_scale(t, duration))
-        elif motion == "pop_bounce":
+        elif motion in {"pop_bounce", "playful_bounce"}:
             animated = self._safe_resize(animated, lambda t: self._pop_scale(t))
-        elif motion == "quick_zoom_punch":
+        elif motion in {"quick_zoom_punch", "impact_slam"}:
             animated = self._safe_resize(animated, lambda t: self._punch_scale(t))
 
         # Dynamic opacity must be mask-based, not set_opacity(lambda...).
-        animated = self._with_dynamic_opacity(animated, lambda t: self._fade_curve(t, duration))
+        if motion == "neon_flicker":
+            animated = self._with_dynamic_opacity(animated, lambda t: self._neon_flicker_curve(t, duration))
+        else:
+            animated = self._with_dynamic_opacity(animated, lambda t: self._fade_curve(t, duration))
 
         try:
             return animated.set_position(("center", "center"))
@@ -2129,6 +2211,17 @@ class TitleStyleRenderer:
         in_t, out_t = 0.5, 0.4
         if t < in_t: return t / in_t
         if t > duration - out_t: return max(0, (duration - t) / out_t)
+        return 1.0
+
+    def _neon_flicker_curve(self, t: float, duration: float) -> float:
+        if t < 0.08:
+            return 0.25
+        if t < 0.14:
+            return 1.0
+        if t < 0.20:
+            return 0.48
+        if t > duration - 0.35:
+            return max(0.0, (duration - t) / 0.35)
         return 1.0
 
     def _slide_up(self, t: float, duration: float) -> int:
@@ -2430,6 +2523,7 @@ class Renderer:
                     main=True,
                     background_source=background_source,
                     background_position="first",
+                    title_style=self.params.get("title_style") or seg.get("title_style"),
                 )
 
             if stype == "end":
@@ -2441,6 +2535,7 @@ class Renderer:
                     main=False,
                     background_source=background_source,
                     background_position="last",
+                    title_style=self.params.get("end_title_style") or seg.get("title_style"),
                 )
 
             return self._chapter_card(seg, duration)
@@ -2744,6 +2839,7 @@ class Renderer:
         background_source_2: Optional[str] = None,
         background_position_2: str = "first",
         blend_sources: bool = False,
+        title_style: Optional[Dict[str, Any]] = None,
     ) -> Image.Image:
         """Build the exact PIL frame used by title/chapter/end cards.
 
@@ -2759,19 +2855,11 @@ class Renderer:
             blend_sources=blend_sources,
         )
 
-        draw = ImageDraw.Draw(img)
-
-        title_font = load_font(78 if main else 58)
-        sub_font = load_font(34)
-
-        tw, th = text_size(draw, title, title_font)
-        draw.text(((w - tw) // 2, (h - th) // 2 - 40), title, font=title_font, fill=(255, 255, 255))
-
-        if subtitle:
-            sw, sh = text_size(draw, subtitle, sub_font)
-            draw.text(((w - sw) // 2, (h - sh) // 2 + 55), subtitle, font=sub_font, fill=(52, 211, 153))
-
-        return img
+        style = title_style or {"preset": "cinematic_bold" if main else "film_subtitle", "motion": "static_hold"}
+        text_img = self.renderer.render_layer(title, subtitle, style, is_full_card=True)
+        composed = img.convert("RGBA")
+        composed.alpha_composite(text_img)
+        return composed.convert("RGB")
 
     def _build_text_background(
         self,
@@ -3106,17 +3194,18 @@ class Renderer:
         duration = max(float(duration or 0.1), 0.1)
 
         if motion_type in {"gentle_push", "slow_push"}:
-            return self._resize_clip_safe(clip, lambda t: 1.0 + 0.045 * min(max(t / duration, 0.0), 1.0))
+            amount = 0.018 if motion_type == "gentle_push" else 0.015
+            return self._resize_clip_safe(clip, lambda t: 1.0 + amount * min(max(t / duration, 0.0), 1.0))
 
         if motion_type in {"ken_burns", "subtle_ken_burns"}:
-            amount = 0.06 if motion_type == "ken_burns" else 0.035
+            amount = 0.022 if motion_type == "ken_burns" else 0.012
             return self._resize_clip_safe(clip, lambda t: 1.0 + amount * min(max(t / duration, 0.0), 1.0))
 
         if motion_type in {"punch_zoom", "micro_zoom"}:
-            amount = 0.10 if motion_type == "punch_zoom" else 0.045
+            amount = 0.035 if motion_type == "punch_zoom" else 0.025
             return self._resize_clip_safe(
                 clip,
-                lambda t: 1.0 + amount * max(0.0, 1.0 - min(max(t / 0.35, 0.0), 1.0)),
+                lambda t: 1.0 + amount * max(0.0, 1.0 - min(max(t / 0.42, 0.0), 1.0)),
             )
 
         return clip
@@ -3179,6 +3268,7 @@ class Renderer:
             main=True,
             background_source=background_source,
             background_position="first",
+            title_style=self.params.get("title_style") or {"preset": "cinematic_bold", "motion": "static_hold"},
         )
 
         img.save(cover, quality=92)
@@ -3242,6 +3332,8 @@ def _v56_segment_cache_key(seg: Dict[str, Any], params: Dict[str, Any]) -> str:
         "overlay_text": seg.get("overlay_text"),
         "title_style": seg.get("title_style"),
         "overlay_title_style": seg.get("overlay_title_style"),
+        "params_title_style": params.get("title_style") if seg.get("type") == "title" else None,
+        "params_end_title_style": params.get("end_title_style") if seg.get("type") == "end" else None,
         "transition_config": seg.get("transition_config"),
         "motion_config": seg.get("motion_config"),
         "rhythm_config": seg.get("rhythm_config"),

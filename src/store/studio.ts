@@ -12,6 +12,7 @@ import {
   V5MediaLibrary,
   V5RenderPlan,
   V5StoryBlueprint,
+  V5TitleStyle,
 } from "../lib/engine";
 
 export interface StudioState {
@@ -20,6 +21,8 @@ export interface StudioState {
   title: string;
   titleSubtitle: string;
   endText: string;
+  titleStyle: V5TitleStyle;
+  endStyle: V5TitleStyle;
   titleBackgroundPath: string | null;
   endBackgroundPath: string | null;
   chapterBackgroundMode: V5ChapterBackgroundMode;
@@ -62,6 +65,8 @@ export const useStudio = create<StudioState>((set) => ({
   title: "福建旅行混剪",
   titleSubtitle: "Travel Video",
   endText: "To be continued!",
+  titleStyle: { preset: "cinematic_bold", motion: "cinematic_reveal" },
+  endStyle: { preset: "film_subtitle", motion: "static_hold" },
   titleBackgroundPath: null,
   endBackgroundPath: null,
   chapterBackgroundMode: "auto_bridge",

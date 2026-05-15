@@ -41,6 +41,11 @@ export type V5TitlePreset =
   | "nature_documentary"
   | "romantic_soft"
   | "tech_future"
+  | "documentary_lower_third"
+  | "handwritten_note"
+  | "neon_night"
+  | "film_subtitle"
+  | "route_marker"
   | string;
 export type V5TitleMotion =
   | "fade_only"
@@ -49,6 +54,17 @@ export type V5TitleMotion =
   | "pop_bounce"
   | "quick_zoom_punch"
   | "slow_fade_zoom"
+  | "cinematic_reveal"
+  | "postcard_drift"
+  | "playful_bounce"
+  | "impact_slam"
+  | "editorial_fade"
+  | "lower_third_slide"
+  | "handwritten_draw"
+  | "neon_flicker"
+  | "film_burn"
+  | "route_trace"
+  | "static_hold"
   | string;
 
 export const V5_SCHEMA_VERSION = "5.5";
@@ -162,6 +178,8 @@ export interface V5StoryBlueprint {
     chunk_seconds?: number | null;
     audio?: V5AudioSettings | null;
     scenic_spot_title_mode?: V5SectionTitleMode;
+    title_style?: V5TitleStyle | null;
+    end_title_style?: V5TitleStyle | null;
     default_title_style?: V5TitleStyle | null;
   };
 }
@@ -394,10 +412,12 @@ export interface RenderV5Params {
   /** Optional custom background image for the opening title card.
    * If omitted, the renderer uses the first visual frame in render_plan. */
   title_background_path?: string | null;
+  title_style?: V5TitleStyle | null;
 
   /** Optional custom background image for the ending card.
    * If omitted, the renderer uses the last visual frame in render_plan. */
   end_background_path?: string | null;
+  end_title_style?: V5TitleStyle | null;
   chapter_background_mode?: V5ChapterBackgroundMode;
   audio?: V5AudioSettings | null;
 }

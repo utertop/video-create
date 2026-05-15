@@ -50,6 +50,7 @@ import {
   V5RenderSegment,
   V5Asset,
   V5AudioSettings,
+  V5TitleStyle,
   MusicFitStrategy,
   MusicPlaylistMode,
   V5ChapterBackgroundMode,
@@ -64,6 +65,7 @@ import { EditStrategyPreview } from "./components/EditStrategyPreview";
 import { FolderSelector, OutputFolderSelector } from "./components/FolderSelector";
 import { MaterialGallery, PreviewModal } from "./components/MaterialGallery";
 import { PerformanceModeControl, PerformanceRecommendation, performanceModeLabel } from "./components/PerformanceModeControl";
+import { normalizeTitleStyle, titleTemplateLabel, TitleStyleLab } from "./components/TitleStylePreview";
 import { StudioState, useStudio } from "./store/studio";
 import { BackgroundPickerTarget, VideoEvent } from "./types/studio";
 import { applyStructuredEvent, detectPhase, formatProgressLine, parseProgress, parseVideoEvent } from "./lib/progress";
@@ -110,6 +112,7 @@ export function App() {
   const [galleryView, setGalleryView] = useState<"chapter" | "type" | "time">("chapter");
   const [backgroundPickerTarget, setBackgroundPickerTarget] = useState<BackgroundPickerTarget | null>(null);
   const [isPreparingBackgroundLibrary, setIsPreparingBackgroundLibrary] = useState(false);
+  const [titleLabTarget, setTitleLabTarget] = useState<"title" | "end" | null>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
   const activeJobRef = useRef<string | null>(null);
   const [activeNav, setActiveNav] = useState("workspace");
@@ -219,7 +222,9 @@ export function App() {
     cover: state.cover,
     fps: 30,
     title_background_path: state.titleBackgroundPath,
+    title_style: normalizeTitleStyle(state.titleStyle),
     end_background_path: state.endBackgroundPath,
+    end_title_style: normalizeTitleStyle(state.endStyle),
     chapter_background_mode: state.chapterBackgroundMode,
     audio: buildAudioSettings(state, state.v5Library, state.v5RenderPlan),
   }), [
@@ -232,6 +237,8 @@ export function App() {
     state.performanceMode,
     state.editStrategy,
     state.cover,
+    state.titleStyle,
+    state.endStyle,
     state.titleBackgroundPath,
     state.endBackgroundPath,
     state.chapterBackgroundMode,
@@ -563,6 +570,8 @@ export function App() {
         render_mode: renderModeForPerformance(state.performanceMode, state.editStrategy),
         chunk_seconds: chunkSecondsForPerformance(state.performanceMode),
         chapter_background_mode: state.chapterBackgroundMode,
+        title_style: normalizeTitleStyle(state.titleStyle),
+        end_title_style: normalizeTitleStyle(state.endStyle),
         audio: buildAudioSettings(state, state.v5Library, state.v5RenderPlan),
         scenic_spot_title_mode: "overlay",
       });
@@ -670,6 +679,9 @@ export function App() {
                 视频片头标题（非封面）
                 <input value={state.title} onChange={(event) => state.patch({ title: event.target.value })} />
                 <div className="background-field-actions">
+                  <button type="button" className="background-pick-btn title-template" onClick={() => setTitleLabTarget("title")}>
+                    <Sparkles size={14} /> {titleTemplateLabel(state.titleStyle)}
+                  </button>
                   <button type="button" className="background-pick-btn" disabled={!state.inputFolder} onClick={() => ensureBackgroundLibrary({ kind: "title" })}>
                     <ImagePlus size={14} /> 选择片头背景
                   </button>
@@ -686,6 +698,9 @@ export function App() {
                 片尾文字
                 <input value={state.endText} onChange={(event) => state.patch({ endText: event.target.value })} />
                 <div className="background-field-actions">
+                  <button type="button" className="background-pick-btn title-template" onClick={() => setTitleLabTarget("end")}>
+                    <Sparkles size={14} /> {titleTemplateLabel(state.endStyle)}
+                  </button>
                   <button type="button" className="background-pick-btn" disabled={!state.inputFolder} onClick={() => ensureBackgroundLibrary({ kind: "end" })}>
                     <ImagePlus size={14} /> 选择片尾背景
                   </button>
@@ -980,6 +995,18 @@ export function App() {
       />
     )}
 
+    {titleLabTarget && (
+      <TitleStyleLab
+        currentSection={makeTitleLabSection(titleLabTarget, state)}
+        initialStyle={normalizeTitleStyle(titleLabTarget === "title" ? state.titleStyle : state.endStyle)}
+        onApplyCurrent={(style) => state.patch(titleLabTarget === "title" ? { titleStyle: normalizeTitleStyle(style) } : { endStyle: normalizeTitleStyle(style) })}
+        onApplySameType={(style) => state.patch(titleLabTarget === "title" ? { titleStyle: normalizeTitleStyle(style) } : { endStyle: normalizeTitleStyle(style) })}
+        onApplyAll={(style) => state.patch({ titleStyle: normalizeTitleStyle(style), endStyle: normalizeTitleStyle(style) })}
+        onSaveDefault={(style) => state.patch(titleLabTarget === "title" ? { titleStyle: normalizeTitleStyle(style) } : { endStyle: normalizeTitleStyle(style) })}
+        onClose={() => setTitleLabTarget(null)}
+      />
+    )}
+
     {selectedMaterial && (
       <PreviewModal material={selectedMaterial} onClose={() => setSelectedMaterial(null)} />
     )}
@@ -1033,6 +1060,20 @@ function getSelectedBackgroundPath(target: BackgroundPickerTarget, state: Studio
   if (target.kind === "end") return state.endBackgroundPath;
   const section = findSectionById(state.v5Blueprint?.sections, target.sectionId);
   return section?.background?.custom_path || null;
+}
+
+function makeTitleLabSection(target: "title" | "end", state: StudioState): V5StorySection {
+  return {
+    section_id: target === "title" ? "opening_title" : "ending_title",
+    section_type: target === "title" ? "opening" : "ending",
+    title: target === "title" ? state.title : state.endText,
+    subtitle: target === "title" ? state.titleSubtitle : null,
+    enabled: true,
+    source_node_id: null,
+    asset_refs: [],
+    children: [],
+    title_style: target === "title" ? state.titleStyle : state.endStyle,
+  };
 }
 
 function buildAudioSettings(state: StudioState, library: V5MediaLibrary | null, plan: V5RenderPlan | null): V5AudioSettings {

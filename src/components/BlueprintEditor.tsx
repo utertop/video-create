@@ -27,6 +27,7 @@ import {
   normalizeTitleStyle,
   TITLE_MOTIONS,
   TITLE_PRESETS,
+  titleTemplateLabel,
   TitleStyleLab,
   TitleStylePreviewDialog,
 } from "./TitleStylePreview";
@@ -214,6 +215,10 @@ function SectionCard({
           <Pencil size={12} className="edit-indicator" />
         </div>
         <div className="section-title-style-controls" aria-label="章节文字动效">
+          <button className="section-style-template-btn" type="button" onClick={() => onOpenLab(section)}>
+            <Sparkles size={14} />
+            <span>{titleTemplateLabel(titleStyle)}</span>
+          </button>
           <label>
             风格
             <select value={titleStyle.preset} onChange={(e) => updateTitleStyle({ preset: e.target.value })}>
