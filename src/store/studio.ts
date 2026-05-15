@@ -2,6 +2,7 @@ import { create } from "zustand";
 import {
   AspectRatio,
   EditStrategy,
+  MusicMode,
   PerformanceMode,
   Quality,
   RenderEngine,
@@ -30,6 +31,14 @@ export interface StudioState {
   editStrategy: EditStrategy;
   performanceMode: PerformanceMode;
   renderEngine: RenderEngine;
+  musicMode: MusicMode;
+  musicPath: string | null;
+  bgmVolume: number;
+  sourceAudioVolume: number;
+  keepSourceAudio: boolean;
+  autoDucking: boolean;
+  musicFadeInSeconds: number;
+  musicFadeOutSeconds: number;
   isDryRun: boolean;
 
   v5Stage: "INPUT" | "BLUEPRINT" | "RENDER";
@@ -61,6 +70,14 @@ export const useStudio = create<StudioState>((set) => ({
   editStrategy: "smart_director",
   performanceMode: "balanced",
   renderEngine: "auto",
+  musicMode: "off",
+  musicPath: null,
+  bgmVolume: 0.28,
+  sourceAudioVolume: 1.0,
+  keepSourceAudio: true,
+  autoDucking: true,
+  musicFadeInSeconds: 1.5,
+  musicFadeOutSeconds: 3.0,
   isDryRun: false,
 
   v5Stage: "INPUT",

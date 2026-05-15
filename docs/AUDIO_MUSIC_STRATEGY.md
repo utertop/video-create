@@ -409,3 +409,299 @@ BGM 音量       [ 28%  slider ]
 - 不会立刻碰长视频最复杂的 chunk 混音。
 - P1 做完后，低清预览就能提前听到 BGM 效果，创作者试错成本会明显下降。
 
+## 12. V2 专业音频能力规划
+
+V2 不是推翻 V1，而是在 V1 稳定后增加专业能力。V1 负责“稳定、可控、能用”，V2 负责“更聪明、更专业、更有创作灵感”。
+
+核心原则：
+
+- V2 必须兼容 V1 的 `audio` 配置。
+- V2 只能新增字段，不能改变 V1 字段含义。
+- V2 能力必须可以关闭，不能影响 V1 的稳定渲染。
+- V2 的高级分析结果要进入缓存，不能每次渲染重复分析。
+- 长视频仍然坚持 chunk 级音频处理，不允许回到整条 MoviePy 音频 timeline。
+
+### 12.1 V1 到 V2 的兼容关系
+
+V1 字段继续有效：
+
+```json
+{
+  "audio": {
+    "music_mode": "manual",
+    "music_path": "D:/music/travel.mp3",
+    "bgm_volume": 0.28,
+    "source_audio_volume": 1.0,
+    "keep_source_audio": true,
+    "auto_ducking": true,
+    "fade_in_seconds": 1.5,
+    "fade_out_seconds": 3.0
+  }
+}
+```
+
+V2 只增加可选扩展：
+
+```json
+{
+  "audio": {
+    "analysis": {
+      "enabled": true,
+      "beat_detection": true,
+      "voice_detection": true,
+      "loudness_normalization": true
+    },
+    "beat_sync": {
+      "enabled": false,
+      "strength": "soft",
+      "snap_transitions": true,
+      "snap_image_durations": false
+    },
+    "mixing": {
+      "target_lufs": -16,
+      "limiter": true,
+      "noise_reduction": false,
+      "eq_preset": "none"
+    },
+    "multi_music": {
+      "enabled": false,
+      "mode": "per_chapter",
+      "tracks": []
+    },
+    "rights": {
+      "show_copyright_warning": true,
+      "source": "user_local"
+    }
+  }
+}
+```
+
+如果没有这些 V2 字段，系统必须按 V1 逻辑正常工作。
+
+### 12.2 V2 能力清单
+
+#### A. 音频波形预览
+
+目标：
+
+- 在 UI 中显示 BGM 波形。
+- 在时间线上看到音量起伏。
+- 帮助创作者知道哪里适合转场、卡点、章节切换。
+
+实现建议：
+
+- Python/FFmpeg 生成轻量波形 JSON 或 PNG。
+- 前端只读取小体积波形数据。
+- 不通过 IPC 传音频二进制。
+
+缓存路径：
+
+```text
+.video_create_project/audio_cache/waveforms/
+```
+
+#### B. 节拍检测与卡点建议
+
+目标：
+
+- 检测 BGM 的 beat 点。
+- 给出“适合切换画面”的时间点。
+- 支持转场贴近节拍，但不强制改变创作者选择。
+
+第一阶段建议：
+
+- 只做 beat 标记和 UI 提示。
+- 不自动重排视频。
+
+第二阶段再考虑：
+
+- 图片段时长轻微吸附到节拍。
+- beat_cut 策略下转场靠近 beat。
+- 快节奏短视频自动生成卡点建议。
+
+风险：
+
+- 自动卡点会改变视频节奏，必须可关闭。
+- 长视频 beat 分析要缓存，不能每次重复跑。
+
+#### C. 更精准的人声 ducking
+
+V1 ducking 基于 segment 规则。
+
+V2 ducking 可以基于音频分析：
+
+- 使用 FFmpeg `volumedetect` 或 RMS 分析判断源音频强度。
+- 有人声/环境声时降低 BGM。
+- 无明显原声时恢复 BGM。
+- 音量变化必须平滑，避免抽吸感。
+
+推荐参数：
+
+```json
+{
+  "ducking": {
+    "mode": "smart",
+    "duck_volume": 0.14,
+    "attack_ms": 300,
+    "release_ms": 900
+  }
+}
+```
+
+#### D. LUFS 响度标准化
+
+目标：
+
+- 避免最终视频音量忽大忽小。
+- 更接近平台发布标准。
+
+推荐：
+
+- 短视频：目标 `-14 LUFS` 到 `-16 LUFS`。
+- 长视频/纪录类：目标 `-16 LUFS` 到 `-18 LUFS`。
+- 峰值限制：`-1 dBTP`。
+
+实现方式：
+
+- FFmpeg `loudnorm` 两遍分析更准，但更慢。
+- 第一版可做单遍 `loudnorm` 或输出前 limiter。
+- 稳定优先模式下默认不开重分析，只做安全 limiter。
+
+#### E. 多首 BGM 按章节切换
+
+目标：
+
+- 旅行视频、长 vlog、纪录片可以每个章节不同情绪。
+- 避免 30 分钟视频一首歌循环太单调。
+
+模式：
+
+- `single_track`: 全片一首。
+- `per_chapter`: 每章一首或每章重启。
+- `mood_sections`: 按情绪段落切换。
+
+规则：
+
+- 每次切歌必须淡入淡出。
+- 章节切换点可以结合转场。
+- 不允许突然硬切音乐。
+
+#### F. 音乐情绪与素材情绪匹配
+
+目标：
+
+- 根据视频内容给出 BGM 风格建议。
+
+可用信息：
+
+- 剪辑策略：`travel_soft / beat_cut / documentary / long_stable`
+- 章节标题关键词。
+- 素材类型：城市、自然、生活、夜景、运动。
+- 视频长度和节奏。
+
+输出：
+
+```json
+{
+  "music_recommendation": {
+    "profile": "travel_light",
+    "tempo": "medium",
+    "energy": "warm",
+    "reason": "旅行/风景素材较多，建议轻快但不抢画面的音乐。"
+  }
+}
+```
+
+#### G. 版权与来源提示
+
+目标：
+
+- 不内置未知版权音乐。
+- 提醒用户本地音乐可能有版权风险。
+- 后续可接入免版权音乐库，但不作为 V1/V2 初期依赖。
+
+UI 提示：
+
+```text
+请确认您拥有该音乐的使用权，或该音乐允许用于公开视频发布。
+```
+
+### 12.3 V2 分阶段路线
+
+#### V2-P1：波形与音频分析缓存
+
+先做：
+
+- BGM 波形生成。
+- 音频基础分析 JSON。
+- duration / peak / RMS / simple loudness。
+- UI 显示波形预览。
+
+不做：
+
+- 自动改视频时长。
+- 多首音乐切换。
+
+#### V2-P2：智能 ducking 与响度安全
+
+先做：
+
+- 基于 RMS 的源音频检测。
+- 更平滑的 BGM ducking。
+- limiter。
+- 可选 LUFS 标准化。
+
+不做：
+
+- AI 人声分离。
+- 复杂降噪。
+
+#### V2-P3：节拍点与卡点建议
+
+先做：
+
+- beat 点检测。
+- UI 标记节拍。
+- 给出“建议切换点”。
+
+再做：
+
+- beat_cut 策略下轻微吸附转场。
+- 图片段自动微调时长。
+
+#### V2-P4：多 BGM 与章节音乐
+
+先做：
+
+- 每章可选不同 BGM。
+- 自动淡入淡出。
+- 章节级音乐预览。
+
+再做：
+
+- 情绪段落自动推荐音乐。
+
+### 12.4 暂时不做的能力
+
+为了保护 V1 稳定性，以下能力不进入 V1，也不建议 V2 初期做：
+
+- AI 生成音乐。
+- 在线音乐商店或在线版权库。
+- 专业 DAW 级多轨编辑。
+- 实时音频插件链。
+- 人声分离、伴奏分离。
+- 自动降噪、混响、母带处理一整套。
+
+这些能力复杂度很高，容易把项目从“视频自动编排工具”拖成“专业音频工作站”。后续如果确实需要，可以独立成 Audio Lab。
+
+### 12.5 V2 成熟度标准
+
+V2 是否值得启动，应看 V1 是否达到这些条件：
+
+- P1/P2/P3 全部完成。
+- 手动 BGM、自动 BGM、长视频 BGM 都稳定。
+- 低清预览能准确听到最终音频效果。
+- 30 分钟以上视频不会因为 BGM 混音导致内存疯涨。
+- 用户已经开始需要“卡点、波形、响度、章节音乐”等专业能力。
+
+满足这些条件后，再进入 V2，才不会过早复杂化。

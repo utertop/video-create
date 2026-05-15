@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -80,16 +81,24 @@ if not hasattr(Image, "ANTIALIAS"):
 
 try:
     from moviepy.editor import (
+        AudioFileClip,
         ColorClip,
+        CompositeAudioClip,
         CompositeVideoClip,
         ImageClip,
         VideoFileClip,
+        concatenate_audioclips,
         concatenate_videoclips,
     )
+    try:
+        from moviepy.audio.fx.all import audio_loop as moviepy_audio_loop
+    except Exception:
+        moviepy_audio_loop = None
 
     HAS_MOVIEPY = True
 except Exception:
     HAS_MOVIEPY = False
+    moviepy_audio_loop = None
 
 
 # =========================
@@ -1173,6 +1182,7 @@ class Compiler:
                 "performance_mode": self.performance_mode,
                 "render_mode": self.blueprint_metadata.get("render_mode", "auto"),
                 "chunk_seconds": self.blueprint_metadata.get("chunk_seconds"),
+                "audio": self.blueprint_metadata.get("audio"),
             },
             "cache_policy": {
                 "enabled": True,
@@ -1750,6 +1760,7 @@ class Renderer:
         self.renderer = TitleStyleRenderer(self.target_size)
         self.gpu_accel = params.get("gpu_accel", "none") # none, nvenc, qsv
         self.prefer_ffmpeg_segments = self._should_prefer_ffmpeg_segments(settings)
+        self.audio_settings = self._resolve_audio_settings(settings)
 
     def _init_render_cache_dir(self) -> Path:
         configured = self.params.get("cache_root") or self.params.get("render_cache_root")
@@ -1769,6 +1780,42 @@ class Renderer:
         edit_strategy = str(self.params.get("edit_strategy") or settings.get("edit_strategy") or "").lower()
         engine = str(self.params.get("engine") or settings.get("engine") or "").lower()
         return performance_mode == "stable" or edit_strategy in {"fast_assembly", "long_stable"} or engine == "ffmpeg_concat"
+
+    def _resolve_audio_settings(self, settings: Dict[str, Any]) -> Dict[str, Any]:
+        audio = self.params.get("audio")
+        if not isinstance(audio, dict):
+            audio = settings.get("audio")
+        if not isinstance(audio, dict):
+            audio = {}
+
+        def num(name: str, default: float, minimum: float, maximum: float) -> float:
+            try:
+                value = float(audio.get(name, default))
+            except Exception:
+                value = default
+            if not math.isfinite(value):
+                value = default
+            return max(minimum, min(maximum, value))
+
+        music_mode = str(audio.get("music_mode") or "off").lower()
+        if music_mode not in {"off", "auto", "manual"}:
+            music_mode = "off"
+
+        return {
+            "music_mode": music_mode,
+            "music_path": audio.get("music_path"),
+            "music_source": audio.get("music_source") or ("manual" if music_mode == "manual" else "none"),
+            "bgm_volume": num("bgm_volume", 0.28, 0.0, 1.0),
+            "source_audio_volume": num("source_audio_volume", 1.0, 0.0, 1.0),
+            "keep_source_audio": bool(audio.get("keep_source_audio", True)),
+            "auto_ducking": bool(audio.get("auto_ducking", True)),
+            "fade_in_seconds": num("fade_in_seconds", 1.5, 0.0, 10.0),
+            "fade_out_seconds": num("fade_out_seconds", 3.0, 0.0, 20.0),
+            "duck_bgm_volume": num("duck_bgm_volume", 0.16, 0.0, 1.0),
+        }
+
+    def _segment_keep_audio(self, seg: Dict[str, Any]) -> bool:
+        return bool(self.audio_settings.get("keep_source_audio", True)) and bool(seg.get("keep_audio", True))
 
     def render(self) -> None:
         if not HAS_MOVIEPY:
@@ -1807,6 +1854,8 @@ class Renderer:
             if self.params.get("watermark"):
                 emit_event("phase", phase="render", message="正在添加水印", percent=92)
                 final = self._add_watermark(final, str(self.params.get("watermark")))
+
+            final = self._apply_audio_mix(final)
 
             emit_event("phase", phase="render", message="正在导出最终视频", percent=92)
 
@@ -1881,7 +1930,7 @@ class Renderer:
             clip = self._video_clip(
                 Path(seg["source_path"]),
                 duration,
-                keep_audio=bool(seg.get("keep_audio", True)),
+                keep_audio=self._segment_keep_audio(seg),
                 motion_config=seg.get("motion_config"),
                 prefer_ffmpeg=self._can_use_ffmpeg_fitted_video(seg),
             )
@@ -1916,6 +1965,84 @@ class Renderer:
         if len(timeline) == 1:
             return timeline[0]
         return CompositeVideoClip(timeline, size=self.target_size).set_duration(max_end)
+
+    def _apply_audio_mix(self, video: Any):
+        settings = self.audio_settings
+        duration = max(0.0, float(getattr(video, "duration", None) or self.plan.get("total_duration") or 0.0))
+        if duration <= 0:
+            return video
+
+        source_audio = getattr(video, "audio", None) if settings.get("keep_source_audio", True) else None
+        if source_audio is not None:
+            source_volume = float(settings.get("source_audio_volume", 1.0))
+            if source_volume <= 0:
+                source_audio = None
+
+        music_mode = str(settings.get("music_mode") or "off")
+        music_path = settings.get("music_path")
+        if music_mode != "manual" or not music_path:
+            if source_audio is not getattr(video, "audio", None):
+                return video.set_audio(source_audio)
+            return video
+
+        path = Path(str(music_path))
+        if not path.exists():
+            emit_event("log", message=f"BGM 文件不存在，已跳过背景音乐: {path}")
+            return video.set_audio(source_audio) if source_audio is not getattr(video, "audio", None) else video
+
+        bgm = None
+        try:
+            emit_event("phase", phase="audio", message="正在混合背景音乐与视频原声", percent=92)
+            bgm = AudioFileClip(str(path))
+            bgm = self._loop_audio_to_duration(bgm, duration).set_duration(duration)
+
+            bgm_volume = float(settings.get("bgm_volume", 0.28))
+            if settings.get("auto_ducking", True) and source_audio is not None:
+                bgm_volume = min(bgm_volume, float(settings.get("duck_bgm_volume", 0.16)))
+
+            if bgm_volume <= 0:
+                close_clip(bgm)
+                return video.set_audio(source_audio)
+
+            bgm = bgm.volumex(bgm_volume)
+            fade_in = min(float(settings.get("fade_in_seconds", 0.0)), duration / 2.0)
+            fade_out = min(float(settings.get("fade_out_seconds", 0.0)), duration / 2.0)
+            if fade_in > 0:
+                bgm = bgm.audio_fadein(fade_in)
+            if fade_out > 0:
+                bgm = bgm.audio_fadeout(fade_out)
+
+            if source_audio is not None:
+                return video.set_audio(CompositeAudioClip([source_audio, bgm.set_start(0)]).set_duration(duration))
+            return video.set_audio(bgm)
+        except Exception as exc:
+            if bgm is not None:
+                close_clip(bgm)
+            emit_event("log", message=f"BGM 混音失败，已保留视频原声继续渲染: {exc}")
+            return video.set_audio(source_audio) if source_audio is not None else video
+
+    def _loop_audio_to_duration(self, audio: Any, duration: float):
+        source_duration = float(getattr(audio, "duration", None) or 0.0)
+        if source_duration <= 0:
+            return audio.set_duration(duration)
+        if source_duration >= duration:
+            return audio.subclip(0, duration)
+
+        if moviepy_audio_loop is not None:
+            try:
+                return moviepy_audio_loop(audio, duration=duration)
+            except Exception:
+                pass
+
+        clips = []
+        remaining = duration
+        while remaining > 0:
+            take = min(source_duration, remaining)
+            clips.append(audio.subclip(0, take))
+            remaining -= take
+        if len(clips) == 1:
+            return clips[0].set_duration(duration)
+        return concatenate_audioclips(clips).set_duration(duration)
 
     def _effective_transition_duration(
         self,
@@ -2220,7 +2347,12 @@ class Renderer:
             motion_config=motion_config,
         )
         if keep_audio and raw.audio is not None:
-            final = final.set_audio(raw.audio)
+            source_volume = float(self.audio_settings.get("source_audio_volume", 1.0))
+            if source_volume > 0:
+                source_audio = raw.audio
+                if abs(source_volume - 1.0) > 0.001:
+                    source_audio = source_audio.volumex(source_volume)
+                final = final.set_audio(source_audio)
         return final
 
     def _normalize_video_display_geometry(self, source: Path) -> Path:
@@ -2312,6 +2444,7 @@ class Renderer:
         segment_duration = max(float(duration or 0.1), 0.1)
         use_source_audio = bool(keep_audio and video_has_audio_stream(render_source))
         needs_audio_track = bool(keep_audio or force_audio_track)
+        source_volume = float(self.audio_settings.get("source_audio_volume", 1.0))
         tw, th = self.target_size
         vf = (
             f"scale={tw}:{th}:force_original_aspect_ratio=decrease,"
@@ -2339,9 +2472,13 @@ class Renderer:
                 cmd += ["-t", str(segment_duration), "-vf", vf, "-map", "0:v:0"]
                 if needs_audio_track:
                     cmd += ["-map", "0:a:0" if use_source_audio else "1:a:0"]
+                    audio_filters = []
+                    if use_source_audio and abs(source_volume - 1.0) > 0.001:
+                        audio_filters.append(f"volume={source_volume:.4f}")
+                    audio_filters.extend(["aresample=48000", "apad"])
                     cmd += [
                         "-af",
-                        "aresample=48000,apad",
+                        ",".join(audio_filters),
                         "-ac",
                         "2",
                         "-ar",
@@ -2562,6 +2699,7 @@ def _v56_segment_cache_key(seg: Dict[str, Any], params: Dict[str, Any]) -> str:
         "motion_config": seg.get("motion_config"),
         "rhythm_config": seg.get("rhythm_config"),
         "keep_audio": seg.get("keep_audio"),
+        "audio": params.get("audio"),
         "aspect_ratio": params.get("aspect_ratio"),
         "fps": params.get("fps"),
         "quality": params.get("quality"),
@@ -2710,6 +2848,101 @@ def _v56_concat_chunks_moviepy(chunks: List[Path], tmp_output: Path, fps: int, p
             close_clip(clip)
 
 
+def _v56_apply_final_bgm_mix(
+    input_video: Path,
+    output_video: Path,
+    audio_settings: Dict[str, Any],
+    duration: Optional[float],
+) -> bool:
+    music_mode = str(audio_settings.get("music_mode") or "off")
+    music_path = audio_settings.get("music_path")
+    if music_mode != "manual" or not music_path:
+        return False
+
+    bgm_path = Path(str(music_path))
+    if not bgm_path.exists():
+        emit_event("log", message=f"BGM 文件不存在，稳定模式已跳过背景音乐: {bgm_path}")
+        return False
+
+    video_duration = max(0.1, float(duration or 0.0))
+    bgm_volume = float(audio_settings.get("bgm_volume", 0.28))
+    if bgm_volume <= 0:
+        return False
+
+    keep_source = bool(audio_settings.get("keep_source_audio", True))
+    source_has_audio = keep_source and video_has_audio_stream(input_video)
+    if bool(audio_settings.get("auto_ducking", True)) and source_has_audio:
+        bgm_volume = min(bgm_volume, float(audio_settings.get("duck_bgm_volume", 0.16)))
+
+    fade_in = min(float(audio_settings.get("fade_in_seconds", 0.0)), video_duration / 2.0)
+    fade_out = min(float(audio_settings.get("fade_out_seconds", 0.0)), video_duration / 2.0)
+
+    bgm_filters = [f"volume={bgm_volume:.4f}"]
+    if fade_in > 0:
+        bgm_filters.append(f"afade=t=in:st=0:d={fade_in:.3f}")
+    if fade_out > 0:
+        fade_start = max(0.0, video_duration - fade_out)
+        bgm_filters.append(f"afade=t=out:st={fade_start:.3f}:d={fade_out:.3f}")
+    bgm_filters.extend([
+        "aresample=48000",
+        f"atrim=0:{video_duration:.3f}",
+        "asetpts=N/SR/TB",
+    ])
+
+    if source_has_audio:
+        filter_complex = (
+            f"[1:a]{','.join(bgm_filters)}[bgm];"
+            "[0:a:0]aresample=48000[src];"
+            "[src][bgm]amix=inputs=2:duration=first:dropout_transition=0[mix]"
+        )
+    else:
+        filter_complex = f"[1:a]{','.join(bgm_filters)}[mix]"
+
+    try:
+        import imageio_ffmpeg
+
+        cmd = [
+            imageio_ffmpeg.get_ffmpeg_exe(),
+            "-y",
+            "-i",
+            str(input_video),
+            "-stream_loop",
+            "-1",
+            "-i",
+            str(bgm_path),
+            "-filter_complex",
+            filter_complex,
+            "-map",
+            "0:v:0",
+            "-map",
+            "[mix]",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "160k",
+            "-shortest",
+            "-movflags",
+            "+faststart",
+            str(output_video),
+        ]
+        emit_event("phase", phase="audio", message="稳定模式：使用 FFmpeg 流式混合背景音乐", percent=97)
+        completed = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if completed.returncode == 0 and output_video.exists() and output_video.stat().st_size > 1024:
+            return True
+        emit_event("log", message=f"稳定模式 BGM 混音失败，保留无 BGM 结果: {completed.stderr[-800:]}")
+    except Exception as exc:
+        emit_event("log", message=f"稳定模式 BGM 混音异常，保留无 BGM 结果: {exc}")
+
+    try:
+        if output_video.exists():
+            output_video.unlink()
+    except Exception:
+        pass
+    return False
+
+
 def _v56_try_write_ffmpeg_direct_chunk(
     renderer: Any,
     chunk: Dict[str, Any],
@@ -2730,7 +2963,10 @@ def _v56_try_write_ffmpeg_direct_chunk(
             return False
         sources.append(source)
 
-    keep_audio_flags = [bool(seg.get("keep_audio", True)) for seg in segments]
+    if hasattr(renderer, "_segment_keep_audio"):
+        keep_audio_flags = [bool(renderer._segment_keep_audio(seg)) for seg in segments]
+    else:
+        keep_audio_flags = [bool(seg.get("keep_audio", True)) for seg in segments]
     needs_audio_track = any(keep_audio_flags)
     fitted_segments: List[Path] = []
     for seg, source, keep_audio in zip(segments, sources, keep_audio_flags):
@@ -2998,6 +3234,17 @@ class V56StableRenderer:
         ok, reason, final_duration = _v56_validate_video(tmp_output)
         if not ok:
             raise RuntimeError(f"最终视频校验失败，不覆盖旧文件: {reason}")
+
+        mixed_output = tmp_output.with_suffix(".audio.tmp.mp4")
+        if _v56_apply_final_bgm_mix(tmp_output, mixed_output, renderer.audio_settings, final_duration):
+            try:
+                tmp_output.unlink()
+            except Exception:
+                pass
+            os.replace(str(mixed_output), str(tmp_output))
+            ok, reason, final_duration = _v56_validate_video(tmp_output)
+            if not ok:
+                raise RuntimeError(f"最终视频音频混合后校验失败，不覆盖旧文件: {reason}")
 
         _v56_atomic_replace(tmp_output, final_output)
 

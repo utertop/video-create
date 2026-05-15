@@ -5,6 +5,7 @@ export type Quality = "draft" | "standard" | "high";
 export type PythonQuality = "normal" | "high" | "ultra";
 export type RenderEngine = "auto" | "ffmpeg_concat" | "moviepy_crossfade";
 export type PerformanceMode = "stable" | "balanced" | "quality";
+export type MusicMode = "off" | "auto" | "manual";
 export type EditStrategy =
   | "smart_director"
   | "fast_assembly"
@@ -151,6 +152,7 @@ export interface V5StoryBlueprint {
     render_mode?: string | null;
     /** Chunk size in seconds for V5.6 long-video stable renderer. */
     chunk_seconds?: number | null;
+    audio?: V5AudioSettings | null;
     scenic_spot_title_mode?: V5SectionTitleMode;
     default_title_style?: V5TitleStyle | null;
   };
@@ -292,7 +294,22 @@ export interface V5RenderSettings {
   performance_mode?: PerformanceMode | string | null;
   render_mode?: string | null;
   chunk_seconds?: number | null;
+  audio?: V5AudioSettings | null;
   cover?: boolean;
+}
+
+export interface V5AudioSettings {
+  music_mode: MusicMode;
+  music_path?: string | null;
+  music_source?: "none" | "library" | "manual" | string;
+  bgm_volume: number;
+  source_audio_volume: number;
+  keep_source_audio: boolean;
+  auto_ducking: boolean;
+  fade_in_seconds: number;
+  fade_out_seconds: number;
+  normalize_audio?: boolean;
+  target_lufs?: number;
 }
 
 export interface V5CachePolicy {
@@ -369,6 +386,7 @@ export interface RenderV5Params {
    * If omitted, the renderer uses the last visual frame in render_plan. */
   end_background_path?: string | null;
   chapter_background_mode?: V5ChapterBackgroundMode;
+  audio?: V5AudioSettings | null;
 }
 
 // =========================

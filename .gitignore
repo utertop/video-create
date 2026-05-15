@@ -11,6 +11,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache/
+tests/tmp_vcs_*/
 
 # Local render/cache output
 .cache_bilibili_video/

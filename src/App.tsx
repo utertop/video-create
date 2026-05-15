@@ -20,11 +20,14 @@ import {
   Layers,
   LayoutGrid,
   MapPin,
+  Music,
   Palmtree,
+  Volume2,
 } from "lucide-react";
 import { useMemo, useState, useEffect, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 import {
   AspectRatio,
   EditStrategy,
@@ -46,6 +49,7 @@ import {
   V5RenderPlan,
   V5RenderSegment,
   V5Asset,
+  V5AudioSettings,
   V5ChapterBackgroundMode,
   RenderV5Params,
   buildV5RenderCommandPreview
@@ -215,7 +219,29 @@ export function App() {
     title_background_path: state.titleBackgroundPath,
     end_background_path: state.endBackgroundPath,
     chapter_background_mode: state.chapterBackgroundMode,
-  }), [state.title, state.titleSubtitle, state.watermark, state.aspectRatio, state.quality, state.renderEngine, state.performanceMode, state.editStrategy, state.cover, state.titleBackgroundPath, state.endBackgroundPath, state.chapterBackgroundMode]);
+    audio: buildAudioSettings(state),
+  }), [
+    state.title,
+    state.titleSubtitle,
+    state.watermark,
+    state.aspectRatio,
+    state.quality,
+    state.renderEngine,
+    state.performanceMode,
+    state.editStrategy,
+    state.cover,
+    state.titleBackgroundPath,
+    state.endBackgroundPath,
+    state.chapterBackgroundMode,
+    state.musicMode,
+    state.musicPath,
+    state.bgmVolume,
+    state.sourceAudioVolume,
+    state.keepSourceAudio,
+    state.autoDucking,
+    state.musicFadeInSeconds,
+    state.musicFadeOutSeconds,
+  ]);
 
   const v5CommandPreview = useMemo(() => buildV5RenderCommandPreview({
     planPath: v5PlanPath || "<render_plan.json>",
@@ -303,6 +329,25 @@ export function App() {
       setToast(`章节「${target.sectionTitle}」背景已恢复默认。`);
     }
     setBackgroundPickerTarget(null);
+  }
+
+  async function onPickMusicFile() {
+    try {
+      const selected = await open({
+        multiple: false,
+        directory: false,
+        filters: [
+          { name: "Audio", extensions: ["mp3", "wav", "m4a", "aac", "flac", "ogg"] },
+        ],
+      });
+      const path = Array.isArray(selected) ? selected[0] : selected;
+      if (typeof path === "string" && path) {
+        state.patch({ musicMode: "manual", musicPath: path });
+        setToast(`已选择背景音乐：${shortPathName(path)}`);
+      }
+    } catch (error) {
+      setToast(`选择音乐失败：${error}`);
+    }
   }
 
   async function onGenerate(dryRun: boolean = false) {
@@ -481,6 +526,7 @@ export function App() {
         render_mode: renderModeForPerformance(state.performanceMode, state.editStrategy),
         chunk_seconds: chunkSecondsForPerformance(state.performanceMode),
         chapter_background_mode: state.chapterBackgroundMode,
+        audio: buildAudioSettings(state),
         scenic_spot_title_mode: "overlay",
       });
       await saveBlueprintV5(bpPath, JSON.stringify(blueprintForCompile, null, 2));
@@ -648,6 +694,7 @@ export function App() {
                 recommendation={performanceRecommendation}
                 onChange={(performanceMode) => state.patch({ performanceMode })}
               />
+              <MusicAudioPanel state={state} onPickMusicFile={onPickMusicFile} />
             </div>
 
             <div className="option-row">
@@ -947,6 +994,145 @@ function getSelectedBackgroundPath(target: BackgroundPickerTarget, state: Studio
   if (target.kind === "end") return state.endBackgroundPath;
   const section = findSectionById(state.v5Blueprint?.sections, target.sectionId);
   return section?.background?.custom_path || null;
+}
+
+function buildAudioSettings(state: StudioState): V5AudioSettings {
+  return {
+    music_mode: state.musicMode,
+    music_path: state.musicMode === "manual" ? state.musicPath : null,
+    music_source: state.musicMode === "manual" && state.musicPath ? "manual" : state.musicMode === "auto" ? "library" : "none",
+    bgm_volume: clampNumber(state.bgmVolume, 0, 1, 0.28),
+    source_audio_volume: clampNumber(state.sourceAudioVolume, 0, 1, 1),
+    keep_source_audio: Boolean(state.keepSourceAudio),
+    auto_ducking: Boolean(state.autoDucking),
+    fade_in_seconds: clampNumber(state.musicFadeInSeconds, 0, 10, 1.5),
+    fade_out_seconds: clampNumber(state.musicFadeOutSeconds, 0, 20, 3),
+    normalize_audio: false,
+  };
+}
+
+function MusicAudioPanel({ state, onPickMusicFile }: { state: StudioState; onPickMusicFile: () => void }) {
+  const musicEnabled = state.musicMode === "manual" && Boolean(state.musicPath);
+  const bgmPercent = Math.round(clampNumber(state.bgmVolume, 0, 1, 0.28) * 100);
+  const sourcePercent = Math.round(clampNumber(state.sourceAudioVolume, 0, 1, 1) * 100);
+
+  return (
+    <div className={`music-audio-card${musicEnabled ? " has-music" : ""}`}>
+      <div className="music-audio-head">
+        <div className="music-audio-title">
+          <Music size={18} />
+          <div>
+            <strong>音乐与原声</strong>
+            <span>BGM、视频原声、淡入淡出先在这里统一控制。</span>
+          </div>
+        </div>
+        <span className="music-status-badge">{musicEnabled ? "已启用 BGM" : "未添加 BGM"}</span>
+      </div>
+
+      <div className="music-mode-buttons">
+        <button
+          className={state.musicMode === "off" ? "active" : ""}
+          type="button"
+          onClick={() => state.patch({ musicMode: "off", musicPath: null })}
+        >
+          无音乐
+        </button>
+        <button
+          className={state.musicMode === "manual" ? "active" : ""}
+          type="button"
+          onClick={onPickMusicFile}
+        >
+          手动选择
+        </button>
+        <button type="button" disabled title="P2 会接入素材目录自动识别音乐">
+          自动选择 P2
+        </button>
+      </div>
+
+      <div className="music-file-row">
+        <Volume2 size={16} />
+        <span title={state.musicPath || ""}>{state.musicPath ? shortPathName(state.musicPath) : "选择一首本地音乐后，低清小样和最终视频会听到同一套混音策略。"}</span>
+        {state.musicPath && (
+          <button type="button" onClick={() => state.patch({ musicMode: "off", musicPath: null })}>
+            移除
+          </button>
+        )}
+      </div>
+
+      <div className="music-slider-grid">
+        <label>
+          <span>BGM 音量 <strong>{bgmPercent}%</strong></span>
+          <input
+            disabled={!musicEnabled}
+            max={100}
+            min={0}
+            type="range"
+            value={bgmPercent}
+            onChange={(event) => state.patch({ bgmVolume: Number(event.target.value) / 100 })}
+          />
+        </label>
+        <label>
+          <span>视频原声 <strong>{sourcePercent}%</strong></span>
+          <input
+            max={100}
+            min={0}
+            type="range"
+            value={sourcePercent}
+            onChange={(event) => state.patch({ sourceAudioVolume: Number(event.target.value) / 100 })}
+          />
+        </label>
+      </div>
+
+      <div className="music-mix-options">
+        <Toggle
+          checked={state.keepSourceAudio}
+          label="保留视频原声"
+          onChange={(keepSourceAudio) => state.patch({ keepSourceAudio })}
+        />
+        <Toggle
+          checked={state.autoDucking}
+          label="有原声时自动压低 BGM"
+          onChange={(autoDucking) => state.patch({ autoDucking })}
+        />
+      </div>
+
+      <div className="music-fade-grid">
+        <label>
+          淡入秒数
+          <input
+            disabled={!musicEnabled}
+            max={10}
+            min={0}
+            step={0.5}
+            type="number"
+            value={state.musicFadeInSeconds}
+            onChange={(event) => state.patch({ musicFadeInSeconds: Number(event.target.value) })}
+          />
+        </label>
+        <label>
+          淡出秒数
+          <input
+            disabled={!musicEnabled}
+            max={20}
+            min={0}
+            step={0.5}
+            type="number"
+            value={state.musicFadeOutSeconds}
+            onChange={(event) => state.patch({ musicFadeOutSeconds: Number(event.target.value) })}
+          />
+        </label>
+      </div>
+
+      <p className="music-audio-note">
+        V1 先覆盖手动 BGM、音量和基础 ducking；超长视频的 chunk 级 FFmpeg 混音会在后续 P3 做，避免影响当前稳定渲染。
+      </p>
+    </div>
+  );
+}
+
+function clampNumber(value: number, min: number, max: number, fallback: number): number {
+  if (!Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, value));
 }
 
 function editStrategyHint(strategy: EditStrategy): string {
