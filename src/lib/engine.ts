@@ -4,6 +4,8 @@ export type AspectRatio = "16:9" | "9:16";
 export type Quality = "draft" | "standard" | "high";
 export type PythonQuality = "normal" | "high" | "ultra";
 export type RenderEngine = "auto" | "ffmpeg_concat" | "moviepy_crossfade";
+// Performance mode may simplify execution paths for stability, but it should
+// not silently remove audible BGM, source audio, or overall emotional intent.
 export type PerformanceMode = "stable" | "balanced" | "quality";
 export type MusicMode = "off" | "auto" | "manual";
 export type EditStrategy =
@@ -20,7 +22,7 @@ export type EditStrategy =
 
 export type V5DocumentType = "media_library" | "story_blueprint" | "render_plan";
 export type V5DirectoryType = "city" | "date" | "scenic_spot" | "chapter" | "unknown";
-export type V5AssetType = "image" | "video";
+export type V5AssetType = "image" | "video" | "audio";
 export type V5Orientation = "landscape" | "portrait" | "square";
 export type V5StorySectionType = "city" | "date" | "scenic_spot" | "chapter" | "opening" | "ending" | string;
 export type V5AssetRole = "opening" | "normal" | "highlight";
@@ -67,6 +69,7 @@ export interface V5MediaLibrary {
     total_assets: number;
     image_count: number;
     video_count: number;
+    audio_count?: number;
     skipped_count?: number;
     error_count?: number;
   };
@@ -118,6 +121,9 @@ export interface V5Asset {
     shooting_date: string | null;
     duration?: number | null;
     duration_seconds?: number | null;
+    sample_rate?: number | null;
+    channels?: number | null;
+    audio_codec?: string | null;
   };
   classification: {
     directory_node_id: string;
@@ -299,6 +305,7 @@ export interface V5RenderSettings {
 }
 
 export interface V5AudioSettings {
+  /** Mix strategy can switch execution paths, but should preserve the intended music/original-audio presence. */
   music_mode: MusicMode;
   music_path?: string | null;
   music_source?: "none" | "library" | "manual" | string;

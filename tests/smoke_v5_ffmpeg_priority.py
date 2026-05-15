@@ -206,10 +206,87 @@ def test_ffmpeg_direct_chunk_unifies_source_and_silent_audio() -> None:
     assert ok, reason
     assert duration and duration > 0.9
     assert engine.video_has_audio_stream(chunk_path), "expected unified AAC audio track in direct FFmpeg chunk"
+    prepared_audio = renderer._prepare_source_audio_path(source_with_audio)
+    assert prepared_audio is not None
+    assert prepared_audio.exists()
+    assert prepared_audio.parent == root / ".video_create_project" / "audio_cache" / "normalized"
+    prepared_mtime = prepared_audio.stat().st_mtime_ns
+    prepared_again = renderer._prepare_source_audio_path(source_with_audio)
+    assert prepared_again == prepared_audio
+    assert prepared_again.stat().st_mtime_ns == prepared_mtime
+
+
+def test_ffmpeg_concat_keeps_audio_chunks_out_of_moviepy() -> None:
+    root = Path("tests/tmp_vcs_ffmpeg_concat_audio")
+    if root.exists():
+        shutil.rmtree(root)
+    root.mkdir(parents=True)
+
+    source_with_audio = root / "source_audio.mp4"
+    source_silent = root / "source_silent.mp4"
+    chunk_a = root / "chunk_a.mp4"
+    chunk_b = root / "chunk_b.mp4"
+    merged = root / "merged.mp4"
+    make_video_with_audio(source_with_audio)
+    make_video(source_silent)
+
+    segments = [
+        {
+            "segment_id": "seg_audio_a",
+            "type": "video",
+            "source_path": str(source_with_audio),
+            "duration": 0.8,
+            "text": None,
+            "subtitle": None,
+            "start_time": 0.0,
+            "end_time": 0.8,
+            "transition": "cut",
+            "transition_config": {"type": "cut", "duration": 0},
+            "motion_config": {"type": "none"},
+            "rhythm_config": {"pace": "fast_review", "role": "footage"},
+            "keep_audio": True,
+        },
+        {
+            "segment_id": "seg_audio_b",
+            "type": "video",
+            "source_path": str(source_silent),
+            "duration": 0.8,
+            "text": None,
+            "subtitle": None,
+            "start_time": 0.8,
+            "end_time": 1.6,
+            "transition": "cut",
+            "transition_config": {"type": "cut", "duration": 0},
+            "motion_config": {"type": "none"},
+            "rhythm_config": {"pace": "fast_review", "role": "footage"},
+            "keep_audio": True,
+        },
+    ]
+    plan = {
+        "render_settings": {
+            "fps": 12,
+            "aspect_ratio": "16:9",
+            "edit_strategy": "fast_assembly",
+            "performance_mode": "stable",
+        },
+        "segments": segments,
+    }
+    params = {"fps": 12, "quality": "draft", "edit_strategy": "fast_assembly", "performance_mode": "stable"}
+    renderer = engine.Renderer(plan, str(root / "output.mp4"), params)
+
+    engine._v56_write_chunk_video(renderer, {"index": 0, "segments": segments}, chunk_a, 12, params)
+    engine._v56_write_chunk_video(renderer, {"index": 1, "segments": segments}, chunk_b, 12, params)
+    concat_ok = engine._v56_concat_chunks_ffmpeg([chunk_a, chunk_b], merged, root)
+    assert concat_ok, "expected FFmpeg concat copy to merge audio-ready chunks"
+    ok, reason, duration = engine._v56_validate_video(merged, min_size=512)
+    assert ok, reason
+    assert duration and duration > 2.5
+    assert engine.video_has_audio_stream(merged), "expected merged ffmpeg output to keep audio stream"
 
 
 if __name__ == "__main__":
     test_ffmpeg_priority_fits_simple_video_segments()
     test_ffmpeg_priority_writes_lightweight_chunk_directly()
     test_ffmpeg_direct_chunk_unifies_source_and_silent_audio()
+    test_ffmpeg_concat_keeps_audio_chunks_out_of_moviepy()
     print("V5 FFmpeg priority smoke test passed")

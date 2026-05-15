@@ -219,7 +219,7 @@ export function App() {
     title_background_path: state.titleBackgroundPath,
     end_background_path: state.endBackgroundPath,
     chapter_background_mode: state.chapterBackgroundMode,
-    audio: buildAudioSettings(state),
+    audio: buildAudioSettings(state, state.v5Library),
   }), [
     state.title,
     state.titleSubtitle,
@@ -233,6 +233,7 @@ export function App() {
     state.titleBackgroundPath,
     state.endBackgroundPath,
     state.chapterBackgroundMode,
+    state.v5Library,
     state.musicMode,
     state.musicPath,
     state.bgmVolume,
@@ -526,7 +527,7 @@ export function App() {
         render_mode: renderModeForPerformance(state.performanceMode, state.editStrategy),
         chunk_seconds: chunkSecondsForPerformance(state.performanceMode),
         chapter_background_mode: state.chapterBackgroundMode,
-        audio: buildAudioSettings(state),
+        audio: buildAudioSettings(state, state.v5Library),
         scenic_spot_title_mode: "overlay",
       });
       await saveBlueprintV5(bpPath, JSON.stringify(blueprintForCompile, null, 2));
@@ -596,6 +597,7 @@ export function App() {
 
       <section className="workspace" id="workspace">
         {toast && <Toast title={state.v5Stage === "BLUEPRINT" ? "蓝图生成成功" : "提示"} message={toast} onClose={() => setToast(null)} />}
+        <div className="workspace-inner">
         <header className="topbar">
           <div>
             <p className="eyebrow">GUI MVP</p>
@@ -878,6 +880,7 @@ export function App() {
             </div>
           </section>
         </div>
+        </div>
       </section>
     </main>
     {showGalleryOverlay && (
@@ -996,11 +999,24 @@ function getSelectedBackgroundPath(target: BackgroundPickerTarget, state: Studio
   return section?.background?.custom_path || null;
 }
 
-function buildAudioSettings(state: StudioState): V5AudioSettings {
+function buildAudioSettings(state: StudioState, library: V5MediaLibrary | null): V5AudioSettings {
+  const autoMusicAsset = selectAutoMusicAsset(library);
+  const resolvedMusicPath =
+    state.musicMode === "manual"
+      ? state.musicPath
+      : state.musicMode === "auto"
+        ? autoMusicAsset?.absolute_path || null
+        : null;
+
   return {
     music_mode: state.musicMode,
-    music_path: state.musicMode === "manual" ? state.musicPath : null,
-    music_source: state.musicMode === "manual" && state.musicPath ? "manual" : state.musicMode === "auto" ? "library" : "none",
+    music_path: resolvedMusicPath,
+    music_source:
+      state.musicMode === "manual" && state.musicPath
+        ? "manual"
+        : state.musicMode === "auto" && resolvedMusicPath
+          ? "library"
+          : "none",
     bgm_volume: clampNumber(state.bgmVolume, 0, 1, 0.28),
     source_audio_volume: clampNumber(state.sourceAudioVolume, 0, 1, 1),
     keep_source_audio: Boolean(state.keepSourceAudio),
@@ -1012,9 +1028,32 @@ function buildAudioSettings(state: StudioState): V5AudioSettings {
 }
 
 function MusicAudioPanel({ state, onPickMusicFile }: { state: StudioState; onPickMusicFile: () => void }) {
-  const musicEnabled = state.musicMode === "manual" && Boolean(state.musicPath);
+  const autoMusicAsset = selectAutoMusicAsset(state.v5Library);
+  const resolvedMusicPath =
+    state.musicMode === "manual"
+      ? state.musicPath
+      : state.musicMode === "auto"
+        ? autoMusicAsset?.absolute_path || null
+        : null;
+  const musicEnabled = state.musicMode !== "off" && Boolean(resolvedMusicPath);
   const bgmPercent = Math.round(clampNumber(state.bgmVolume, 0, 1, 0.28) * 100);
   const sourcePercent = Math.round(clampNumber(state.sourceAudioVolume, 0, 1, 1) * 100);
+  const statusText =
+    state.musicMode === "auto"
+      ? resolvedMusicPath
+        ? "自动匹配 BGM"
+        : "未找到可用音频"
+      : musicEnabled
+        ? "已启用 BGM"
+        : "未添加 BGM";
+  const musicHint =
+    state.musicMode === "auto"
+      ? resolvedMusicPath
+        ? `自动模式将使用：${shortPathName(resolvedMusicPath)}`
+        : "当前素材目录里还没有可用的 BGM 候选，至少需要一首 15 秒以上的音频文件。"
+      : resolvedMusicPath
+        ? shortPathName(resolvedMusicPath)
+        : "选择一首本地音乐后，低清小样和最终视频会听到同一套混音策略。";
 
   return (
     <div className={`music-audio-card${musicEnabled ? " has-music" : ""}`}>
@@ -1026,14 +1065,14 @@ function MusicAudioPanel({ state, onPickMusicFile }: { state: StudioState; onPic
             <span>BGM、视频原声、淡入淡出先在这里统一控制。</span>
           </div>
         </div>
-        <span className="music-status-badge">{musicEnabled ? "已启用 BGM" : "未添加 BGM"}</span>
+        <span className="music-status-badge">{statusText}</span>
       </div>
 
       <div className="music-mode-buttons">
         <button
           className={state.musicMode === "off" ? "active" : ""}
           type="button"
-          onClick={() => state.patch({ musicMode: "off", musicPath: null })}
+          onClick={() => state.patch({ musicMode: "off" })}
         >
           无音乐
         </button>
@@ -1044,16 +1083,20 @@ function MusicAudioPanel({ state, onPickMusicFile }: { state: StudioState; onPic
         >
           手动选择
         </button>
-        <button type="button" disabled title="P2 会接入素材目录自动识别音乐">
-          自动选择 P2
+        <button
+          className={state.musicMode === "auto" ? "active" : ""}
+          type="button"
+          onClick={() => state.patch({ musicMode: "auto" })}
+        >
+          自动选择
         </button>
       </div>
 
       <div className="music-file-row">
         <Volume2 size={16} />
-        <span title={state.musicPath || ""}>{state.musicPath ? shortPathName(state.musicPath) : "选择一首本地音乐后，低清小样和最终视频会听到同一套混音策略。"}</span>
-        {state.musicPath && (
-          <button type="button" onClick={() => state.patch({ musicMode: "off", musicPath: null })}>
+        <span title={resolvedMusicPath || ""}>{musicHint}</span>
+        {resolvedMusicPath && (
+          <button type="button" onClick={() => state.patch({ musicMode: "off" })}>
             移除
           </button>
         )}
@@ -1124,10 +1167,61 @@ function MusicAudioPanel({ state, onPickMusicFile }: { state: StudioState; onPic
       </div>
 
       <p className="music-audio-note">
-        V1 先覆盖手动 BGM、音量和基础 ducking；超长视频的 chunk 级 FFmpeg 混音会在后续 P3 做，避免影响当前稳定渲染。
+        性能档位只会影响混音执行路径，不会默认牺牲 BGM 存在感、视频原声保留和整体情绪表达；长视频场景下会优先用更稳的 FFmpeg 与缓存路径完成混音。
       </p>
     </div>
   );
+}
+
+function selectAutoMusicAsset(library: V5MediaLibrary | null): V5Asset | null {
+  const audioAssets = (library?.assets || []).filter((asset) => asset.type === "audio" && assetStatusState(asset) !== "error");
+  if (audioAssets.length === 0) return null;
+
+  const ranked = audioAssets
+    .map((asset) => ({ asset, score: autoMusicScore(asset) }))
+    .filter((entry) => entry.score > 0)
+    .sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      const durationA = Number(a.asset.media.duration_seconds || 0);
+      const durationB = Number(b.asset.media.duration_seconds || 0);
+      if (durationB !== durationA) return durationB - durationA;
+      return a.asset.relative_path.localeCompare(b.asset.relative_path);
+    });
+
+  return ranked[0]?.asset || null;
+}
+
+function autoMusicScore(asset: V5Asset): number {
+  const duration = Number(asset.media.duration_seconds || asset.media.duration || 0);
+  if (duration < 15) return 0;
+
+  const haystack = `${asset.file.name} ${asset.relative_path}`.toLowerCase();
+  const ext = asset.file.extension.toLowerCase();
+  let score = duration >= 45 ? 12 : 6;
+
+  if (/(^|[^a-z])(bgm|music|soundtrack|instrumental|score|theme)([^a-z]|$)/.test(haystack)) score += 40;
+  if (/配乐|音乐|伴奏|纯音乐|背景音乐/.test(`${asset.file.name} ${asset.relative_path}`)) score += 40;
+  if (/effect|sfx|音效|提示音|转场音/.test(`${asset.file.name} ${asset.relative_path}`)) score -= 25;
+  if (duration >= 90) score += 18;
+  else if (duration >= 45) score += 10;
+  else if (duration >= 25) score += 4;
+
+  score += {
+    ".wav": 6,
+    ".m4a": 5,
+    ".mp3": 4,
+    ".flac": 4,
+    ".aac": 3,
+    ".ogg": 2,
+  }[ext] || 0;
+
+  return score;
+}
+
+function assetStatusState(asset: V5Asset): string {
+  if (!asset.status) return "ready";
+  if (typeof asset.status === "string") return asset.status;
+  return asset.status.state || "ready";
 }
 
 function clampNumber(value: number, min: number, max: number, fallback: number): number {
@@ -1213,8 +1307,8 @@ function recommendPerformanceMode(
       level: "high",
       estimatedChunkSeconds: 60,
       shouldWarn: true,
-      summary: "检测到长视频或大量素材，建议启用稳定优先，保留章节动效但降低复杂转场风险。",
-      reason: "素材量较大，已建议稳定渲染；章节文字动效会保留，复杂转场和强镜头运动会更克制。",
+      summary: "检测到长视频或大批量素材，建议启用稳定优先：保留章节动效、BGM 和原声层次，同时自动简化高风险执行路径。",
+      reason: "当前项目规模较大，稳定优先会优先降低复杂转场、重时间线和高风险混音实现，减少内存峰值与最终生成失败风险。",
     };
   }
 
@@ -1224,8 +1318,8 @@ function recommendPerformanceMode(
       level: "medium",
       estimatedChunkSeconds: 120,
       shouldWarn: false,
-      summary: "当前项目适合平衡推荐：保留主要动效，同时用分段策略控制内存。",
-      reason: "项目规模中等，平衡推荐能兼顾效果、速度和稳定性。",
+      summary: "当前项目适合平衡推荐：保留主要画面与音频表达，同时用分段和缓存策略控制内存与耗时。",
+      reason: "当前项目规模中等，平衡推荐能兼顾效果、速度和稳定性，不需要过早牺牲创作表现。",
     };
   }
 
@@ -1234,11 +1328,10 @@ function recommendPerformanceMode(
     level: "low",
     estimatedChunkSeconds: 180,
     shouldWarn: false,
-    summary: "当前项目较轻，可以优先保留完整转场、章节动效和高质量输出。",
-    reason: "素材规模较小，画质优先风险较低。",
+    summary: "当前项目规模较小，可以优先保留更完整的画面、动效和混音细节。",
+    reason: "素材规模较小，质感优先的性能风险较低。",
   };
 }
-
 function SegmentedControl({
   label,
   value,

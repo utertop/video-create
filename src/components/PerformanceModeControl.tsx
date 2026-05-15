@@ -13,15 +13,15 @@ export type PerformanceRecommendation = {
 const MODE_COPY: Record<PerformanceMode, { label: string; description: string }> = {
   stable: {
     label: "稳定优先",
-    description: "更短分段、较低峰值内存，保留章节动效但降低复杂转场。",
+    description: "优先保证长视频和大批量素材稳定完成，保留 BGM 与原声存在感，同时尽量改走更稳的缓存、分段和 FFmpeg 路径。",
   },
   balanced: {
     label: "平衡推荐",
-    description: "默认推荐，保留主要效果并限制超长转场的风险。",
+    description: "默认推荐，兼顾效果、速度和稳定性，保留主要画面表现与音频层次。",
   },
   quality: {
-    label: "画质优先",
-    description: "尽量保留完整动效和高质量输出，长视频可能占用更多内存。",
+    label: "质感优先",
+    description: "尽量保留更完整的转场、镜头和混音细节，适合中小项目或你明确愿意承担更高耗时与风险时使用。",
   },
 };
 
@@ -80,9 +80,9 @@ export function PerformanceModeControl({
           <AlertTriangle size={15} />
           <span>
             {riskyQuality
-              ? "当前项目较大，强制画质优先可能占用较多内存，长视频存在生成失败风险。"
+              ? "当前项目较大，质感优先可能显著增加内存占用和最终收尾耗时。系统会尽量保留音乐与原声表达，但生成失败风险会更高。"
               : isOverride
-                ? `你当前选择与系统建议不同：${recommendation.reason}`
+                ? `你当前手动选择了不同于系统建议的性能档位。${recommendation.reason}`
                 : recommendation.reason}
           </span>
         </div>

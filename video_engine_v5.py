@@ -110,7 +110,20 @@ ENGINE_VERSION = "video-create-engine-v5.6.0"
 
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
 VIDEO_EXTS = (".mp4", ".mov", ".avi", ".mkv", ".m4v")
-ALL_EXTS = IMAGE_EXTS + VIDEO_EXTS
+AUDIO_EXTS = (".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg")
+ALL_EXTS = IMAGE_EXTS + VIDEO_EXTS + AUDIO_EXTS
+
+AUDIO_PREFERRED_EXT_SCORE = {
+    ".wav": 6,
+    ".m4a": 5,
+    ".mp3": 4,
+    ".flac": 4,
+    ".aac": 3,
+    ".ogg": 2,
+}
+
+AUDIO_MUSIC_HINTS = ("bgm", "music", "soundtrack", "instrumental", "score", "theme", "配乐", "音乐", "伴奏", "纯音乐", "背景音乐")
+AUDIO_EFFECT_HINTS = ("effect", "sfx", "音效", "提示音", "转场音")
 
 CITY_KEYWORDS = [
     "北京", "上海", "广州", "深圳", "杭州", "泉州", "厦门", "福州", "南京", "苏州",
@@ -535,6 +548,178 @@ def video_has_audio_stream(source: Path) -> bool:
         return False
 
 
+def probe_audio_file(source: Path) -> Dict[str, Any]:
+    """Probe audio metadata using FFmpeg stderr, without requiring ffprobe."""
+    media = {
+        "width": None,
+        "height": None,
+        "orientation": None,
+        "shooting_date": None,
+        "duration_seconds": None,
+        "sample_rate": None,
+        "channels": None,
+        "audio_codec": None,
+    }
+    try:
+        import imageio_ffmpeg
+
+        completed = subprocess.run(
+            [imageio_ffmpeg.get_ffmpeg_exe(), "-hide_banner", "-i", str(source)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        probe_text = completed.stderr or ""
+
+        duration_match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", probe_text)
+        if duration_match:
+            hours = int(duration_match.group(1))
+            minutes = int(duration_match.group(2))
+            seconds = float(duration_match.group(3))
+            media["duration_seconds"] = round(hours * 3600 + minutes * 60 + seconds, 3)
+
+        audio_line = None
+        for line in probe_text.splitlines():
+            if "Audio:" in line:
+                audio_line = line
+                break
+
+        if audio_line:
+            codec_match = re.search(r"Audio:\s*([^,]+)", audio_line)
+            if codec_match:
+                media["audio_codec"] = codec_match.group(1).strip().lower()
+
+            sample_rate_match = re.search(r"(\d+)\s*Hz", audio_line)
+            if sample_rate_match:
+                media["sample_rate"] = int(sample_rate_match.group(1))
+
+            if "stereo" in audio_line.lower():
+                media["channels"] = 2
+            elif "mono" in audio_line.lower():
+                media["channels"] = 1
+            else:
+                channels_match = re.search(r"(\d+(?:\.\d+)?)\s*channels?", audio_line.lower())
+                if channels_match:
+                    media["channels"] = int(float(channels_match.group(1)))
+    except Exception:
+        pass
+
+    return media
+
+
+def prepare_cached_audio_for_mix(source: Path, cache_root: Path) -> Path:
+    """Normalize audio once and reuse it across renders."""
+    if not source.exists():
+        raise FileNotFoundError(f"Audio source not found: {source}")
+
+    bucket = cache_root / "normalized"
+    bucket.mkdir(parents=True, exist_ok=True)
+    cache_path = bucket / f"{file_hash_light(source, 'audio_mix_aac_48k_stereo_v1')}.m4a"
+    if cache_path.exists() and cache_path.stat().st_size > 1024:
+        emit_event("log", message=f"Audio cache hit: {cache_path.name}")
+        return cache_path
+
+    tmp_path = cache_path.with_suffix(".tmp.m4a")
+    try:
+        import imageio_ffmpeg
+
+        completed = subprocess.run(
+            [
+                imageio_ffmpeg.get_ffmpeg_exe(),
+                "-y",
+                "-i",
+                str(source),
+                "-vn",
+                "-ac",
+                "2",
+                "-ar",
+                "48000",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "160k",
+                "-movflags",
+                "+faststart",
+                str(tmp_path),
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if completed.returncode != 0:
+            raise RuntimeError((completed.stderr or completed.stdout or "unknown ffmpeg error")[-800:])
+        if not tmp_path.exists() or tmp_path.stat().st_size <= 1024:
+            raise RuntimeError("normalized audio cache output is empty")
+        os.replace(str(tmp_path), str(cache_path))
+        emit_event("log", message=f"Audio cache created: {cache_path.name}")
+        return cache_path
+    finally:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except Exception:
+            pass
+
+
+def audio_asset_duration_seconds(asset: Dict[str, Any]) -> float:
+    media = asset.get("media", {}) if isinstance(asset, dict) else {}
+    return float(media.get("duration_seconds") or media.get("duration") or 0.0)
+
+
+def auto_music_score(asset: Dict[str, Any]) -> float:
+    if asset.get("type") != "audio":
+        return 0.0
+
+    duration = audio_asset_duration_seconds(asset)
+    if duration < 15:
+        return 0.0
+
+    file_info = asset.get("file", {}) if isinstance(asset, dict) else {}
+    name = str(file_info.get("name") or "")
+    rel_path = str(asset.get("relative_path") or "")
+    haystack_lower = f"{name} {rel_path}".lower()
+    haystack = f"{name} {rel_path}"
+    ext = str(file_info.get("extension") or "").lower()
+
+    score = 12.0 if duration >= 45 else 6.0
+    if any(hint in haystack_lower for hint in AUDIO_MUSIC_HINTS[:6]) or any(hint in haystack for hint in AUDIO_MUSIC_HINTS[6:]):
+        score += 40.0
+    if any(hint in haystack_lower for hint in AUDIO_EFFECT_HINTS[:2]) or any(hint in haystack for hint in AUDIO_EFFECT_HINTS[2:]):
+        score -= 25.0
+
+    if duration >= 90:
+        score += 18.0
+    elif duration >= 45:
+        score += 10.0
+    elif duration >= 25:
+        score += 4.0
+
+    score += float(AUDIO_PREFERRED_EXT_SCORE.get(ext, 0))
+    return score
+
+
+def select_auto_music_asset(assets: Iterable[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    ranked = []
+    for asset in assets:
+        if not isinstance(asset, dict):
+            continue
+        status = asset.get("status")
+        if status == "error" or (isinstance(status, dict) and status.get("state") == "error"):
+            continue
+        score = auto_music_score(asset)
+        if score <= 0:
+            continue
+        ranked.append((score, audio_asset_duration_seconds(asset), str(asset.get("relative_path") or ""), asset))
+
+    if not ranked:
+        return None
+
+    ranked.sort(key=lambda item: (-item[0], -item[1], item[2]))
+    return ranked[0][3]
+
+
 def read_json(path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
@@ -698,6 +883,7 @@ class Scanner:
                 "total_assets": len(self.assets),
                 "image_count": sum(1 for a in self.assets if a.type == "image"),
                 "video_count": sum(1 for a in self.assets if a.type == "video"),
+                "audio_count": sum(1 for a in self.assets if a.type == "audio"),
                 "skipped_count": self.skipped_count,
                 "error_count": sum(1 for a in self.assets if a.status == "error"),
             },
@@ -766,19 +952,20 @@ class Scanner:
                     asset = self._scan_asset(path, node_id, context)
                     self.assets.append(asset)
                     node.asset_count += 1
-                    emit_event(
-                        "media",
-                        item_kind=asset.type,
-                        rel_path=asset.relative_path,
-                        display_name=asset.file["name"],
-                        path=asset.absolute_path,
-                        thumbnail=asset.thumbnail_path,
-                        width=asset.media.get("width"),
-                        height=asset.media.get("height"),
-                        duration=asset.media.get("duration_seconds"),
-                        chapter=current.name,
-                        mtime=path.stat().st_mtime,
-                    )
+                    if asset.type in {"image", "video"}:
+                        emit_event(
+                            "media",
+                            item_kind=asset.type,
+                            rel_path=asset.relative_path,
+                            display_name=asset.file["name"],
+                            path=asset.absolute_path,
+                            thumbnail=asset.thumbnail_path,
+                            width=asset.media.get("width"),
+                            height=asset.media.get("height"),
+                            duration=asset.media.get("duration_seconds"),
+                            chapter=current.name,
+                            mtime=path.stat().st_mtime,
+                        )
 
         return node_id
 
@@ -933,7 +1120,12 @@ class Scanner:
 
     def _scan_asset(self, path: Path, node_id: str, context: Dict[str, Optional[str]]) -> Asset:
         ext = path.suffix.lower()
-        kind = "image" if ext in IMAGE_EXTS else "video"
+        if ext in IMAGE_EXTS:
+            kind = "image"
+        elif ext in VIDEO_EXTS:
+            kind = "video"
+        else:
+            kind = "audio"
         stat = path.stat()
         rel = path.relative_to(self.root).as_posix()
         asset_id = "asset_" + safe_id(rel)
@@ -944,6 +1136,9 @@ class Scanner:
             "orientation": None,
             "shooting_date": None,
             "duration_seconds": None,
+            "sample_rate": None,
+            "channels": None,
+            "audio_codec": None,
         }
         thumb: Optional[str] = None
         status = "ready"
@@ -957,13 +1152,15 @@ class Scanner:
                     media["orientation"] = orientation_from_size(img.size)
                     media["shooting_date"] = get_exif_date(img)
                     thumb = self._make_image_thumb(img, asset_id, cache_key)
-            elif HAS_MOVIEPY:
+            elif kind == "video" and HAS_MOVIEPY:
                 clip = VideoFileClip(str(path))
                 media["duration_seconds"] = float(clip.duration or 0)
                 media["width"], media["height"] = map(int, clip.size)
                 media["orientation"] = orientation_from_size(clip.size)
                 thumb = self._make_video_thumb(clip, asset_id, cache_key)
                 clip.close()
+            elif kind == "audio":
+                media.update(probe_audio_file(path))
         except Exception as exc:
             status = "error"
             emit_event("log", message=f"素材分析失败: {path.name}: {exc}")
@@ -1101,7 +1298,7 @@ class Planner:
     def _asset_refs_for_node(self, node_id: str) -> List[AssetRef]:
         refs: List[AssetRef] = []
         for asset in self.assets:
-            if asset.get("classification", {}).get("directory_node_id") == node_id:
+            if asset.get("classification", {}).get("directory_node_id") == node_id and asset.get("type") in {"image", "video"}:
                 refs.append(AssetRef(asset_id=asset["asset_id"], keep_audio=asset.get("type") == "video"))
         return refs
 
@@ -1122,10 +1319,41 @@ class Compiler:
         self.transition_profile = self.blueprint_metadata.get("transition_profile", "auto")
         self.rhythm_profile = self.blueprint_metadata.get("rhythm_profile", "auto")
         self.performance_mode = self.blueprint_metadata.get("performance_mode", "balanced")
+        self.audio_settings = self._resolve_render_audio_settings()
         self.time = 0.0
         self.segments: List[RenderSegment] = []
         self.last_visual_source_path: Optional[str] = None
         self.single_auto_section_id: Optional[str] = None
+
+    def _resolve_render_audio_settings(self) -> Optional[Dict[str, Any]]:
+        audio = self.blueprint_metadata.get("audio")
+        if not isinstance(audio, dict):
+            return None
+
+        resolved = dict(audio)
+        music_mode = str(resolved.get("music_mode") or "off").lower()
+        if music_mode not in {"off", "auto", "manual"}:
+            music_mode = "off"
+        resolved["music_mode"] = music_mode
+
+        if music_mode == "auto":
+            selected = select_auto_music_asset(self.library.get("assets", []))
+            if selected:
+                resolved["music_path"] = selected.get("absolute_path")
+                resolved["music_source"] = "library"
+                resolved["selected_asset_id"] = selected.get("asset_id")
+                emit_event("log", message=f"自动音乐模式已选择候选 BGM: {selected.get('relative_path')}")
+            else:
+                resolved["music_path"] = None
+                resolved["music_source"] = "none"
+                emit_event("log", message="自动音乐模式未找到合适的 BGM 候选，后续渲染将按无音乐处理")
+        elif music_mode == "manual":
+            resolved["music_source"] = "manual" if resolved.get("music_path") else "none"
+        else:
+            resolved["music_path"] = None
+            resolved["music_source"] = "none"
+
+        return resolved
 
     def compile(self) -> Dict[str, Any]:
         emit_event("phase", phase="compile", message="编译渲染计划", percent=20)
@@ -1182,7 +1410,7 @@ class Compiler:
                 "performance_mode": self.performance_mode,
                 "render_mode": self.blueprint_metadata.get("render_mode", "auto"),
                 "chunk_seconds": self.blueprint_metadata.get("chunk_seconds"),
-                "audio": self.blueprint_metadata.get("audio"),
+                "audio": self.audio_settings,
             },
             "cache_policy": {
                 "enabled": True,
@@ -1755,16 +1983,29 @@ class Renderer:
             self.target_size = get_resolution(aspect_ratio)
         self.temp_dir = Path(tempfile.mkdtemp(prefix="vcs_v5_render_"))
         self.render_cache_dir = self._init_render_cache_dir()
+        self.audio_cache_dir = self._init_audio_cache_dir()
         self.first_visual_source = self._find_visual_source("first")
         self.last_visual_source = self._find_visual_source("last")
         self.renderer = TitleStyleRenderer(self.target_size)
         self.gpu_accel = params.get("gpu_accel", "none") # none, nvenc, qsv
         self.prefer_ffmpeg_segments = self._should_prefer_ffmpeg_segments(settings)
         self.audio_settings = self._resolve_audio_settings(settings)
+        self._prepared_music_path: Optional[Path] = None
+        self._prepared_source_audio_paths: Dict[str, Optional[Path]] = {}
 
     def _init_render_cache_dir(self) -> Path:
         configured = self.params.get("cache_root") or self.params.get("render_cache_root")
         cache_dir = Path(configured) if configured else self.output_path.parent / ".video_create_project" / "render_cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        return cache_dir
+
+    def _init_audio_cache_dir(self) -> Path:
+        configured = self.params.get("audio_cache_root")
+        if configured:
+            cache_dir = Path(configured)
+        else:
+            project_dir = self.render_cache_dir.parent if self.render_cache_dir.name == "render_cache" else self.output_path.parent / ".video_create_project"
+            cache_dir = project_dir / "audio_cache"
         cache_dir.mkdir(parents=True, exist_ok=True)
         return cache_dir
 
@@ -1775,6 +2016,48 @@ class Renderer:
         key = file_hash_light(source, key_extra) if source.exists() else safe_id(f"{source}|{key_extra}")
         return bucket / f"{key}{suffix}"
 
+    def _prepare_music_path(self) -> Optional[Path]:
+        if self._prepared_music_path is not None and self._prepared_music_path.exists():
+            return self._prepared_music_path
+
+        music_path = self.audio_settings.get("music_path")
+        if not music_path:
+            return None
+
+        source = Path(str(music_path))
+        if not source.exists():
+            return None
+
+        try:
+            # Performance mode may choose a cheaper mix path, but we still keep
+            # the audible BGM/source-audio intent by normalizing into cache first.
+            self._prepared_music_path = prepare_cached_audio_for_mix(source, self.audio_cache_dir)
+        except Exception as exc:
+            emit_event("log", message=f"Audio cache fallback to source: {exc}")
+            self._prepared_music_path = source
+        return self._prepared_music_path
+
+    def _prepare_source_audio_path(self, source: Path) -> Optional[Path]:
+        cache_key = str(source.resolve()) if source.exists() else str(source)
+        if cache_key in self._prepared_source_audio_paths:
+            prepared = self._prepared_source_audio_paths[cache_key]
+            if prepared is None or prepared.exists():
+                return prepared
+
+        if not source.exists() or not video_has_audio_stream(source):
+            self._prepared_source_audio_paths[cache_key] = None
+            return None
+
+        try:
+            # Normalize embedded source audio into the same cache contract so
+            # stable-mode optimizations do not flatten or silently drop it.
+            prepared = prepare_cached_audio_for_mix(source, self.audio_cache_dir)
+        except Exception as exc:
+            emit_event("log", message=f"Source audio cache fallback to embedded track: {exc}")
+            prepared = None
+        self._prepared_source_audio_paths[cache_key] = prepared
+        return prepared
+
     def _should_prefer_ffmpeg_segments(self, settings: Dict[str, Any]) -> bool:
         performance_mode = str(self.params.get("performance_mode") or settings.get("performance_mode") or "").lower()
         edit_strategy = str(self.params.get("edit_strategy") or settings.get("edit_strategy") or "").lower()
@@ -1782,11 +2065,12 @@ class Renderer:
         return performance_mode == "stable" or edit_strategy in {"fast_assembly", "long_stable"} or engine == "ffmpeg_concat"
 
     def _resolve_audio_settings(self, settings: Dict[str, Any]) -> Dict[str, Any]:
-        audio = self.params.get("audio")
-        if not isinstance(audio, dict):
-            audio = settings.get("audio")
-        if not isinstance(audio, dict):
-            audio = {}
+        params_audio = self.params.get("audio")
+        settings_audio = settings.get("audio")
+        base_audio = settings_audio if isinstance(settings_audio, dict) else {}
+        override_audio = params_audio if isinstance(params_audio, dict) else {}
+        audio = dict(base_audio)
+        audio.update({key: value for key, value in override_audio.items() if value is not None})
 
         def num(name: str, default: float, minimum: float, maximum: float) -> float:
             try:
@@ -1800,11 +2084,14 @@ class Renderer:
         music_mode = str(audio.get("music_mode") or "off").lower()
         if music_mode not in {"off", "auto", "manual"}:
             music_mode = "off"
+        if music_mode == "auto" and not audio.get("music_path") and isinstance(base_audio, dict):
+            audio["music_path"] = base_audio.get("music_path")
+            audio["music_source"] = base_audio.get("music_source") or "library"
 
         return {
             "music_mode": music_mode,
             "music_path": audio.get("music_path"),
-            "music_source": audio.get("music_source") or ("manual" if music_mode == "manual" else "none"),
+            "music_source": audio.get("music_source") or ("manual" if music_mode == "manual" else "library" if music_mode == "auto" and audio.get("music_path") else "none"),
             "bgm_volume": num("bgm_volume", 0.28, 0.0, 1.0),
             "source_audio_volume": num("source_audio_volume", 1.0, 0.0, 1.0),
             "keep_source_audio": bool(audio.get("keep_source_audio", True)),
@@ -1980,12 +2267,12 @@ class Renderer:
 
         music_mode = str(settings.get("music_mode") or "off")
         music_path = settings.get("music_path")
-        if music_mode != "manual" or not music_path:
+        if music_mode == "off" or not music_path:
             if source_audio is not getattr(video, "audio", None):
                 return video.set_audio(source_audio)
             return video
 
-        path = Path(str(music_path))
+        path = self._prepare_music_path() or Path(str(music_path))
         if not path.exists():
             emit_event("log", message=f"BGM 文件不存在，已跳过背景音乐: {path}")
             return video.set_audio(source_audio) if source_audio is not getattr(video, "audio", None) else video
@@ -2346,7 +2633,18 @@ class Renderer:
             source_image=frame_path,
             motion_config=motion_config,
         )
-        if keep_audio and raw.audio is not None:
+        prepared_source_audio = self._prepare_source_audio_path(source) if keep_audio else None
+        if keep_audio and prepared_source_audio is not None:
+            source_volume = float(self.audio_settings.get("source_audio_volume", 1.0))
+            if source_volume > 0:
+                source_audio = AudioFileClip(str(prepared_source_audio))
+                source_audio_duration = float(getattr(source_audio, "duration", None) or 0.0)
+                if source_audio_duration > 0:
+                    source_audio = source_audio.subclip(0, min(source_audio_duration, raw.duration or duration))
+                if abs(source_volume - 1.0) > 0.001:
+                    source_audio = source_audio.volumex(source_volume)
+                final = final.set_audio(source_audio)
+        elif keep_audio and raw.audio is not None:
             source_volume = float(self.audio_settings.get("source_audio_volume", 1.0))
             if source_volume > 0:
                 source_audio = raw.audio
@@ -2435,14 +2733,17 @@ class Renderer:
     ) -> Optional[Path]:
         fps = int(self.params.get("fps") or self.plan.get("render_settings", {}).get("fps") or 30)
         audio_mode = "source" if keep_audio else "silent" if force_audio_track else "none"
-        extra = f"fit_v2|duration={round(float(duration or 0), 3)}|audio={audio_mode}|fps={fps}"
+        extra = f"fit_v3|duration={round(float(duration or 0), 3)}|audio={audio_mode}|fps={fps}"
         out = self._cache_path("fitted_videos", source, ".mp4", extra)
         if out.exists() and out.stat().st_size > 1024:
             return out
 
         render_source = self._normalize_video_display_geometry(source)
         segment_duration = max(float(duration or 0.1), 0.1)
-        use_source_audio = bool(keep_audio and video_has_audio_stream(render_source))
+        prepared_source_audio = self._prepare_source_audio_path(source) if keep_audio else None
+        use_cached_source_audio = prepared_source_audio is not None and prepared_source_audio.exists()
+        fallback_source_audio = bool(keep_audio and video_has_audio_stream(render_source))
+        use_source_audio = bool(use_cached_source_audio or fallback_source_audio)
         needs_audio_track = bool(keep_audio or force_audio_track)
         source_volume = float(self.audio_settings.get("source_audio_volume", 1.0))
         tw, th = self.target_size
@@ -2460,7 +2761,9 @@ class Renderer:
 
             def build_cmd(video_encoder: str, video_encoder_args: List[str]) -> List[str]:
                 cmd = [ffmpeg, "-y", "-i", str(render_source)]
-                if needs_audio_track and not use_source_audio:
+                if use_cached_source_audio:
+                    cmd += ["-i", str(prepared_source_audio)]
+                elif needs_audio_track and not use_source_audio:
                     cmd += [
                         "-f",
                         "lavfi",
@@ -2471,9 +2774,15 @@ class Renderer:
                     ]
                 cmd += ["-t", str(segment_duration), "-vf", vf, "-map", "0:v:0"]
                 if needs_audio_track:
-                    cmd += ["-map", "0:a:0" if use_source_audio else "1:a:0"]
+                    if use_cached_source_audio:
+                        audio_map = "1:a:0"
+                    elif use_source_audio:
+                        audio_map = "0:a:0"
+                    else:
+                        audio_map = "1:a:0"
+                    cmd += ["-map", audio_map]
                     audio_filters = []
-                    if use_source_audio and abs(source_volume - 1.0) > 0.001:
+                    if abs(source_volume - 1.0) > 0.001 and (use_source_audio or use_cached_source_audio):
                         audio_filters.append(f"volume={source_volume:.4f}")
                     audio_filters.extend(["aresample=48000", "apad"])
                     cmd += [
@@ -2793,6 +3102,7 @@ def _v56_concat_chunks_ffmpeg(chunks: List[Path], tmp_output: Path, project_dir:
         raise RuntimeError("没有可拼接的 chunk 文件")
 
     concat_list = project_dir / "concat_list.txt"
+    resolved_output = tmp_output.resolve()
     with concat_list.open("w", encoding="utf-8", newline="\n") as f:
         for chunk in chunks:
             escaped = chunk.resolve().as_posix().replace("'", r"'\''")
@@ -2808,19 +3118,92 @@ def _v56_concat_chunks_ffmpeg(chunks: List[Path], tmp_output: Path, project_dir:
             "-y",
             "-f", "concat",
             "-safe", "0",
-            "-i", str(concat_list),
+            "-i", str(concat_list.resolve()),
             "-c", "copy",
-            str(tmp_output),
+            str(resolved_output),
         ]
         emit_event("phase", phase="concat", message="使用 FFmpeg 快速拼接分段视频", percent=96)
-        completed = subprocess.run(cmd, cwd=str(project_dir), capture_output=True, text=True, encoding="utf-8", errors="replace")
-        if completed.returncode == 0:
+        completed = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if completed.returncode == 0 and resolved_output.exists() and resolved_output.stat().st_size > 1024:
             return True
         emit_event("log", message=f"FFmpeg concat copy 失败，准备回退 MoviePy: {completed.stderr[-800:]}")
         return False
     except Exception as exc:
         emit_event("log", message=f"FFmpeg concat 不可用，准备回退 MoviePy: {exc}")
         return False
+
+
+def _v56_concat_chunks_ffmpeg_reencode(
+    chunks: List[Path],
+    tmp_output: Path,
+    project_dir: Path,
+    fps: int,
+    params: Dict[str, Any],
+) -> bool:
+    if not chunks:
+        raise RuntimeError("missing chunks for ffmpeg reencode concat")
+
+    concat_list = project_dir / "concat_reencode_list.txt"
+    resolved_output = tmp_output.resolve()
+    with concat_list.open("w", encoding="utf-8", newline="\n") as f:
+        for chunk in chunks:
+            escaped = chunk.resolve().as_posix().replace("'", r"'\''")
+            f.write(f"file '{escaped}'\n")
+
+    try:
+        import imageio_ffmpeg
+
+        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        selected_encoder, encoder_args = select_ffmpeg_video_encoder(params)
+        cmd = [
+            ffmpeg,
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(concat_list.resolve()),
+            "-r",
+            str(int(fps or 30)),
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            "-c:v",
+            selected_encoder,
+        ]
+        cmd += encoder_args
+        if selected_encoder == "libx264":
+            cmd += ["-crf", quality_to_crf(params.get("quality") or params.get("python_quality") or "high")]
+        else:
+            cmd += ["-b:v", "8M"]
+        cmd += [
+            "-c:a",
+            "aac",
+            "-b:a",
+            "160k",
+            "-ar",
+            "48000",
+            "-ac",
+            "2",
+            str(resolved_output),
+        ]
+        emit_event("phase", phase="concat", message="ä½¿ç”¨ FFmpeg é‡ç¼–ç åˆå¹¶åˆ†æ®µè§†é¢‘", percent=96)
+        completed = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if completed.returncode == 0 and resolved_output.exists() and resolved_output.stat().st_size > 1024:
+            return True
+        emit_event("log", message=f"FFmpeg concat reencode failed, fallback to MoviePy: {completed.stderr[-800:]}")
+        return False
+    except Exception as exc:
+        emit_event("log", message=f"FFmpeg concat reencode raised, fallback to MoviePy: {exc}")
+        return False
+    finally:
+        try:
+            if concat_list.exists():
+                concat_list.unlink()
+        except Exception:
+            pass
 
 
 def _v56_concat_chunks_moviepy(chunks: List[Path], tmp_output: Path, fps: int, params: Dict[str, Any]) -> None:
@@ -2853,13 +3236,14 @@ def _v56_apply_final_bgm_mix(
     output_video: Path,
     audio_settings: Dict[str, Any],
     duration: Optional[float],
+    prepared_bgm_path: Optional[Path] = None,
 ) -> bool:
     music_mode = str(audio_settings.get("music_mode") or "off")
     music_path = audio_settings.get("music_path")
-    if music_mode != "manual" or not music_path:
+    if music_mode == "off" or not music_path:
         return False
 
-    bgm_path = Path(str(music_path))
+    bgm_path = prepared_bgm_path or Path(str(music_path))
     if not bgm_path.exists():
         emit_event("log", message=f"BGM 文件不存在，稳定模式已跳过背景音乐: {bgm_path}")
         return False
@@ -3229,6 +3613,8 @@ class V56StableRenderer:
 
         concat_ok = _v56_concat_chunks_ffmpeg(rendered_chunks, tmp_output, self.project_dir)
         if not concat_ok:
+            concat_ok = _v56_concat_chunks_ffmpeg_reencode(rendered_chunks, tmp_output, self.project_dir, self.fps, self.params)
+        if not concat_ok:
             _v56_concat_chunks_moviepy(rendered_chunks, tmp_output, self.fps, self.params)
 
         ok, reason, final_duration = _v56_validate_video(tmp_output)
@@ -3236,7 +3622,13 @@ class V56StableRenderer:
             raise RuntimeError(f"最终视频校验失败，不覆盖旧文件: {reason}")
 
         mixed_output = tmp_output.with_suffix(".audio.tmp.mp4")
-        if _v56_apply_final_bgm_mix(tmp_output, mixed_output, renderer.audio_settings, final_duration):
+        if _v56_apply_final_bgm_mix(
+            tmp_output,
+            mixed_output,
+            renderer.audio_settings,
+            final_duration,
+            prepared_bgm_path=renderer._prepare_music_path(),
+        ):
             try:
                 tmp_output.unlink()
             except Exception:
