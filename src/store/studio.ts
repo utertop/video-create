@@ -2,7 +2,9 @@ import { create } from "zustand";
 import {
   AspectRatio,
   EditStrategy,
+  MusicFitStrategy,
   MusicMode,
+  MusicPlaylistMode,
   PerformanceMode,
   Quality,
   RenderEngine,
@@ -33,6 +35,9 @@ export interface StudioState {
   renderEngine: RenderEngine;
   musicMode: MusicMode;
   musicPath: string | null;
+  musicPlaylistMode: MusicPlaylistMode;
+  musicPlaylistPaths: string[];
+  musicFitStrategy: MusicFitStrategy;
   bgmVolume: number;
   sourceAudioVolume: number;
   keepSourceAudio: boolean;
@@ -72,6 +77,9 @@ export const useStudio = create<StudioState>((set) => ({
   renderEngine: "auto",
   musicMode: "off",
   musicPath: null,
+  musicPlaylistMode: "single",
+  musicPlaylistPaths: [],
+  musicFitStrategy: "auto",
   bgmVolume: 0.28,
   sourceAudioVolume: 1.0,
   keepSourceAudio: true,

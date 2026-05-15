@@ -720,6 +720,179 @@ def select_auto_music_asset(assets: Iterable[Dict[str, Any]]) -> Optional[Dict[s
     return ranked[0][3]
 
 
+def select_auto_music_assets(assets: Iterable[Dict[str, Any]], target_duration: float = 0.0) -> List[Dict[str, Any]]:
+    ranked: List[Tuple[float, float, str, Dict[str, Any]]] = []
+    for asset in assets:
+        if not isinstance(asset, dict):
+            continue
+        status = asset.get("status")
+        if status == "error" or (isinstance(status, dict) and status.get("state") == "error"):
+            continue
+        score = auto_music_score(asset)
+        if score <= 0:
+            continue
+        ranked.append((score, audio_asset_duration_seconds(asset), str(asset.get("relative_path") or ""), asset))
+
+    if not ranked:
+        return []
+
+    ranked.sort(key=lambda item: (-item[0], -item[1], item[2]))
+    ordered = [item[3] for item in ranked]
+    if target_duration <= 0:
+        return ordered[:1]
+    if target_duration < 600:
+        return ordered[:1]
+
+    selected: List[Dict[str, Any]] = []
+    total_duration = 0.0
+    for asset in ordered:
+        selected.append(asset)
+        total_duration += audio_asset_duration_seconds(asset)
+        if len(selected) >= 4 or total_duration >= target_duration * 0.72:
+            break
+    return selected or ordered[:1]
+
+
+def build_music_bed_for_duration(
+    prepared_tracks: List[Path],
+    duration: float,
+    cache_root: Path,
+    fit_strategy: str = "auto",
+    fade_in: float = 0.0,
+    fade_out: float = 0.0,
+) -> Optional[Path]:
+    if not prepared_tracks:
+        return None
+
+    duration = max(0.1, float(duration or 0.0))
+    fit_strategy = str(fit_strategy or "auto").lower()
+    if fit_strategy not in {"auto", "loop", "trim", "intro_loop_outro", "once"}:
+        fit_strategy = "auto"
+
+    bucket = cache_root / "beds"
+    bucket.mkdir(parents=True, exist_ok=True)
+    key = json.dumps(
+        {
+            "tracks": [str(path.resolve()) for path in prepared_tracks if path.exists()],
+            "duration": round(duration, 3),
+            "fit_strategy": fit_strategy,
+            "fade_in": round(float(fade_in or 0.0), 3),
+            "fade_out": round(float(fade_out or 0.0), 3),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    cache_path = bucket / f"{safe_id(key)}.m4a"
+    if cache_path.exists() and cache_path.stat().st_size > 1024:
+        emit_event("log", message=f"Music bed cache hit: {cache_path.name}")
+        return cache_path
+
+    tmp_path = cache_path.with_suffix(".tmp.m4a")
+    clips: List[Any] = []
+    try:
+        if not HAS_MOVIEPY:
+            raise RuntimeError("MoviePy is required for music bed generation")
+
+        source_clips = [AudioFileClip(str(path)) for path in prepared_tracks if path.exists()]
+        clips.extend(source_clips)
+        if not source_clips:
+            return None
+
+        if len(source_clips) > 1:
+            assembled: List[Any] = []
+            remaining = duration
+            index = 0
+            while remaining > 0 and source_clips:
+                source = source_clips[index % len(source_clips)]
+                source_duration = float(getattr(source, "duration", 0.0) or 0.0)
+                take = min(max(source_duration, 0.1), remaining)
+                assembled.append(source.subclip(0, take))
+                remaining -= take
+                index += 1
+            music_clip = concatenate_audioclips(assembled).set_duration(duration)
+        else:
+            source = source_clips[0]
+            source_duration = float(getattr(source, "duration", 0.0) or 0.0)
+            effective_strategy = fit_strategy
+            if effective_strategy == "auto":
+                if source_duration <= 0:
+                    effective_strategy = "once"
+                elif duration <= source_duration * 1.2:
+                    effective_strategy = "trim"
+                elif duration <= source_duration * 3.0:
+                    effective_strategy = "intro_loop_outro"
+                else:
+                    effective_strategy = "loop"
+
+            if source_duration <= 0:
+                music_clip = source.set_duration(duration)
+            elif effective_strategy in {"once", "trim"}:
+                music_clip = source.subclip(0, min(duration, source_duration)).set_duration(min(duration, source_duration))
+            elif effective_strategy == "intro_loop_outro" and source_duration > 18 and duration > source_duration:
+                intro = min(max(6.0, source_duration * 0.18), 18.0)
+                outro = min(max(8.0, source_duration * 0.18), 20.0)
+                middle_start = min(intro, max(0.0, source_duration - 10.0))
+                middle_end = max(middle_start + 4.0, source_duration - outro)
+                if middle_end <= middle_start + 1.0:
+                    music_clip = moviepy_audio_loop(source, duration=duration) if moviepy_audio_loop is not None else concatenate_audioclips([source] * int(math.ceil(duration / source_duration))).subclip(0, duration)
+                else:
+                    intro_clip = source.subclip(0, min(intro, duration))
+                    outro_len = min(outro, max(0.0, duration - float(getattr(intro_clip, "duration", 0.0) or 0.0)))
+                    body_target = max(0.0, duration - float(getattr(intro_clip, "duration", 0.0) or 0.0) - outro_len)
+                    middle_clip = source.subclip(middle_start, middle_end)
+                    if body_target > 0 and moviepy_audio_loop is not None:
+                        body_clip = moviepy_audio_loop(middle_clip, duration=body_target)
+                    elif body_target > 0:
+                        body_segments: List[Any] = []
+                        remaining = body_target
+                        middle_duration = float(getattr(middle_clip, "duration", 0.0) or 0.0)
+                        while remaining > 0 and middle_duration > 0:
+                            take = min(middle_duration, remaining)
+                            body_segments.append(middle_clip.subclip(0, take))
+                            remaining -= take
+                        body_clip = concatenate_audioclips(body_segments).set_duration(body_target) if body_segments else None
+                    else:
+                        body_clip = None
+                    outro_clip = source.subclip(max(0.0, source_duration - outro_len), source_duration) if outro_len > 0 else None
+                    parts = [clip for clip in [intro_clip, body_clip, outro_clip] if clip is not None]
+                    music_clip = concatenate_audioclips(parts).set_duration(duration)
+            else:
+                if moviepy_audio_loop is not None:
+                    music_clip = moviepy_audio_loop(source, duration=duration)
+                else:
+                    loops = max(1, int(math.ceil(duration / source_duration)))
+                    music_clip = concatenate_audioclips([source] * loops).subclip(0, duration)
+
+        actual_duration = min(duration, float(getattr(music_clip, "duration", duration) or duration))
+        if fade_in > 0:
+            music_clip = music_clip.audio_fadein(min(float(fade_in), actual_duration / 2.0))
+        if fade_out > 0:
+            music_clip = music_clip.audio_fadeout(min(float(fade_out), actual_duration / 2.0))
+
+        music_clip.write_audiofile(
+            str(tmp_path),
+            fps=48000,
+            codec="aac",
+            bitrate="160k",
+            ffmpeg_params=["-movflags", "+faststart"],
+            verbose=False,
+            logger=None,
+        )
+        if not tmp_path.exists() or tmp_path.stat().st_size <= 1024:
+            raise RuntimeError("music bed output is empty")
+        os.replace(str(tmp_path), str(cache_path))
+        emit_event("log", message=f"Music bed cache created: {cache_path.name}")
+        return cache_path
+    finally:
+        for clip in clips:
+            close_clip(clip)
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except Exception:
+            pass
+
+
 def read_json(path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
@@ -1991,6 +2164,8 @@ class Renderer:
         self.prefer_ffmpeg_segments = self._should_prefer_ffmpeg_segments(settings)
         self.audio_settings = self._resolve_audio_settings(settings)
         self._prepared_music_path: Optional[Path] = None
+        self._prepared_music_paths: Optional[List[Path]] = None
+        self._prepared_music_beds: Dict[str, Optional[Path]] = {}
         self._prepared_source_audio_paths: Dict[str, Optional[Path]] = {}
 
     def _init_render_cache_dir(self) -> Path:
@@ -2017,25 +2192,58 @@ class Renderer:
         return bucket / f"{key}{suffix}"
 
     def _prepare_music_path(self) -> Optional[Path]:
-        if self._prepared_music_path is not None and self._prepared_music_path.exists():
-            return self._prepared_music_path
+        paths = self._prepare_music_paths()
+        return paths[0] if paths else None
+
+    def _prepare_music_paths(self) -> List[Path]:
+        if self._prepared_music_paths:
+            return [path for path in self._prepared_music_paths if path.exists()]
+
+        raw_paths: List[str] = []
+        playlist_paths = self.audio_settings.get("music_playlist_paths")
+        if isinstance(playlist_paths, list):
+            raw_paths.extend(str(item) for item in playlist_paths if item)
 
         music_path = self.audio_settings.get("music_path")
-        if not music_path:
+        if music_path and str(music_path) not in raw_paths:
+            raw_paths.insert(0, str(music_path))
+
+        prepared: List[Path] = []
+        for raw in raw_paths:
+            source = Path(str(raw))
+            if not source.exists():
+                continue
+            try:
+                prepared.append(prepare_cached_audio_for_mix(source, self.audio_cache_dir))
+            except Exception as exc:
+                emit_event("log", message=f"Audio cache fallback to source: {exc}")
+                prepared.append(source)
+        self._prepared_music_paths = prepared
+        return [path for path in prepared if path.exists()]
+
+    def _prepare_music_bed(self, duration: float) -> Optional[Path]:
+        duration = max(0.1, float(duration or 0.0))
+        cache_key = f"{duration:.3f}|{json.dumps({k: self.audio_settings.get(k) for k in ('music_fit_strategy', 'music_playlist_mode', 'music_playlist_paths', 'music_path', 'fade_in_seconds', 'fade_out_seconds')}, ensure_ascii=False, sort_keys=True)}"
+        if cache_key in self._prepared_music_beds:
+            prepared = self._prepared_music_beds[cache_key]
+            if prepared is None or prepared.exists():
+                return prepared
+
+        prepared_tracks = self._prepare_music_paths()
+        if not prepared_tracks:
+            self._prepared_music_beds[cache_key] = None
             return None
 
-        source = Path(str(music_path))
-        if not source.exists():
-            return None
-
-        try:
-            # Performance mode may choose a cheaper mix path, but we still keep
-            # the audible BGM/source-audio intent by normalizing into cache first.
-            self._prepared_music_path = prepare_cached_audio_for_mix(source, self.audio_cache_dir)
-        except Exception as exc:
-            emit_event("log", message=f"Audio cache fallback to source: {exc}")
-            self._prepared_music_path = source
-        return self._prepared_music_path
+        music_bed = build_music_bed_for_duration(
+            prepared_tracks,
+            duration,
+            self.audio_cache_dir,
+            fit_strategy=str(self.audio_settings.get("music_fit_strategy") or "auto"),
+            fade_in=float(self.audio_settings.get("fade_in_seconds", 0.0) or 0.0),
+            fade_out=float(self.audio_settings.get("fade_out_seconds", 0.0) or 0.0),
+        )
+        self._prepared_music_beds[cache_key] = music_bed
+        return music_bed
 
     def _prepare_source_audio_path(self, source: Path) -> Optional[Path]:
         cache_key = str(source.resolve()) if source.exists() else str(source)
@@ -2084,13 +2292,41 @@ class Renderer:
         music_mode = str(audio.get("music_mode") or "off").lower()
         if music_mode not in {"off", "auto", "manual"}:
             music_mode = "off"
-        if music_mode == "auto" and not audio.get("music_path") and isinstance(base_audio, dict):
-            audio["music_path"] = base_audio.get("music_path")
-            audio["music_source"] = base_audio.get("music_source") or "library"
+        playlist_mode = str(audio.get("music_playlist_mode") or "single").lower()
+        if playlist_mode not in {"single", "auto_playlist", "manual_playlist"}:
+            playlist_mode = "single"
+        fit_strategy = str(audio.get("music_fit_strategy") or "auto").lower()
+        if fit_strategy not in {"auto", "loop", "trim", "intro_loop_outro", "once"}:
+            fit_strategy = "auto"
+        playlist_paths = audio.get("music_playlist_paths")
+        if not isinstance(playlist_paths, list):
+            playlist_paths = []
+        playlist_paths = [str(item) for item in playlist_paths if item]
+
+        estimated_video_duration = 0.0
+        try:
+            estimated_video_duration = float(audio.get("estimated_video_duration") or self.plan.get("total_duration") or 0.0)
+        except Exception:
+            estimated_video_duration = 0.0
+
+        if music_mode == "auto":
+            if not playlist_paths and isinstance(base_audio, dict):
+                base_playlist = base_audio.get("music_playlist_paths")
+                if isinstance(base_playlist, list):
+                    playlist_paths = [str(item) for item in base_playlist if item]
+            if playlist_paths and not audio.get("music_path"):
+                audio["music_path"] = playlist_paths[0]
+                audio["music_source"] = "library"
+            elif not audio.get("music_path") and isinstance(base_audio, dict):
+                audio["music_path"] = base_audio.get("music_path")
+                audio["music_source"] = base_audio.get("music_source") or "library"
 
         return {
             "music_mode": music_mode,
             "music_path": audio.get("music_path"),
+            "music_playlist_mode": playlist_mode,
+            "music_playlist_paths": playlist_paths,
+            "music_fit_strategy": fit_strategy,
             "music_source": audio.get("music_source") or ("manual" if music_mode == "manual" else "library" if music_mode == "auto" and audio.get("music_path") else "none"),
             "bgm_volume": num("bgm_volume", 0.28, 0.0, 1.0),
             "source_audio_volume": num("source_audio_volume", 1.0, 0.0, 1.0),
@@ -2272,7 +2508,7 @@ class Renderer:
                 return video.set_audio(source_audio)
             return video
 
-        path = self._prepare_music_path() or Path(str(music_path))
+        path = self._prepare_music_bed(duration) or self._prepare_music_path() or Path(str(music_path))
         if not path.exists():
             emit_event("log", message=f"BGM 文件不存在，已跳过背景音乐: {path}")
             return video.set_audio(source_audio) if source_audio is not getattr(video, "audio", None) else video
@@ -2281,7 +2517,9 @@ class Renderer:
         try:
             emit_event("phase", phase="audio", message="正在混合背景音乐与视频原声", percent=92)
             bgm = AudioFileClip(str(path))
-            bgm = self._loop_audio_to_duration(bgm, duration).set_duration(duration)
+            if float(getattr(bgm, "duration", 0.0) or 0.0) < duration:
+                bgm = self._loop_audio_to_duration(bgm, duration)
+            bgm = bgm.set_duration(min(duration, float(getattr(bgm, "duration", duration) or duration)))
 
             bgm_volume = float(settings.get("bgm_volume", 0.28))
             if settings.get("auto_ducking", True) and source_audio is not None:
@@ -3237,6 +3475,7 @@ def _v56_apply_final_bgm_mix(
     audio_settings: Dict[str, Any],
     duration: Optional[float],
     prepared_bgm_path: Optional[Path] = None,
+    prepared_bgm_is_bed: bool = False,
 ) -> bool:
     music_mode = str(audio_settings.get("music_mode") or "off")
     music_path = audio_settings.get("music_path")
@@ -3290,8 +3529,10 @@ def _v56_apply_final_bgm_mix(
             "-y",
             "-i",
             str(input_video),
-            "-stream_loop",
-            "-1",
+        ]
+        if not prepared_bgm_is_bed:
+            cmd.extend(["-stream_loop", "-1"])
+        cmd.extend([
             "-i",
             str(bgm_path),
             "-filter_complex",
@@ -3310,7 +3551,7 @@ def _v56_apply_final_bgm_mix(
             "-movflags",
             "+faststart",
             str(output_video),
-        ]
+        ])
         emit_event("phase", phase="audio", message="稳定模式：使用 FFmpeg 流式混合背景音乐", percent=97)
         completed = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
         if completed.returncode == 0 and output_video.exists() and output_video.stat().st_size > 1024:
@@ -3627,7 +3868,8 @@ class V56StableRenderer:
             mixed_output,
             renderer.audio_settings,
             final_duration,
-            prepared_bgm_path=renderer._prepare_music_path(),
+            prepared_bgm_path=renderer._prepare_music_bed(final_duration) or renderer._prepare_music_path(),
+            prepared_bgm_is_bed=True,
         ):
             try:
                 tmp_output.unlink()

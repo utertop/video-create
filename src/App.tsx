@@ -50,6 +50,8 @@ import {
   V5RenderSegment,
   V5Asset,
   V5AudioSettings,
+  MusicFitStrategy,
+  MusicPlaylistMode,
   V5ChapterBackgroundMode,
   RenderV5Params,
   buildV5RenderCommandPreview
@@ -219,7 +221,7 @@ export function App() {
     title_background_path: state.titleBackgroundPath,
     end_background_path: state.endBackgroundPath,
     chapter_background_mode: state.chapterBackgroundMode,
-    audio: buildAudioSettings(state, state.v5Library),
+    audio: buildAudioSettings(state, state.v5Library, state.v5RenderPlan),
   }), [
     state.title,
     state.titleSubtitle,
@@ -236,6 +238,9 @@ export function App() {
     state.v5Library,
     state.musicMode,
     state.musicPath,
+    state.musicPlaylistMode,
+    state.musicPlaylistPaths,
+    state.musicFitStrategy,
     state.bgmVolume,
     state.sourceAudioVolume,
     state.keepSourceAudio,
@@ -343,11 +348,42 @@ export function App() {
       });
       const path = Array.isArray(selected) ? selected[0] : selected;
       if (typeof path === "string" && path) {
-        state.patch({ musicMode: "manual", musicPath: path });
+        state.patch({
+          musicMode: "manual",
+          musicPath: path,
+          musicPlaylistMode: "single",
+          musicPlaylistPaths: [],
+        });
         setToast(`已选择背景音乐：${shortPathName(path)}`);
       }
     } catch (error) {
       setToast(`选择音乐失败：${error}`);
+    }
+  }
+
+  async function onPickMusicFiles() {
+    try {
+      const selected = await open({
+        multiple: true,
+        directory: false,
+        filters: [
+          { name: "Audio", extensions: ["mp3", "wav", "m4a", "aac", "flac", "ogg"] },
+        ],
+      });
+      const paths = Array.isArray(selected)
+        ? selected.filter((item): item is string => typeof item === "string" && item.length > 0)
+        : [];
+      if (paths.length > 0) {
+        state.patch({
+          musicMode: "manual",
+          musicPath: paths[0],
+          musicPlaylistMode: "manual_playlist",
+          musicPlaylistPaths: paths,
+        });
+        setToast(`已添加 ${paths.length} 首背景音乐，将按顺序接力使用。`);
+      }
+    } catch (error) {
+      setToast(`选择多首音乐失败：${error}`);
     }
   }
 
@@ -527,7 +563,7 @@ export function App() {
         render_mode: renderModeForPerformance(state.performanceMode, state.editStrategy),
         chunk_seconds: chunkSecondsForPerformance(state.performanceMode),
         chapter_background_mode: state.chapterBackgroundMode,
-        audio: buildAudioSettings(state, state.v5Library),
+        audio: buildAudioSettings(state, state.v5Library, state.v5RenderPlan),
         scenic_spot_title_mode: "overlay",
       });
       await saveBlueprintV5(bpPath, JSON.stringify(blueprintForCompile, null, 2));
@@ -696,7 +732,7 @@ export function App() {
                 recommendation={performanceRecommendation}
                 onChange={(performanceMode) => state.patch({ performanceMode })}
               />
-              <MusicAudioPanel state={state} onPickMusicFile={onPickMusicFile} />
+              <MusicAudioPanel state={state} onPickMusicFile={onPickMusicFile} onPickMusicFiles={onPickMusicFiles} />
             </div>
 
             <div className="option-row">
@@ -999,22 +1035,19 @@ function getSelectedBackgroundPath(target: BackgroundPickerTarget, state: Studio
   return section?.background?.custom_path || null;
 }
 
-function buildAudioSettings(state: StudioState, library: V5MediaLibrary | null): V5AudioSettings {
-  const autoMusicAsset = selectAutoMusicAsset(library);
-  const resolvedMusicPath =
-    state.musicMode === "manual"
-      ? state.musicPath
-      : state.musicMode === "auto"
-        ? autoMusicAsset?.absolute_path || null
-        : null;
-
+function buildAudioSettings(state: StudioState, library: V5MediaLibrary | null, plan: V5RenderPlan | null): V5AudioSettings {
+  const resolved = resolveMusicSelection(state, library, plan);
   return {
     music_mode: state.musicMode,
-    music_path: resolvedMusicPath,
+    music_path: resolved.primaryPath,
+    music_playlist_mode: state.musicPlaylistMode,
+    music_playlist_paths: resolved.paths,
+    music_fit_strategy: state.musicFitStrategy,
+    estimated_video_duration: Number(plan?.total_duration || 0),
     music_source:
-      state.musicMode === "manual" && state.musicPath
+      state.musicMode === "manual" && resolved.paths.length > 0
         ? "manual"
-        : state.musicMode === "auto" && resolvedMusicPath
+        : state.musicMode === "auto" && resolved.paths.length > 0
           ? "library"
           : "none",
     bgm_volume: clampNumber(state.bgmVolume, 0, 1, 0.28),
@@ -1027,33 +1060,45 @@ function buildAudioSettings(state: StudioState, library: V5MediaLibrary | null):
   };
 }
 
-function MusicAudioPanel({ state, onPickMusicFile }: { state: StudioState; onPickMusicFile: () => void }) {
-  const autoMusicAsset = selectAutoMusicAsset(state.v5Library);
-  const resolvedMusicPath =
-    state.musicMode === "manual"
-      ? state.musicPath
-      : state.musicMode === "auto"
-        ? autoMusicAsset?.absolute_path || null
-        : null;
-  const musicEnabled = state.musicMode !== "off" && Boolean(resolvedMusicPath);
+function MusicAudioPanel({
+  state,
+  onPickMusicFile,
+  onPickMusicFiles,
+}: {
+  state: StudioState;
+  onPickMusicFile: () => void;
+  onPickMusicFiles: () => void;
+}) {
+  const resolved = resolveMusicSelection(state, state.v5Library, state.v5RenderPlan);
+  const resolvedMusicPath = resolved.primaryPath;
+  const musicEnabled = state.musicMode !== "off" && resolved.paths.length > 0;
   const bgmPercent = Math.round(clampNumber(state.bgmVolume, 0, 1, 0.28) * 100);
   const sourcePercent = Math.round(clampNumber(state.sourceAudioVolume, 0, 1, 1) * 100);
+  const summary = buildMusicPlanSummary(state, resolved, state.v5RenderPlan);
   const statusText =
     state.musicMode === "auto"
-      ? resolvedMusicPath
-        ? "自动匹配 BGM"
+      ? resolved.paths.length > 0
+        ? state.musicPlaylistMode === "auto_playlist"
+          ? `自动多曲 ${resolved.paths.length} 首`
+          : "自动匹配 BGM"
         : "未找到可用音频"
       : musicEnabled
-        ? "已启用 BGM"
+        ? state.musicPlaylistMode === "manual_playlist"
+          ? `歌单 ${resolved.paths.length} 首`
+          : "已启用 BGM"
         : "未添加 BGM";
   const musicHint =
     state.musicMode === "auto"
-      ? resolvedMusicPath
-        ? `自动模式将使用：${shortPathName(resolvedMusicPath)}`
+      ? resolved.paths.length > 0
+        ? state.musicPlaylistMode === "auto_playlist"
+          ? `自动模式将按顺序使用 ${resolved.paths.length} 首候选：${resolved.labels.slice(0, 3).join(" / ")}${resolved.labels.length > 3 ? " ..." : ""}`
+          : `自动模式将使用：${shortPathName(resolvedMusicPath || "")}`
         : "当前素材目录里还没有可用的 BGM 候选，至少需要一首 15 秒以上的音频文件。"
-      : resolvedMusicPath
-        ? shortPathName(resolvedMusicPath)
-        : "选择一首本地音乐后，低清小样和最终视频会听到同一套混音策略。";
+      : resolved.paths.length > 0
+        ? state.musicPlaylistMode === "manual_playlist"
+          ? `当前歌单：${resolved.labels.slice(0, 3).join(" / ")}${resolved.labels.length > 3 ? ` 等 ${resolved.labels.length} 首` : ""}`
+          : shortPathName(resolvedMusicPath || "")
+        : "选择本地音乐后，低清小样和最终视频会听到同一套混音与时长适配策略。";
 
   return (
     <div className={`music-audio-card${musicEnabled ? " has-music" : ""}`}>
@@ -1062,7 +1107,7 @@ function MusicAudioPanel({ state, onPickMusicFile }: { state: StudioState; onPic
           <Music size={18} />
           <div>
             <strong>音乐与原声</strong>
-            <span>BGM、视频原声、淡入淡出先在这里统一控制。</span>
+            <span>BGM、视频原声、淡入淡出与长视频适配都在这里统一控制。</span>
           </div>
         </div>
         <span className="music-status-badge">{statusText}</span>
@@ -1092,15 +1137,92 @@ function MusicAudioPanel({ state, onPickMusicFile }: { state: StudioState; onPic
         </button>
       </div>
 
+      {state.musicMode !== "off" && (
+        <div className="music-submode-row">
+          <div className="music-submode-group">
+            <span>配乐方式</span>
+            <div className="music-submode-buttons">
+              <button
+                className={state.musicPlaylistMode === "single" ? "active" : ""}
+                type="button"
+                onClick={() => state.patch({ musicPlaylistMode: "single", musicPlaylistPaths: state.musicPlaylistPaths })}
+              >
+                单曲
+              </button>
+              <button
+                className={state.musicPlaylistMode === "auto_playlist" ? "active" : ""}
+                disabled={state.musicMode !== "auto"}
+                type="button"
+                onClick={() => state.patch({ musicMode: "auto", musicPlaylistMode: "auto_playlist" })}
+              >
+                自动多曲
+              </button>
+              <button
+                className={state.musicPlaylistMode === "manual_playlist" ? "active" : ""}
+                type="button"
+                onClick={onPickMusicFiles}
+              >
+                手动歌单
+              </button>
+            </div>
+          </div>
+          <div className="music-submode-group">
+            <span>时长适配</span>
+            <div className="music-fit-select-wrap">
+              <select
+                disabled={!musicEnabled}
+                value={state.musicFitStrategy}
+                onChange={(event) => state.patch({ musicFitStrategy: event.target.value as MusicFitStrategy })}
+              >
+                <option value="auto">自动适配</option>
+                <option value="intro_loop_outro">首尾保留，中间循环</option>
+                <option value="loop">循环铺满</option>
+                <option value="trim">智能裁切</option>
+                <option value="once">仅播放一次</option>
+              </select>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="music-file-row">
         <Volume2 size={16} />
         <span title={resolvedMusicPath || ""}>{musicHint}</span>
-        {resolvedMusicPath && (
-          <button type="button" onClick={() => state.patch({ musicMode: "off" })}>
+        {state.musicPlaylistMode === "manual_playlist" && state.musicMode !== "off" ? (
+          <button type="button" onClick={onPickMusicFiles}>管理歌单</button>
+        ) : state.musicMode === "manual" ? (
+          <button type="button" onClick={onPickMusicFile}>更换</button>
+        ) : null}
+        {resolved.paths.length > 0 && (
+          <button
+            type="button"
+            onClick={() => state.patch({ musicMode: "off", musicPlaylistPaths: [], musicPlaylistMode: "single" })}
+          >
             移除
           </button>
         )}
       </div>
+
+      {state.musicMode !== "off" && (
+        <div className="music-plan-grid">
+          <div>
+            <strong>预计视频</strong>
+            <span>{summary.videoDurationLabel}</span>
+          </div>
+          <div>
+            <strong>音乐总长</strong>
+            <span>{summary.musicDurationLabel}</span>
+          </div>
+          <div>
+            <strong>当前策略</strong>
+            <span>{summary.strategyLabel}</span>
+          </div>
+          <div>
+            <strong>预计执行</strong>
+            <span>{summary.executionLabel}</span>
+          </div>
+        </div>
+      )}
 
       <div className="music-slider-grid">
         <label>
@@ -1173,9 +1295,47 @@ function MusicAudioPanel({ state, onPickMusicFile }: { state: StudioState; onPic
   );
 }
 
+function resolveMusicSelection(state: StudioState, library: V5MediaLibrary | null, plan: V5RenderPlan | null) {
+  const videoDuration = Number(plan?.total_duration || 0);
+  const autoMusicAssets = selectAutoMusicAssets(library, videoDuration);
+  const autoMusicAsset = autoMusicAssets[0] || null;
+
+  if (state.musicMode === "manual") {
+    if (state.musicPlaylistMode === "manual_playlist") {
+      const paths = state.musicPlaylistPaths.filter(Boolean);
+      return {
+        primaryPath: paths[0] || state.musicPath || null,
+        paths,
+        labels: paths.map((item) => shortPathName(item)),
+      };
+    }
+    const path = state.musicPath || null;
+    return {
+      primaryPath: path,
+      paths: path ? [path] : [],
+      labels: path ? [shortPathName(path)] : [],
+    };
+  }
+
+  if (state.musicMode === "auto") {
+    const assets = state.musicPlaylistMode === "auto_playlist" ? autoMusicAssets : autoMusicAsset ? [autoMusicAsset] : [];
+    return {
+      primaryPath: assets[0]?.absolute_path || null,
+      paths: assets.map((asset) => asset.absolute_path),
+      labels: assets.map((asset) => asset.file.name || shortPathName(asset.absolute_path)),
+    };
+  }
+
+  return { primaryPath: null, paths: [], labels: [] };
+}
+
 function selectAutoMusicAsset(library: V5MediaLibrary | null): V5Asset | null {
+  return selectAutoMusicAssets(library, 0)[0] || null;
+}
+
+function selectAutoMusicAssets(library: V5MediaLibrary | null, targetDuration: number): V5Asset[] {
   const audioAssets = (library?.assets || []).filter((asset) => asset.type === "audio" && assetStatusState(asset) !== "error");
-  if (audioAssets.length === 0) return null;
+  if (audioAssets.length === 0) return [];
 
   const ranked = audioAssets
     .map((asset) => ({ asset, score: autoMusicScore(asset) }))
@@ -1186,22 +1346,34 @@ function selectAutoMusicAsset(library: V5MediaLibrary | null): V5Asset | null {
       const durationB = Number(b.asset.media.duration_seconds || 0);
       if (durationB !== durationA) return durationB - durationA;
       return a.asset.relative_path.localeCompare(b.asset.relative_path);
-    });
+    })
+    .map((entry) => entry.asset);
 
-  return ranked[0]?.asset || null;
+  if (targetDuration <= 0) return ranked.slice(0, 1);
+  if (targetDuration < 600) return ranked.slice(0, 1);
+
+  const selected: V5Asset[] = [];
+  let totalDuration = 0;
+  for (const asset of ranked) {
+    selected.push(asset);
+    totalDuration += Number(asset.media.duration_seconds || asset.media.duration || 0);
+    if (selected.length >= 4 || totalDuration >= targetDuration * 0.72) break;
+  }
+  return selected.length > 0 ? selected : ranked.slice(0, 1);
 }
 
 function autoMusicScore(asset: V5Asset): number {
   const duration = Number(asset.media.duration_seconds || asset.media.duration || 0);
   if (duration < 15) return 0;
 
-  const haystack = `${asset.file.name} ${asset.relative_path}`.toLowerCase();
+  const rawHaystack = `${asset.file.name} ${asset.relative_path}`;
+  const haystack = rawHaystack.toLowerCase();
   const ext = asset.file.extension.toLowerCase();
   let score = duration >= 45 ? 12 : 6;
 
-  if (/(^|[^a-z])(bgm|music|soundtrack|instrumental|score|theme)([^a-z]|$)/.test(haystack)) score += 40;
-  if (/配乐|音乐|伴奏|纯音乐|背景音乐/.test(`${asset.file.name} ${asset.relative_path}`)) score += 40;
-  if (/effect|sfx|音效|提示音|转场音/.test(`${asset.file.name} ${asset.relative_path}`)) score -= 25;
+  if (/(^|[^a-z])(bgm|music|soundtrack|instrumental|score|theme|ambient|travel)([^a-z]|$)/.test(haystack)) score += 40;
+  if (/配乐|音乐|伴奏|纯音乐|背景音乐|旅拍|轻音乐/.test(rawHaystack)) score += 40;
+  if (/effect|sfx|hit|whoosh|click|音效|提示音|转场音/.test(rawHaystack)) score -= 25;
   if (duration >= 90) score += 18;
   else if (duration >= 45) score += 10;
   else if (duration >= 25) score += 4;
@@ -1216,6 +1388,53 @@ function autoMusicScore(asset: V5Asset): number {
   }[ext] || 0;
 
   return score;
+}
+
+function buildMusicPlanSummary(state: StudioState, resolved: { paths: string[] }, plan: V5RenderPlan | null) {
+  const videoDuration = Number(plan?.total_duration || 0);
+  const assetMap = new Map((state.v5Library?.assets || []).map((asset) => [asset.absolute_path, asset]));
+  const musicDuration = resolved.paths.reduce((sum, item) => {
+    const asset = assetMap.get(item);
+    return sum + Number(asset?.media.duration_seconds || asset?.media.duration || 0);
+  }, 0);
+  const loops = musicDuration > 0 && videoDuration > musicDuration ? Math.ceil(videoDuration / musicDuration) : 1;
+
+  const fitLabel: Record<MusicFitStrategy, string> = {
+    auto: "自动适配",
+    loop: "循环铺满",
+    trim: "智能裁切",
+    intro_loop_outro: "首尾保留，中间循环",
+    once: "仅播放一次",
+  };
+  const playlistLabel: Record<MusicPlaylistMode, string> = {
+    single: "单曲",
+    auto_playlist: "自动多曲",
+    manual_playlist: "手动歌单",
+  };
+
+  let executionLabel = playlistLabel[state.musicPlaylistMode];
+  if (state.musicPlaylistMode === "single") {
+    executionLabel = loops > 1 ? `预计循环 ${loops} 次` : "单曲完整使用";
+  } else if (resolved.paths.length > 0) {
+    executionLabel = `${playlistLabel[state.musicPlaylistMode]} ${resolved.paths.length} 首接力`;
+  }
+
+  return {
+    videoDurationLabel: formatDurationLabel(videoDuration),
+    musicDurationLabel: musicDuration > 0 ? formatDurationLabel(musicDuration) : "待选择",
+    strategyLabel: fitLabel[state.musicFitStrategy],
+    executionLabel,
+  };
+}
+
+function formatDurationLabel(duration: number): string {
+  if (!Number.isFinite(duration) || duration <= 0) return "待生成";
+  const totalSeconds = Math.max(0, Math.round(duration));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
 }
 
 function assetStatusState(asset: V5Asset): string {

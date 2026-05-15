@@ -8,6 +8,8 @@ export type RenderEngine = "auto" | "ffmpeg_concat" | "moviepy_crossfade";
 // not silently remove audible BGM, source audio, or overall emotional intent.
 export type PerformanceMode = "stable" | "balanced" | "quality";
 export type MusicMode = "off" | "auto" | "manual";
+export type MusicFitStrategy = "auto" | "loop" | "trim" | "intro_loop_outro" | "once";
+export type MusicPlaylistMode = "single" | "auto_playlist" | "manual_playlist";
 export type EditStrategy =
   | "smart_director"
   | "fast_assembly"
@@ -309,6 +311,10 @@ export interface V5AudioSettings {
   music_mode: MusicMode;
   music_path?: string | null;
   music_source?: "none" | "library" | "manual" | string;
+  music_fit_strategy?: MusicFitStrategy | string;
+  music_playlist_mode?: MusicPlaylistMode | string;
+  music_playlist_paths?: string[] | null;
+  estimated_video_duration?: number | null;
   bgm_volume: number;
   source_audio_volume: number;
   keep_source_audio: boolean;

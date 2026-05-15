@@ -831,6 +831,71 @@ label {
   gap: 8px;
 }
 
+.music-submode-row,
+.music-plan-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.music-submode-group,
+.music-plan-grid > div {
+  padding: 10px;
+  background: rgb(255 255 255 / 60%);
+  border: 1px solid rgb(207 219 210 / 72%);
+  border-radius: 12px;
+}
+
+.music-submode-group > span,
+.music-plan-grid strong {
+  display: block;
+  margin-bottom: 8px;
+  color: #476558;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.music-plan-grid span {
+  color: #17362b;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.music-submode-buttons {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.music-submode-buttons button,
+.music-fit-select-wrap select {
+  min-height: 36px;
+  width: 100%;
+  color: #185b43;
+  font-size: 12px;
+  font-weight: 900;
+  background: rgb(255 255 255 / 76%);
+  border: 1px solid #c8dbcf;
+  border-radius: 10px;
+}
+
+.music-submode-buttons button.active {
+  color: #103c2d;
+  background: #f4fff1;
+  border-color: #23845f;
+  box-shadow: 0 0 0 3px rgb(35 132 95 / 12%);
+}
+
+.music-submode-buttons button:disabled,
+.music-fit-select-wrap select:disabled {
+  color: #8a9a92;
+  background: rgb(255 255 255 / 42%);
+}
+
+.music-fit-select-wrap select {
+  padding: 0 10px;
+}
+
 .music-mode-buttons button,
 .music-file-row button {
   min-height: 36px;
