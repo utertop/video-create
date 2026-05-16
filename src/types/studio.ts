@@ -20,6 +20,37 @@ export interface VideoEvent {
   error?: string;
   chapter?: string;
   mtime?: number;
+  eligible?: number;
+  hit?: number;
+  created?: number;
+  fallback?: number;
+  overlay_eligible?: number;
+  overlay_hit?: number;
+  overlay_created?: number;
+  saved_live_composes?: number;
+  saved_render_seconds?: number;
+  saved_live_fits?: number;
+}
+
+export interface PhotoSegmentCacheStats {
+  eligible: number;
+  hit: number;
+  created: number;
+  fallback: number;
+  overlay_eligible: number;
+  overlay_hit: number;
+  overlay_created: number;
+  saved_live_composes: number;
+  saved_render_seconds: number;
+}
+
+export interface VideoSegmentCacheStats {
+  eligible: number;
+  hit: number;
+  created: number;
+  fallback: number;
+  saved_live_fits: number;
+  saved_render_seconds: number;
 }
 
 export type BackgroundPickerTarget =

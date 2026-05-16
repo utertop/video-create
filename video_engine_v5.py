@@ -1015,6 +1015,9 @@ class RenderSegment:
     title_style: Optional[Dict[str, Any]] = None
     keep_audio: bool = True
     cache_key: Optional[str] = None
+    render_route: Optional[str] = None
+    render_route_reason: Optional[str] = None
+    render_route_tags: Optional[List[str]] = None
 
 
 # =========================
@@ -1528,6 +1531,133 @@ class Compiler:
 
         return resolved
 
+    def _compile_video_overlay_safe(self, seg: RenderSegment) -> bool:
+        text = seg.overlay_text
+        if not text:
+            return True
+        subtitle = seg.overlay_subtitle
+        overlay_duration = float(seg.overlay_duration or 1.8)
+        style = dict(seg.overlay_title_style or {})
+        motion = str(style.get("motion") or "fade_slide_up")
+        position = str(style.get("position") or "lower_left")
+        if motion not in {
+            "fade_slide_up",
+            "editorial_fade",
+            "static_hold",
+            "lower_third_slide",
+            "cinematic_reveal",
+            "postcard_drift",
+        }:
+            return False
+        if position not in {"lower_left", "lower_center", "center"}:
+            return False
+        if len(str(text)) > 42 or len(str(subtitle or "")) > 64:
+            return False
+        return overlay_duration <= 3.2
+
+    def _compile_video_motion_fit_candidate(self, seg: RenderSegment) -> bool:
+        motion_type = str((seg.motion_config or {}).get("type") or "none")
+        return motion_type in {"gentle_push", "slow_push"}
+
+    def _compile_video_fitted_candidate(self, seg: RenderSegment) -> bool:
+        if seg.type != "video":
+            return False
+        transition = seg.transition_config or {}
+        transition_type = str(transition.get("type") or seg.transition or "none")
+        transition_duration = float(transition.get("duration") or 0.0)
+        if transition_type not in {
+            "none",
+            "cut",
+            "soft_crossfade",
+            "fade_through_dark",
+            "fade_through_white",
+            "quick_zoom",
+            "flash_cut",
+        }:
+            return False
+        if transition_type in {"none", "cut"}:
+            if transition_duration > 0.05:
+                return False
+        elif transition_duration > 0.8:
+            return False
+        motion_type = str((seg.motion_config or {}).get("type") or "none")
+        if motion_type not in {"none", "still_hold"} and not self._compile_video_motion_fit_candidate(seg):
+            return False
+        return self._compile_video_overlay_safe(seg)
+
+    def _compile_direct_chunk_candidate(self, seg: RenderSegment) -> bool:
+        if seg.type != "video" or seg.overlay_text:
+            return False
+        transition = seg.transition_config or {}
+        transition_type = str(transition.get("type") or seg.transition or "none")
+        transition_duration = float(transition.get("duration") or 0.0)
+        if transition_type not in {"none", "cut"} or transition_duration > 0.05:
+            return False
+        motion_type = str((seg.motion_config or {}).get("type") or "none")
+        return motion_type in {"none", "still_hold"}
+
+    def _compile_should_hint_photo_prerender(self, seg: RenderSegment, total_duration: float, segment_count: int) -> bool:
+        if seg.type != "image":
+            return False
+        motion_type = str((seg.motion_config or {}).get("type") or "none")
+        if motion_type not in {"none", "still_hold", "gentle_push", "slow_push", "ken_burns", "subtle_ken_burns", "punch_zoom", "micro_zoom"}:
+            return False
+        performance_mode = str(self.performance_mode or "").lower()
+        render_mode = str(self.blueprint_metadata.get("render_mode", "auto") or "").lower()
+        large_project = performance_mode == "stable" or render_mode == "long_stable" or total_duration >= 600.0 or segment_count >= 80
+        medium_project = performance_mode in {"balanced", "quality"} and (total_duration >= 240.0 or segment_count >= 30)
+        return (large_project or medium_project) and float(seg.duration or 0.0) > 0.1
+
+    def _assign_render_scheduler_hints(self) -> Dict[str, Any]:
+        total_duration = float(self.time or 0.0)
+        segment_count = len(self.segments)
+        route_counts: Dict[str, int] = {}
+        for seg in self.segments:
+            tags: List[str] = [str(seg.type)]
+            route = "moviepy_required"
+            reason = "timeline_composite_required"
+            if seg.type in {"title", "chapter", "end"}:
+                route = "moviepy_required"
+                reason = "text_or_card_composite"
+                tags.extend(["text", "timeline"])
+            elif seg.type == "image":
+                if self._compile_should_hint_photo_prerender(seg, total_duration, segment_count):
+                    route = "photo_prerender"
+                    reason = "image_segment_cache_candidate"
+                    tags.extend(["cache", "prerender"])
+                else:
+                    route = "image_live_compose"
+                    reason = "image_segment_needs_live_compose"
+                    tags.extend(["image_compose", "timeline"])
+            elif seg.type == "video":
+                if self._compile_direct_chunk_candidate(seg):
+                    route = "direct_chunk_candidate"
+                    reason = "lightweight_video_chunk_safe"
+                    tags.extend(["ffmpeg", "direct_chunk"])
+                elif self._compile_video_fitted_candidate(seg):
+                    if self._compile_video_motion_fit_candidate(seg):
+                        route = "video_motion_fit"
+                        reason = "simple_video_motion_cache_candidate"
+                        tags.extend(["ffmpeg", "video_cache", "motion_cache"])
+                    else:
+                        route = "video_fit"
+                        reason = "video_fit_cache_candidate"
+                        tags.extend(["ffmpeg", "video_cache"])
+                else:
+                    route = "moviepy_required"
+                    reason = "video_segment_needs_timeline_processing"
+                    tags.extend(["timeline", "composite"])
+            seg.render_route = route
+            seg.render_route_reason = reason
+            seg.render_route_tags = tags
+            route_counts[route] = route_counts.get(route, 0) + 1
+        return {
+            "strategy_version": "segment_rules_v1",
+            "route_counts": route_counts,
+            "total_segments": segment_count,
+            "total_duration": round(total_duration, 3),
+        }
+
     def compile(self) -> Dict[str, Any]:
         emit_event("phase", phase="compile", message="编译渲染计划", percent=20)
 
@@ -1570,6 +1700,8 @@ class Compiler:
             title_style=self.blueprint_metadata.get("end_title_style"),
         )
 
+        render_scheduler = self._assign_render_scheduler_hints()
+
         emit_event("phase", phase="compile", message="渲染计划完成", percent=100)
         return {
             "schema_version": SCHEMA_VERSION,
@@ -1591,6 +1723,7 @@ class Compiler:
                 "chunk_seconds": self.blueprint_metadata.get("chunk_seconds"),
                 "audio": self.audio_settings,
             },
+            "render_scheduler": render_scheduler,
             "cache_policy": {
                 "enabled": True,
                 "invalidation_keys": [
@@ -2260,6 +2393,73 @@ class Renderer:
         self._prepared_music_paths: Optional[List[Path]] = None
         self._prepared_music_beds: Dict[str, Optional[Path]] = {}
         self._prepared_source_audio_paths: Dict[str, Optional[Path]] = {}
+        self.photo_segment_cache_stats: Dict[str, int] = {
+            "eligible": 0,
+            "hit": 0,
+            "created": 0,
+            "fallback": 0,
+            "overlay_eligible": 0,
+            "overlay_hit": 0,
+            "overlay_created": 0,
+            "saved_live_composes": 0,
+            "saved_render_seconds": 0,
+        }
+        self.video_segment_cache_stats: Dict[str, int] = {
+            "eligible": 0,
+            "hit": 0,
+            "created": 0,
+            "fallback": 0,
+            "motion_eligible": 0,
+            "motion_hit": 0,
+            "motion_created": 0,
+            "motion_fallback": 0,
+            "saved_live_fits": 0,
+            "saved_render_seconds": 0,
+        }
+        self.render_scheduler_summary: Dict[str, Any] = self._apply_runtime_render_scheduler()
+
+    def _runtime_render_route_for_segment(self, seg: Dict[str, Any]) -> Tuple[str, str, List[str]]:
+        stype = str(seg.get("type") or "")
+        tags: List[str] = [stype]
+        if stype in {"title", "chapter", "end"}:
+            return "moviepy_required", "text_or_card_composite", tags + ["text", "timeline"]
+        if stype == "image":
+            if self._should_prerender_image_segment(float(seg.get("duration") or 0.0), seg.get("motion_config")):
+                return "photo_prerender", "image_segment_cache_candidate", tags + ["cache", "prerender"]
+            return "image_live_compose", "image_segment_needs_live_compose", tags + ["timeline", "image_compose"]
+        if stype == "video":
+            if self._can_use_ffmpeg_direct_chunk_segment(seg):
+                return "direct_chunk_candidate", "lightweight_video_chunk_safe", tags + ["ffmpeg", "direct_chunk"]
+            if self._can_use_ffmpeg_fitted_video(seg):
+                if self._ffmpeg_video_motion_cache_spec(seg.get("motion_config")) is not None:
+                    return "video_motion_fit", "simple_video_motion_cache_candidate", tags + ["ffmpeg", "video_cache", "motion_cache"]
+                return "video_fit", "video_fit_cache_candidate", tags + ["ffmpeg", "video_cache"]
+            return "moviepy_required", "video_segment_needs_timeline_processing", tags + ["timeline", "composite"]
+        return "moviepy_required", "unknown_segment_type", tags + ["timeline"]
+
+    def _apply_runtime_render_scheduler(self) -> Dict[str, Any]:
+        route_counts: Dict[str, int] = {}
+        segments = self.plan.get("segments", []) or []
+        for seg in segments:
+            route, reason, tags = self._runtime_render_route_for_segment(seg)
+            seg["runtime_render_route"] = route
+            seg["runtime_render_route_reason"] = reason
+            seg["runtime_render_route_tags"] = tags
+            route_counts[route] = route_counts.get(route, 0) + 1
+        return {
+            "strategy_version": "runtime_segment_rules_v1",
+            "route_counts": route_counts,
+            "total_segments": len(segments),
+            "prefer_ffmpeg_segments": bool(self.prefer_ffmpeg_segments),
+        }
+
+    def _emit_render_scheduler_summary(self) -> None:
+        summary = dict(self.render_scheduler_summary or {})
+        route_counts = dict(summary.get("route_counts") or {})
+        if not route_counts:
+            return
+        compact = ", ".join(f"{key}={value}" for key, value in sorted(route_counts.items()))
+        emit_event("log", message=f"Render scheduler summary: {compact}")
 
     def _init_render_cache_dir(self) -> Path:
         configured = self.params.get("cache_root") or self.params.get("render_cache_root")
@@ -2283,6 +2483,165 @@ class Renderer:
         key_extra = f"{extra}|target={self.target_size[0]}x{self.target_size[1]}"
         key = file_hash_light(source, key_extra) if source.exists() else safe_id(f"{source}|{key_extra}")
         return bucket / f"{key}{suffix}"
+
+    def _should_prerender_image_segment(self, duration: float, motion_config: Optional[Dict[str, Any]] = None) -> bool:
+        performance_mode = str(self.params.get("performance_mode") or self.plan.get("render_settings", {}).get("performance_mode") or "").lower()
+        render_mode = str(self.params.get("render_mode") or self.plan.get("render_settings", {}).get("render_mode") or "").lower()
+        total_duration = float(self.plan.get("total_duration") or 0.0)
+        segment_count = len(self.plan.get("segments", []) or [])
+        motion_type = str((motion_config or {}).get("type") or "none")
+        if motion_type not in {"none", "still_hold", "gentle_push", "slow_push", "ken_burns", "subtle_ken_burns", "punch_zoom", "micro_zoom"}:
+            return False
+        large_project = (
+            performance_mode == "stable"
+            or render_mode == "long_stable"
+            or total_duration >= 600.0
+            or segment_count >= 80
+        )
+        medium_project = (
+            performance_mode in {"balanced", "quality"}
+            and (total_duration >= 240.0 or segment_count >= 30)
+        )
+        return (
+            large_project
+            or medium_project
+        ) and float(duration or 0.0) > 0.1
+
+    def _build_image_visual_clip(self, fixed: Path, duration: float, motion_config: Optional[Dict[str, Any]] = None):
+        fg = ImageClip(str(fixed)).set_duration(duration)
+        return self._compose_with_blur_bg(fg, duration, source_image=fixed, motion_config=motion_config)
+
+    def _build_image_segment_clip(
+        self,
+        fixed: Path,
+        duration: float,
+        motion_config: Optional[Dict[str, Any]] = None,
+        overlay_spec: Optional[Dict[str, Any]] = None,
+    ):
+        clip = self._build_image_visual_clip(fixed, duration, motion_config)
+        if overlay_spec and overlay_spec.get("text"):
+            clip = self._apply_overlay_title(
+                clip,
+                {
+                    "overlay_text": overlay_spec.get("text"),
+                    "overlay_subtitle": overlay_spec.get("subtitle"),
+                    "overlay_duration": overlay_spec.get("duration"),
+                    "overlay_title_style": overlay_spec.get("style"),
+                },
+            )
+        return clip
+
+    def _prerender_image_segment(
+        self,
+        source: Path,
+        fixed: Path,
+        duration: float,
+        motion_config: Optional[Dict[str, Any]] = None,
+        overlay_spec: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Path]:
+        fps = int(self.params.get("fps") or self.plan.get("render_settings", {}).get("fps") or 30)
+        motion_key = json.dumps(motion_config or {}, ensure_ascii=False, sort_keys=True)
+        overlay_key = json.dumps(overlay_spec or {}, ensure_ascii=False, sort_keys=True)
+        has_overlay = bool((overlay_spec or {}).get("text"))
+        out = self._cache_path(
+            "photo_segments",
+            source,
+            ".mp4",
+            f"photo_seg_v3|duration={round(float(duration or 0.0), 3)}|fps={fps}|motion={motion_key}|overlay={overlay_key}",
+        )
+        if out.exists() and out.stat().st_size > 1024:
+            self.photo_segment_cache_stats["hit"] += 1
+            self.photo_segment_cache_stats["saved_live_composes"] += 1
+            self.photo_segment_cache_stats["saved_render_seconds"] += int(round(float(duration or 0.0)))
+            if has_overlay:
+                self.photo_segment_cache_stats["overlay_hit"] += 1
+            emit_event("log", message=f"Photo segment cache hit: {out.name}")
+            return out
+
+        clip = None
+        try:
+            clip = self._build_image_segment_clip(fixed, duration, motion_config, overlay_spec=overlay_spec)
+            clip.write_videofile(
+                str(out),
+                fps=fps,
+                codec="libx264",
+                audio=False,
+                preset="veryfast",
+                verbose=False,
+                logger=None,
+                ffmpeg_params=[
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-movflags",
+                    "+faststart",
+                    "-crf",
+                    quality_to_crf(self.params.get("python_quality") or self.params.get("quality") or "standard"),
+                ],
+            )
+            ok, _reason, _duration = _v56_validate_video(out, min_size=512)
+            if ok:
+                self.photo_segment_cache_stats["created"] += 1
+                if has_overlay:
+                    self.photo_segment_cache_stats["overlay_created"] += 1
+                emit_event("log", message=f"Photo segment cache created: {out.name}")
+                return out
+        except Exception as exc:
+            self.photo_segment_cache_stats["fallback"] += 1
+            emit_event("log", message=f"Photo segment prerender fallback to live compose: {source.name}: {exc}")
+        finally:
+            if clip is not None:
+                close_clip(clip)
+
+        try:
+            if out.exists():
+                out.unlink()
+        except Exception:
+            pass
+        return None
+
+    def _photo_segment_cache_summary(self) -> Dict[str, int]:
+        return dict(self.photo_segment_cache_stats)
+
+    def _emit_photo_segment_cache_summary(self) -> None:
+        photo_cache = self._photo_segment_cache_summary()
+        if photo_cache["eligible"] <= 0:
+            return
+        emit_event(
+            "log",
+            message=(
+                "Photo segment cache summary: "
+                f"eligible={photo_cache['eligible']}, "
+                f"hit={photo_cache['hit']}, "
+                f"created={photo_cache['created']}, "
+                f"fallback={photo_cache['fallback']}, "
+                f"overlay_hit={photo_cache['overlay_hit']}, "
+                f"saved_live_composes={photo_cache['saved_live_composes']}, "
+                f"saved_render_seconds={photo_cache['saved_render_seconds']}"
+            ),
+        )
+        emit_event("photo_cache", **photo_cache)
+
+    def _video_segment_cache_summary(self) -> Dict[str, int]:
+        return dict(self.video_segment_cache_stats)
+
+    def _emit_video_segment_cache_summary(self) -> None:
+        video_cache = self._video_segment_cache_summary()
+        if video_cache["eligible"] <= 0:
+            return
+        emit_event(
+            "log",
+            message=(
+                "Video segment cache summary: "
+                f"eligible={video_cache['eligible']}, "
+                f"hit={video_cache['hit']}, "
+                f"created={video_cache['created']}, "
+                f"fallback={video_cache['fallback']}, "
+                f"motion_hit={video_cache['motion_hit']}, "
+                f"saved_live_fits={video_cache['saved_live_fits']}, "
+                f"saved_render_seconds={video_cache['saved_render_seconds']}"
+            ),
+        )
+        emit_event("video_cache", **video_cache)
 
     def _prepare_music_path(self) -> Optional[Path]:
         paths = self._prepare_music_paths()
@@ -2448,6 +2807,7 @@ class Renderer:
         try:
             segments = self.plan.get("segments", [])
             total = max(1, len(segments))
+            self._emit_render_scheduler_summary()
 
             for idx, seg in enumerate(segments, 1):
                 emit_event(
@@ -2499,6 +2859,9 @@ class Renderer:
             if self.params.get("cover"):
                 self._create_cover()
 
+            self._emit_photo_segment_cache_summary()
+            self._emit_video_segment_cache_summary()
+
             emit_event("artifact", artifact="video", path=str(self.output_path), message="最终视频已生成")
             emit_event("phase", phase="complete", message="视频导出成功", percent=100)
 
@@ -2541,16 +2904,20 @@ class Renderer:
             return self._chapter_card(seg, duration)
 
         if stype == "image":
-            clip = self._image_clip(Path(seg["source_path"]), duration, seg.get("motion_config"))
+            overlay_spec = self._image_overlay_cache_spec(seg, duration)
+            clip = self._image_clip(Path(seg["source_path"]), duration, seg.get("motion_config"), overlay_spec=overlay_spec)
+            if overlay_spec is not None:
+                return clip
             return self._apply_overlay_title(clip, seg)
 
         if stype == "video":
+            route = str(seg.get("runtime_render_route") or seg.get("render_route") or "")
             clip = self._video_clip(
                 Path(seg["source_path"]),
                 duration,
                 keep_audio=self._segment_keep_audio(seg),
                 motion_config=seg.get("motion_config"),
-                prefer_ffmpeg=self._can_use_ffmpeg_fitted_video(seg),
+                prefer_ffmpeg=route in {"video_fit", "video_motion_fit", "direct_chunk_candidate"} or self._can_use_ffmpeg_fitted_video(seg),
             )
             return self._apply_overlay_title(clip, seg)
 
@@ -2917,15 +3284,52 @@ class Renderer:
 
         return text_clip
 
-    def _image_clip(self, source: Path, duration: float, motion_config: Optional[Dict[str, Any]] = None):
+    def _image_overlay_cache_spec(self, seg: Dict[str, Any], duration: float) -> Optional[Dict[str, Any]]:
+        text = seg.get("overlay_text")
+        if not text:
+            return None
+        subtitle = seg.get("overlay_subtitle")
+        overlay_duration = min(float(seg.get("overlay_duration") or 1.8), float(duration or 1.8))
+        style = dict(seg.get("overlay_title_style") or {})
+        motion = str(style.get("motion") or "fade_slide_up")
+        position = str(style.get("position") or "lower_left")
+        if motion not in {"fade_slide_up", "editorial_fade", "static_hold", "lower_third_slide", "cinematic_reveal", "postcard_drift"}:
+            return None
+        if position not in {"lower_left", "lower_center", "center"}:
+            return None
+        if len(str(text)) > 42 or len(str(subtitle or "")) > 64:
+            return None
+        if overlay_duration > min(3.2, float(duration or 0.0)):
+            return None
+        return {
+            "text": str(text),
+            "subtitle": str(subtitle) if subtitle else None,
+            "duration": round(overlay_duration, 3),
+            "style": style,
+        }
+
+    def _image_clip(
+        self,
+        source: Path,
+        duration: float,
+        motion_config: Optional[Dict[str, Any]] = None,
+        overlay_spec: Optional[Dict[str, Any]] = None,
+    ):
         fixed = self._cache_path("fixed_images", source, ".jpg", "exif_rgb_v1")
         if not fixed.exists():
             with Image.open(source) as img:
                 img = ImageOps.exif_transpose(img).convert("RGB")
                 img.save(fixed, quality=95)
 
-        fg = ImageClip(str(fixed)).set_duration(duration)
-        return self._compose_with_blur_bg(fg, duration, source_image=fixed, motion_config=motion_config)
+        if self._should_prerender_image_segment(duration, motion_config):
+            self.photo_segment_cache_stats["eligible"] += 1
+            if overlay_spec:
+                self.photo_segment_cache_stats["overlay_eligible"] += 1
+            prerendered = self._prerender_image_segment(source, fixed, duration, motion_config, overlay_spec=overlay_spec)
+            if prerendered is not None and prerendered.exists():
+                return VideoFileClip(str(prerendered)).set_duration(duration)
+
+        return self._build_image_segment_clip(fixed, duration, motion_config, overlay_spec=overlay_spec)
 
     def _video_clip(
         self,
@@ -2936,9 +3340,22 @@ class Renderer:
         prefer_ffmpeg: bool = False,
     ):
         if prefer_ffmpeg:
-            fitted = self._ffmpeg_fit_video_segment(source, duration, keep_audio=keep_audio)
-            if fitted:
-                return VideoFileClip(str(fitted))
+            self.video_segment_cache_stats["eligible"] += 1
+            motion_spec = self._ffmpeg_video_motion_cache_spec(motion_config)
+            if motion_spec is not None:
+                self.video_segment_cache_stats["motion_eligible"] += 1
+                motion_fitted = self._ffmpeg_fit_motion_video_segment(
+                    source,
+                    duration,
+                    motion_spec,
+                    keep_audio=keep_audio,
+                )
+                if motion_fitted:
+                    return VideoFileClip(str(motion_fitted))
+            else:
+                fitted = self._ffmpeg_fit_video_segment(source, duration, keep_audio=keep_audio)
+                if fitted:
+                    return VideoFileClip(str(fitted))
 
         render_source = self._normalize_video_display_geometry(source)
         raw = VideoFileClip(str(render_source))
@@ -3034,9 +3451,71 @@ class Renderer:
 
         return source
 
+    def _video_overlay_fitted_safe(self, seg: Dict[str, Any]) -> bool:
+        text = seg.get("overlay_text")
+        if not text:
+            return True
+        subtitle = seg.get("overlay_subtitle")
+        overlay_duration = float(seg.get("overlay_duration") or 1.8)
+        style = dict(seg.get("overlay_title_style") or {})
+        motion = str(style.get("motion") or "fade_slide_up")
+        position = str(style.get("position") or "lower_left")
+        if motion not in {
+            "fade_slide_up",
+            "editorial_fade",
+            "static_hold",
+            "lower_third_slide",
+            "cinematic_reveal",
+            "postcard_drift",
+        }:
+            return False
+        if position not in {"lower_left", "lower_center", "center"}:
+            return False
+        if len(str(text)) > 42 or len(str(subtitle or "")) > 64:
+            return False
+        return overlay_duration <= 3.2
+
+    def _ffmpeg_video_motion_cache_spec(self, motion_config: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        motion_type = str((motion_config or {}).get("type") or "none")
+        if motion_type in {"none", "still_hold"}:
+            return None
+        if motion_type == "gentle_push":
+            return {"type": motion_type, "mode": "progressive_zoom", "amount": 0.018}
+        if motion_type == "slow_push":
+            return {"type": motion_type, "mode": "progressive_zoom", "amount": 0.015}
+        return None
+
     def _can_use_ffmpeg_fitted_video(self, seg: Dict[str, Any]) -> bool:
         if not self.prefer_ffmpeg_segments:
             return False
+        if seg.get("type") != "video":
+            return False
+
+        transition = seg.get("transition_config") or {}
+        transition_type = str(transition.get("type") or seg.get("transition") or "none")
+        transition_duration = float(transition.get("duration") or 0.0)
+        if transition_type not in {
+            "none",
+            "cut",
+            "soft_crossfade",
+            "fade_through_dark",
+            "fade_through_white",
+            "quick_zoom",
+            "flash_cut",
+        }:
+            return False
+        if transition_type in {"none", "cut"}:
+            if transition_duration > 0.05:
+                return False
+        elif transition_duration > 0.8:
+            return False
+
+        motion_type = str((seg.get("motion_config") or {}).get("type") or "none")
+        if motion_type not in {"none", "still_hold"} and self._ffmpeg_video_motion_cache_spec(seg.get("motion_config")) is None:
+            return False
+        return self._video_overlay_fitted_safe(seg)
+
+    def _can_use_ffmpeg_direct_chunk_segment(self, seg: Dict[str, Any]) -> bool:
         if seg.get("type") != "video" or seg.get("overlay_text"):
             return False
 
@@ -3056,12 +3535,18 @@ class Renderer:
         duration: float,
         keep_audio: bool = True,
         force_audio_track: bool = False,
+        track_stats: bool = True,
     ) -> Optional[Path]:
         fps = int(self.params.get("fps") or self.plan.get("render_settings", {}).get("fps") or 30)
         audio_mode = "source" if keep_audio else "silent" if force_audio_track else "none"
         extra = f"fit_v3|duration={round(float(duration or 0), 3)}|audio={audio_mode}|fps={fps}"
         out = self._cache_path("fitted_videos", source, ".mp4", extra)
         if out.exists() and out.stat().st_size > 1024:
+            if track_stats:
+                self.video_segment_cache_stats["hit"] += 1
+                self.video_segment_cache_stats["saved_live_fits"] += 1
+                self.video_segment_cache_stats["saved_render_seconds"] += int(round(float(duration or 0.0)))
+                emit_event("log", message=f"Video segment cache hit: {out.name}")
             return out
 
         render_source = self._normalize_video_display_geometry(source)
@@ -3146,10 +3631,113 @@ class Renderer:
                     errors="replace",
                 )
             if completed.returncode == 0 and out.exists() and out.stat().st_size > 1024:
+                if track_stats:
+                    self.video_segment_cache_stats["created"] += 1
+                    emit_event("log", message=f"Video segment cache created: {out.name}")
                 return out
-            emit_event("log", message=f"FFmpeg 视频段预适配失败，回退 MoviePy: {source.name}: {completed.stderr[-600:]}")
+            if track_stats:
+                self.video_segment_cache_stats["fallback"] += 1
+                emit_event("log", message=f"FFmpeg 视频段预适配失败，回退 MoviePy: {source.name}: {completed.stderr[-600:]}")
         except Exception as exc:
-            emit_event("log", message=f"FFmpeg 视频段预适配异常，回退 MoviePy: {source.name}: {exc}")
+            if track_stats:
+                self.video_segment_cache_stats["fallback"] += 1
+                emit_event("log", message=f"FFmpeg 视频段预适配异常，回退 MoviePy: {source.name}: {exc}")
+
+        try:
+            if out.exists():
+                out.unlink()
+        except Exception:
+            pass
+        return None
+
+    def _ffmpeg_fit_motion_video_segment(
+        self,
+        source: Path,
+        duration: float,
+        motion_spec: Dict[str, Any],
+        keep_audio: bool = True,
+    ) -> Optional[Path]:
+        fps = int(self.params.get("fps") or self.plan.get("render_settings", {}).get("fps") or 30)
+        audio_mode = "source" if keep_audio else "none"
+        motion_key = json.dumps(motion_spec or {}, ensure_ascii=False, sort_keys=True)
+        out = self._cache_path(
+            "motion_fitted_videos",
+            source,
+            ".mp4",
+            f"motion_fit_v1|duration={round(float(duration or 0), 3)}|audio={audio_mode}|fps={fps}|motion={motion_key}",
+        )
+        if out.exists() and out.stat().st_size > 1024:
+            self.video_segment_cache_stats["hit"] += 1
+            self.video_segment_cache_stats["motion_hit"] += 1
+            self.video_segment_cache_stats["saved_live_fits"] += 1
+            self.video_segment_cache_stats["saved_render_seconds"] += int(round(float(duration or 0.0)))
+            emit_event("log", message=f"Video motion cache hit: {out.name}")
+            return out
+
+        base = self._ffmpeg_fit_video_segment(source, duration, keep_audio=keep_audio, track_stats=False)
+        if not base or not base.exists():
+            self.video_segment_cache_stats["fallback"] += 1
+            self.video_segment_cache_stats["motion_fallback"] += 1
+            emit_event("log", message=f"FFmpeg 视频 motion 预适配失败，回退 MoviePy: {source.name}: base fit unavailable")
+            return None
+
+        tw, th = self.target_size
+        segment_duration = max(float(duration or 0.1), 0.1)
+        amount = float(motion_spec.get("amount") or 0.0)
+        frame_budget = max(int(round(segment_duration * fps)), 1)
+        zoom_expr = f"(1+{amount:.6f}*on/{frame_budget})"
+        vf = (
+            f"zoompan=z='{zoom_expr}':"
+            f"x='iw/2-(iw/zoom/2)':"
+            f"y='ih/2-(ih/zoom/2)':"
+            f"d=1:s={tw}x{th}:fps={fps},"
+            f"setsar=1,format=yuv420p"
+        )
+
+        try:
+            import imageio_ffmpeg
+
+            ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+            selected_encoder, encoder_args = select_ffmpeg_video_encoder(self.params)
+            has_audio = bool(keep_audio and video_has_audio_stream(base))
+
+            def build_cmd(video_encoder: str, video_encoder_args: List[str]) -> List[str]:
+                cmd = [ffmpeg, "-y", "-i", str(base), "-t", str(segment_duration), "-vf", vf, "-map", "0:v:0"]
+                if has_audio:
+                    cmd += ["-map", "0:a:0", "-c:a", "copy", "-shortest"]
+                else:
+                    cmd += ["-an"]
+                cmd += ["-c:v", video_encoder]
+                cmd += video_encoder_args
+                if video_encoder == "libx264":
+                    cmd += ["-crf", quality_to_crf(self.params.get("python_quality") or self.params.get("quality") or "standard")]
+                else:
+                    cmd += ["-b:v", "8M"]
+                cmd += ["-movflags", "+faststart", str(out)]
+                return cmd
+
+            completed = subprocess.run(build_cmd(selected_encoder, encoder_args), capture_output=True, text=True, encoding="utf-8", errors="replace")
+            if completed.returncode != 0 and selected_encoder != "libx264":
+                emit_event("log", message=f"FFmpeg video motion {selected_encoder} fallback to libx264: {completed.stderr[-600:]}")
+                completed = subprocess.run(
+                    build_cmd("libx264", ["-preset", "veryfast"]),
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+            if completed.returncode == 0 and out.exists() and out.stat().st_size > 1024:
+                self.video_segment_cache_stats["created"] += 1
+                self.video_segment_cache_stats["motion_created"] += 1
+                emit_event("log", message=f"Video motion cache created: {out.name}")
+                return out
+            self.video_segment_cache_stats["fallback"] += 1
+            self.video_segment_cache_stats["motion_fallback"] += 1
+            emit_event("log", message=f"FFmpeg 视频 motion 预适配失败，回退 MoviePy: {source.name}: {completed.stderr[-600:]}")
+        except Exception as exc:
+            self.video_segment_cache_stats["fallback"] += 1
+            self.video_segment_cache_stats["motion_fallback"] += 1
+            emit_event("log", message=f"FFmpeg 视频 motion 预适配异常，回退 MoviePy: {source.name}: {exc}")
 
         try:
             if out.exists():
@@ -3360,6 +3948,31 @@ def _v56_build_chunk_groups(
     current_duration = 0.0
     current_keys: List[str] = []
 
+    def chunk_route_payload(items: List[Dict[str, Any]]) -> Dict[str, Any]:
+        routes = [str(seg.get("runtime_render_route") or seg.get("render_route") or "moviepy_required") for seg in items]
+        route_counts: Dict[str, int] = {}
+        for route in routes:
+            route_counts[route] = route_counts.get(route, 0) + 1
+        if items and all(route == "direct_chunk_candidate" for route in routes):
+            return {
+                "runtime_chunk_route": "ffmpeg_direct_chunk",
+                "runtime_chunk_route_reason": "all_segments_direct_chunk_safe",
+                "runtime_chunk_route_tags": ["ffmpeg", "chunk", "direct"],
+                "runtime_chunk_route_counts": route_counts,
+            }
+        if any(route in {"moviepy_required", "image_live_compose", "photo_prerender"} for route in routes):
+            reason = "contains_timeline_or_image_segments"
+        elif any(route in {"video_fit", "video_motion_fit"} for route in routes):
+            reason = "contains_video_timeline_segments"
+        else:
+            reason = "default_timeline_chunk"
+        return {
+            "runtime_chunk_route": "moviepy_chunk",
+            "runtime_chunk_route_reason": reason,
+            "runtime_chunk_route_tags": ["moviepy", "chunk", "timeline"],
+            "runtime_chunk_route_counts": route_counts,
+        }
+
     for seg in segments:
         duration = float(seg.get("duration") or 0.0)
         if current and current_duration + duration > chunk_seconds:
@@ -3368,6 +3981,7 @@ def _v56_build_chunk_groups(
                 "segments": current,
                 "duration": round(current_duration, 3),
                 "cache_key": _v56_stable_json_hash(current_keys),
+                **chunk_route_payload(current),
             })
             current = []
             current_duration = 0.0
@@ -3383,6 +3997,7 @@ def _v56_build_chunk_groups(
             "segments": current,
             "duration": round(current_duration, 3),
             "cache_key": _v56_stable_json_hash(current_keys),
+            **chunk_route_payload(current),
         })
 
     return groups
@@ -3669,6 +4284,8 @@ def _v56_try_write_ffmpeg_direct_chunk(
     segments = chunk.get("segments") or []
     if not segments:
         return False
+    if str(chunk.get("runtime_chunk_route") or "") not in {"", "ffmpeg_direct_chunk"}:
+        return False
 
     sources: List[Path] = []
     for seg in segments:
@@ -3676,7 +4293,10 @@ def _v56_try_write_ffmpeg_direct_chunk(
         if not source_path:
             return False
         source = Path(source_path)
-        if not source.exists() or not renderer._can_use_ffmpeg_fitted_video(seg):
+        seg_route = str(seg.get("runtime_render_route") or seg.get("render_route") or "")
+        if seg_route and seg_route != "direct_chunk_candidate":
+            return False
+        if not source.exists() or not renderer._can_use_ffmpeg_direct_chunk_segment(seg):
             return False
         sources.append(source)
 
@@ -3755,7 +4375,8 @@ def _v56_write_chunk_video(
     tmp_chunk = chunk_path.with_suffix(".rendering.tmp.mp4")
 
     try:
-        if _v56_try_write_ffmpeg_direct_chunk(renderer, chunk, tmp_chunk, params):
+        chunk_route = str(chunk.get("runtime_chunk_route") or "")
+        if chunk_route == "ffmpeg_direct_chunk" and _v56_try_write_ffmpeg_direct_chunk(renderer, chunk, tmp_chunk, params):
             _v56_atomic_replace(tmp_chunk, chunk_path)
             return
 
@@ -3873,11 +4494,19 @@ class V56StableRenderer:
             except Exception:
                 pass
 
+        renderer = Renderer(self.plan, str(self.output), self.params)
         segments = self.plan.get("segments", [])
         groups = _v56_build_chunk_groups(segments, self.chunk_seconds, self.params)
+        chunk_route_counts: Dict[str, int] = {}
+        for group in groups:
+            route = str(group.get("runtime_chunk_route") or "moviepy_chunk")
+            chunk_route_counts[route] = chunk_route_counts.get(route, 0) + 1
         manifest = self._load_manifest()
         manifest.setdefault("engine_version", ENGINE_VERSION)
         manifest.setdefault("chunks", {})
+        if chunk_route_counts:
+            compact = ", ".join(f"{key}={value}" for key, value in sorted(chunk_route_counts.items()))
+            emit_event("log", message=f"Chunk scheduler summary: {compact}")
 
         emit_event(
             "phase",
@@ -3886,7 +4515,6 @@ class V56StableRenderer:
             percent=8,
         )
 
-        renderer = Renderer(self.plan, str(self.output), self.params)
         rendered_chunks: List[Path] = []
         chunk_reports: List[Dict[str, Any]] = []
 
@@ -3901,7 +4529,14 @@ class V56StableRenderer:
             if existing.get("cache_key") == key and existing.get("status") == "done" and ok:
                 emit_event("phase", phase="render", message=f"复用已完成分段 {chunk_name}", percent=min(94, 10 + int((idx / max(len(groups), 1)) * 80)))
                 rendered_chunks.append(chunk_path)
-                chunk_reports.append({"name": chunk_name, "status": "cached", "duration": duration, "cache_key": key})
+                chunk_reports.append({
+                    "name": chunk_name,
+                    "status": "cached",
+                    "duration": duration,
+                    "cache_key": key,
+                    "runtime_chunk_route": group.get("runtime_chunk_route"),
+                    "runtime_chunk_route_reason": group.get("runtime_chunk_route_reason"),
+                })
                 continue
 
             try:
@@ -3919,7 +4554,14 @@ class V56StableRenderer:
                 }
                 self._save_manifest(manifest)
                 rendered_chunks.append(chunk_path)
-                chunk_reports.append({"name": chunk_name, "status": "rendered", "duration": duration, "cache_key": key})
+                chunk_reports.append({
+                    "name": chunk_name,
+                    "status": "rendered",
+                    "duration": duration,
+                    "cache_key": key,
+                    "runtime_chunk_route": group.get("runtime_chunk_route"),
+                    "runtime_chunk_route_reason": group.get("runtime_chunk_route_reason"),
+                })
             except Exception as exc:
                 manifest["chunks"][chunk_name] = {
                     "status": "failed",
@@ -3937,6 +4579,14 @@ class V56StableRenderer:
                     "output_path": str(final_output),
                     "chunk_dir": str(self.chunk_dir),
                     "chunks": chunk_reports,
+                    "photo_segment_cache": renderer._photo_segment_cache_summary(),
+                    "video_segment_cache": renderer._video_segment_cache_summary(),
+                    "render_scheduler": renderer.render_scheduler_summary,
+                    "chunk_scheduler": {
+                        "strategy_version": "chunk_rules_v1",
+                        "route_counts": chunk_route_counts,
+                        "total_chunks": len(groups),
+                    },
                     "created_at": datetime.now().isoformat(),
                 })
                 raise
@@ -3975,6 +4625,8 @@ class V56StableRenderer:
         _v56_atomic_replace(tmp_output, final_output)
 
         elapsed = (datetime.now() - started_at).total_seconds()
+        renderer._emit_photo_segment_cache_summary()
+        renderer._emit_video_segment_cache_summary()
         report = {
             "engine_version": ENGINE_VERSION,
             "status": "done",
@@ -3987,6 +4639,14 @@ class V56StableRenderer:
             "chunk_count": len(rendered_chunks),
             "chunk_dir": str(self.chunk_dir),
             "chunks": chunk_reports,
+            "photo_segment_cache": renderer._photo_segment_cache_summary(),
+            "video_segment_cache": renderer._video_segment_cache_summary(),
+            "render_scheduler": renderer.render_scheduler_summary,
+            "chunk_scheduler": {
+                "strategy_version": "chunk_rules_v1",
+                "route_counts": chunk_route_counts,
+                "total_chunks": len(groups),
+            },
             "created_at": datetime.now().isoformat(),
         }
         _v56_write_build_report(self.report_path, report)

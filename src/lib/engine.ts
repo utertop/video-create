@@ -241,6 +241,7 @@ export interface V5RenderPlan {
   total_duration: number;
   segments: V5RenderSegment[];
   render_settings?: V5RenderSettings;
+  render_scheduler?: V5RenderSchedulerSummary;
   cache_policy?: V5CachePolicy;
   metadata?: {
     generated_at?: string;
@@ -275,6 +276,16 @@ export interface V5RenderSegment {
   overlay_duration?: number | null;
   keep_audio?: boolean;
   cache_key?: string | null;
+  render_route?: string | null;
+  render_route_reason?: string | null;
+  render_route_tags?: string[] | null;
+}
+
+export interface V5RenderSchedulerSummary {
+  strategy_version?: string;
+  route_counts?: Record<string, number>;
+  total_segments?: number;
+  total_duration?: number;
 }
 
 export interface V5TransitionConfig {

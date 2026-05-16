@@ -1,5 +1,5 @@
 import React from "react";
-import { VideoEvent } from "../types/studio";
+import { PhotoSegmentCacheStats, VideoEvent, VideoSegmentCacheStats } from "../types/studio";
 
 export function formatProgressLine(line: string): string | null {
   const trimmed = line.trim();
@@ -37,9 +37,36 @@ export function applyStructuredEvent(
   setProgress: React.Dispatch<React.SetStateAction<number | null>>,
   setLogs: React.Dispatch<React.SetStateAction<string[]>>,
   setMaterials: React.Dispatch<React.SetStateAction<VideoEvent[]>>,
+  setPhotoSegmentCache: React.Dispatch<React.SetStateAction<PhotoSegmentCacheStats | null>>,
+  setVideoSegmentCache: React.Dispatch<React.SetStateAction<VideoSegmentCacheStats | null>>,
 ) {
   if (event.type === "media") {
     setMaterials((prev) => [...prev, event]);
+  }
+
+  if (event.type === "photo_cache") {
+    setPhotoSegmentCache({
+      eligible: Number(event.eligible || 0),
+      hit: Number(event.hit || 0),
+      created: Number(event.created || 0),
+      fallback: Number(event.fallback || 0),
+      overlay_eligible: Number(event.overlay_eligible || 0),
+      overlay_hit: Number(event.overlay_hit || 0),
+      overlay_created: Number(event.overlay_created || 0),
+      saved_live_composes: Number(event.saved_live_composes || 0),
+      saved_render_seconds: Number(event.saved_render_seconds || 0),
+    });
+  }
+
+  if (event.type === "video_cache") {
+    setVideoSegmentCache({
+      eligible: Number(event.eligible || 0),
+      hit: Number(event.hit || 0),
+      created: Number(event.created || 0),
+      fallback: Number(event.fallback || 0),
+      saved_live_fits: Number(event.saved_live_fits || 0),
+      saved_render_seconds: Number(event.saved_render_seconds || 0),
+    });
   }
 
   if (typeof event.percent === "number") {
@@ -82,6 +109,12 @@ export function formatStructuredEvent(event: VideoEvent): string | null {
   }
   if (event.type === "log") {
     return event.message || null;
+  }
+  if (event.type === "photo_cache") {
+    return `照片段缓存：复用 ${event.hit || 0}，节省 ${(event.saved_render_seconds || 0)} 秒实时合成，新建 ${event.created || 0}，回退 ${event.fallback || 0}`;
+  }
+  if (event.type === "video_cache") {
+    return `视频段缓存：复用 ${event.hit || 0}，节省 ${(event.saved_render_seconds || 0)} 秒视频适配，新建 ${event.created || 0}，回退 ${event.fallback || 0}`;
   }
   return event.message || null;
 }

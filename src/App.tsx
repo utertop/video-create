@@ -67,7 +67,7 @@ import { MaterialGallery, PreviewModal } from "./components/MaterialGallery";
 import { PerformanceModeControl, PerformanceRecommendation, performanceModeLabel } from "./components/PerformanceModeControl";
 import { normalizeTitleStyle, titleTemplateLabel, TitleStyleLab } from "./components/TitleStylePreview";
 import { StudioState, useStudio } from "./store/studio";
-import { BackgroundPickerTarget, VideoEvent } from "./types/studio";
+import { BackgroundPickerTarget, PhotoSegmentCacheStats, VideoEvent, VideoSegmentCacheStats } from "./types/studio";
 import { applyStructuredEvent, detectPhase, formatProgressLine, parseProgress, parseVideoEvent } from "./lib/progress";
 import "./v5-background.css";
 
@@ -107,6 +107,8 @@ export function App() {
   const [toast, setToast] = useState<string | null>(null);
   const [highlightOutput, setHighlightOutput] = useState(false);
   const [materials, setMaterials] = useState<VideoEvent[]>([]);
+  const [photoSegmentCache, setPhotoSegmentCache] = useState<PhotoSegmentCacheStats | null>(null);
+  const [videoSegmentCache, setVideoSegmentCache] = useState<VideoSegmentCacheStats | null>(null);
   const [selectedMaterial, setSelectedMaterial] = useState<VideoEvent | null>(null);
   const [showGalleryOverlay, setShowGalleryOverlay] = useState(false);
   const [galleryView, setGalleryView] = useState<"chapter" | "type" | "time">("chapter");
@@ -128,6 +130,8 @@ export function App() {
     setHighlightOutput(false);
     setHasPreChecked(false);
     setMaterials([]);
+    setPhotoSegmentCache(null);
+    setVideoSegmentCache(null);
     setSelectedMaterial(null);
     setShowGalleryOverlay(false);
     setRenderPreviewPath(null);
@@ -149,7 +153,7 @@ export function App() {
       const raw = event.payload;
       const structured = parseVideoEvent(raw);
       if (structured) {
-        applyStructuredEvent(structured, setPhase, setProgress, setLogs, setMaterials);
+        applyStructuredEvent(structured, setPhase, setProgress, setLogs, setMaterials, setPhotoSegmentCache, setVideoSegmentCache);
         return;
       }
 
@@ -747,6 +751,82 @@ export function App() {
                 recommendation={performanceRecommendation}
                 onChange={(performanceMode) => state.patch({ performanceMode })}
               />
+              {photoSegmentCache && photoSegmentCache.eligible > 0 ? (
+                <div className="photo-cache-insight-card">
+                  <div className="photo-cache-insight-head">
+                    <div>
+                      <span className="photo-cache-kicker">照片段缓存反馈</span>
+                      <strong>{photoSegmentCacheHeadline(photoSegmentCache)}</strong>
+                    </div>
+                    <span className="photo-cache-badge">候选 {photoSegmentCache.eligible}</span>
+                  </div>
+                  <div className="photo-cache-insight-grid">
+                    <div>
+                      <span>复用缓存</span>
+                      <strong>{photoSegmentCache.hit} 段</strong>
+                    </div>
+                    <div>
+                      <span>省掉实时拼装</span>
+                      <strong>{photoSegmentCache.saved_live_composes || photoSegmentCache.hit} 次</strong>
+                    </div>
+                    <div>
+                      <span>节省实时合成</span>
+                      <strong>{formatDurationCompact(photoSegmentCache.saved_render_seconds)}</strong>
+                    </div>
+                    <div>
+                      <span>本次新建</span>
+                      <strong>{photoSegmentCache.created} 段</strong>
+                    </div>
+                    <div>
+                      <span>叠字命中</span>
+                      <strong>{photoSegmentCache.overlay_hit} 段</strong>
+                    </div>
+                    <div>
+                      <span>安全回退</span>
+                      <strong>{photoSegmentCache.fallback} 段</strong>
+                    </div>
+                  </div>
+                  <p className="photo-cache-insight-note">
+                    {photoSegmentCacheNote(photoSegmentCache)}
+                  </p>
+                </div>
+              ) : null}
+              {videoSegmentCache && videoSegmentCache.eligible > 0 ? (
+                <div className="video-cache-insight-card">
+                  <div className="video-cache-insight-head">
+                    <div>
+                      <span className="video-cache-kicker">视频段缓存反馈</span>
+                      <strong>{videoSegmentCacheHeadline(videoSegmentCache)}</strong>
+                    </div>
+                    <span className="video-cache-badge">候选 {videoSegmentCache.eligible}</span>
+                  </div>
+                  <div className="video-cache-insight-grid">
+                    <div>
+                      <span>复用缓存</span>
+                      <strong>{videoSegmentCache.hit} 段</strong>
+                    </div>
+                    <div>
+                      <span>省掉实时适配</span>
+                      <strong>{videoSegmentCache.saved_live_fits || videoSegmentCache.hit} 次</strong>
+                    </div>
+                    <div>
+                      <span>节省视频适配</span>
+                      <strong>{formatDurationCompact(videoSegmentCache.saved_render_seconds)}</strong>
+                    </div>
+                    <div>
+                      <span>本次新建</span>
+                      <strong>{videoSegmentCache.created} 段</strong>
+                    </div>
+                    <div>
+                      <span>安全回退</span>
+                      <strong>{videoSegmentCache.fallback} 段</strong>
+                    </div>
+                  </div>
+                  <p className="video-cache-insight-note">
+                    {videoSegmentCacheNote(videoSegmentCache)}
+                  </p>
+                </div>
+              ) : null}
               <MusicAudioPanel state={state} onPickMusicFile={onPickMusicFile} onPickMusicFiles={onPickMusicFiles} />
             </div>
 
@@ -918,6 +998,13 @@ export function App() {
                <StatusItem label="当前画幅" value={state.aspectRatio} />
               <StatusItem label="渲染质量" value={qualityLabel(state.quality)} />
               <StatusItem label="性能档位" value={performanceModeLabel(state.performanceMode)} />
+              {photoSegmentCache && photoSegmentCache.eligible > 0 ? (
+                <StatusItem
+                  label="照片缓存"
+                  value={photoSegmentCacheLabel(photoSegmentCache)}
+                  highlight={photoSegmentCache.hit > 0}
+                />
+              ) : null}
             </div>
             {result && <ResultCard result={result} />}
           </section>
@@ -1637,4 +1724,79 @@ function qualityLabel(quality: Quality): string {
     standard: "标准",
     high: "高质量",
   }[quality];
+}
+
+function photoSegmentCacheLabel(stats: PhotoSegmentCacheStats): string {
+  const parts = [`复用 ${stats.hit}`, `新建 ${stats.created}`];
+  if (stats.fallback > 0) {
+    parts.push(`回退 ${stats.fallback}`);
+  }
+  if (stats.saved_render_seconds > 0) {
+    parts.push(`节省 ${formatDurationCompact(stats.saved_render_seconds)}`);
+  }
+  return `${parts.join(" / ")} · 候选 ${stats.eligible}`;
+}
+
+function photoSegmentCacheHeadline(stats: PhotoSegmentCacheStats): string {
+  if (stats.hit > 0) {
+    return `这次因为照片段缓存，已经省掉 ${stats.saved_live_composes || stats.hit} 段实时拼装`;
+  }
+  if (stats.created > 0) {
+    return `这次已预热 ${stats.created} 段照片缓存，下次会更快`;
+  }
+  return `这次有 ${stats.eligible} 段照片进入缓存候选`;
+}
+
+function photoSegmentCacheNote(stats: PhotoSegmentCacheStats): string {
+  if (stats.fallback > 0) {
+    return `有 ${stats.fallback} 段没有走缓存，已自动回退到实时拼装，不会影响最终成片。`;
+  }
+  if (stats.overlay_hit > 0) {
+    return `其中 ${stats.overlay_hit} 段轻量叠字图片也直接复用了缓存，减少了带标题照片段的重复合成。`;
+  }
+  if (stats.hit > 0 && stats.created > 0) {
+    return `已直接复用已有缓存，同时继续把新照片段预烘焙进缓存池，后续同参数再渲染会继续提速。`;
+  }
+  if (stats.hit > 0) {
+    return `这些照片段没有再重复走 ImageClip + 背景模糊 + 运动合成路径，长视频里会更省时。`;
+  }
+  if (stats.created > 0) {
+    return `这次主要在建立照片段缓存，首次收益偏向“为下一次同参数渲染提速”。`;
+  }
+  return `当前项目照片段不多，或暂时没有命中可安全预烘焙的照片段。`;
+}
+
+function formatDurationCompact(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds <= 0) return "0s";
+  const rounded = Math.round(seconds);
+  if (rounded < 60) return `${rounded}s`;
+  const minutes = Math.floor(rounded / 60);
+  const remain = rounded % 60;
+  return remain > 0 ? `${minutes}m ${remain}s` : `${minutes}m`;
+}
+
+function videoSegmentCacheHeadline(stats: VideoSegmentCacheStats): string {
+  if (stats.hit > 0) {
+    return `这次因为视频段缓存，已经省掉 ${stats.saved_live_fits || stats.hit} 段实时适配`;
+  }
+  if (stats.created > 0) {
+    return `这次已预热 ${stats.created} 段视频缓存，下次会更快`;
+  }
+  return `这次有 ${stats.eligible} 段视频进入缓存候选`;
+}
+
+function videoSegmentCacheNote(stats: VideoSegmentCacheStats): string {
+  if (stats.fallback > 0) {
+    return `有 ${stats.fallback} 段没有走 FFmpeg fitted 缓存，已安全回退到 MoviePy/实时适配，不会影响最终导出。`;
+  }
+  if (stats.hit > 0 && stats.created > 0) {
+    return `已直接复用已有视频段缓存，同时继续把新视频段预适配进缓存池，后续相同参数再导出会继续提速。`;
+  }
+  if (stats.hit > 0) {
+    return `这些视频段没有再重复走缩放、补黑边、统一音轨与重编码适配路径，长视频里会更省时。`;
+  }
+  if (stats.created > 0) {
+    return `这次主要在建立视频段缓存，首次收益偏向“为下一次同参数渲染提速”。`;
+  }
+  return `当前项目视频段不多，或暂时没有命中可安全走 FFmpeg fitted 的视频段。`;
 }
