@@ -295,7 +295,7 @@ def load_font(size: int) -> ImageFont.ImageFont:
 def text_size(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont) -> Tuple[int, int]:
     try:
         from pilmoji import Pilmoji
-        with Pilmoji(draw.im, draw=draw) as pilmoji:
+        with Pilmoji(draw._image, draw=draw) as pilmoji:
             return pilmoji.getsize(text or "", font=font)
     except ImportError:
         bbox = draw.textbbox((0, 0), text or "", font=font)
@@ -304,7 +304,7 @@ def text_size(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont) -
 def draw_text_with_emoji(draw: ImageDraw.ImageDraw, xy: Tuple[int, int], text: str, font: ImageFont.ImageFont, fill: Any = None, **kwargs: Any) -> None:
     try:
         from pilmoji import Pilmoji
-        with Pilmoji(draw.im, draw=draw) as pilmoji:
+        with Pilmoji(draw._image, draw=draw) as pilmoji:
             pilmoji.text(xy, text, fill=fill, font=font, **kwargs)
     except ImportError:
         draw.text(xy, text, fill=fill, font=font, **kwargs)
