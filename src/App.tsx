@@ -1611,7 +1611,10 @@ function rhythmProfileForStrategy(strategy: EditStrategy): string {
 
 function renderModeForPerformance(mode: PerformanceMode, strategy: EditStrategy): string {
   if (mode === "stable") return "long_stable";
-  if (mode === "quality") return "standard";
+  // quality should keep visual quality, but must not disable Python's long-project
+  // auto stable renderer. Otherwise 80+ image segments can be forced into one
+  // monolithic MoviePy timeline and exhaust memory.
+  if (mode === "quality") return "auto";
   if (strategy === "long_stable") return "long_stable";
   return "auto";
 }

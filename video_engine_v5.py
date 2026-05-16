@@ -106,7 +106,7 @@ except Exception:
 # =========================
 
 SCHEMA_VERSION = "5.5"
-ENGINE_VERSION = "video-create-engine-v5.6.0"
+ENGINE_VERSION = "video-create-engine-v5.6.1"
 
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
 VIDEO_EXTS = (".mp4", ".mov", ".avi", ".mkv", ".m4v")
@@ -512,10 +512,41 @@ def select_ffmpeg_video_encoder(params: Dict[str, Any]) -> Tuple[str, List[str]]
 
 
 def close_clip(clip: Any) -> None:
-    try:
-        clip.close()
-    except Exception:
-        pass
+    """Best-effort recursive close for MoviePy clips.
+
+    MoviePy CompositeVideoClip/CompositeAudioClip may keep child clips, masks,
+    audio clips and ffmpeg readers alive. Long photo timelines can therefore
+    accumulate many readers/arrays unless we close the whole tree explicitly.
+    """
+    seen = set()
+
+    def _close(obj: Any) -> None:
+        if obj is None:
+            return
+        obj_id = id(obj)
+        if obj_id in seen:
+            return
+        seen.add(obj_id)
+
+        for child in list(getattr(obj, "clips", []) or []):
+            _close(child)
+
+        _close(getattr(obj, "mask", None))
+        _close(getattr(obj, "audio", None))
+
+        reader = getattr(obj, "reader", None)
+        if reader is not None:
+            try:
+                reader.close()
+            except Exception:
+                pass
+
+        try:
+            obj.close()
+        except Exception:
+            pass
+
+    _close(clip)
 
 
 def video_needs_display_normalization(source: Path) -> bool:
@@ -2561,7 +2592,7 @@ class Renderer:
             "photo_segments",
             source,
             ".mp4",
-            f"photo_seg_v3|duration={round(float(duration or 0.0), 3)}|fps={fps}|motion={motion_key}|overlay={overlay_key}",
+            f"photo_seg_v4|duration={round(float(duration or 0.0), 3)}|fps={fps}|motion={motion_key}|overlay={overlay_key}",
         )
         if out.exists() and out.stat().st_size > 1024:
             self.photo_segment_cache_stats["hit"] += 1
@@ -2581,6 +2612,7 @@ class Renderer:
                 codec="libx264",
                 audio=False,
                 preset="veryfast",
+                threads=1,
                 verbose=False,
                 logger=None,
                 ffmpeg_params=[
@@ -2605,6 +2637,11 @@ class Renderer:
         finally:
             if clip is not None:
                 close_clip(clip)
+            clip = None
+            try:
+                gc.collect()
+            except Exception:
+                pass
 
         try:
             if out.exists():
@@ -3866,16 +3903,27 @@ class Renderer:
             return out
 
         tw, th = self.target_size
-        img = Image.open(source_image).convert("RGB")
-        scale = max(tw / img.width, th / img.height)
-        bg = img.resize((int(img.width * scale), int(img.height * scale)), Image.Resampling.LANCZOS)
+        img = None
+        bg = None
+        try:
+            with Image.open(source_image) as raw_img:
+                img = raw_img.convert("RGB")
+            scale = max(tw / img.width, th / img.height)
+            bg = img.resize((int(img.width * scale), int(img.height * scale)), Image.Resampling.LANCZOS)
 
-        left = max(0, (bg.width - tw) // 2)
-        top = max(0, (bg.height - th) // 2)
-        bg = bg.crop((left, top, left + tw, top + th)).filter(ImageFilter.GaussianBlur(30))
-        bg = Image.blend(bg, Image.new("RGB", bg.size, (0, 0, 0)), 0.28)
-        bg.save(out, quality=90)
-        return out
+            left = max(0, (bg.width - tw) // 2)
+            top = max(0, (bg.height - th) // 2)
+            bg = bg.crop((left, top, left + tw, top + th)).filter(ImageFilter.GaussianBlur(30))
+            bg = Image.blend(bg, Image.new("RGB", bg.size, (0, 0, 0)), 0.28)
+            bg.save(out, quality=90)
+            return out
+        finally:
+            for image in (bg, img):
+                try:
+                    if image is not None:
+                        image.close()
+                except Exception:
+                    pass
 
     def _add_watermark(self, video: Any, text: str):
         font = load_font(30)
@@ -4497,20 +4545,24 @@ def _v56_write_chunk_video(
 
 def _v56_should_use_stable_renderer(plan: Dict[str, Any], params: Dict[str, Any]) -> bool:
     performance_mode = str(params.get("performance_mode") or plan.get("render_settings", {}).get("performance_mode") or "").lower()
-    if performance_mode == "stable":
-        return True
-    if performance_mode == "quality":
-        return False
-
     mode = str(params.get("render_mode") or params.get("long_video_mode") or "auto").lower()
+
+    # Explicit render mode has the highest priority.
     if mode in {"stable", "long", "long_stable", "true", "1", "yes"}:
         return True
     if mode in {"standard", "classic", "moviepy"}:
         return False
 
+    if performance_mode == "stable":
+        return True
+
+    # "quality" means keep higher visual quality, not force the unsafe monolithic
+    # MoviePy timeline. Large projects still need chunked stable rendering.
     total_duration = float(plan.get("total_duration") or 0.0)
     segments = plan.get("segments", [])
-    return total_duration >= float(params.get("stable_threshold_seconds", 600)) or len(segments) >= int(params.get("stable_threshold_segments", 80))
+    threshold_seconds = float(params.get("stable_threshold_seconds", 600))
+    threshold_segments = int(params.get("stable_threshold_segments", 80))
+    return total_duration >= threshold_seconds or len(segments) >= threshold_segments
 
 
 class V56StableRenderer:
