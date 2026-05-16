@@ -293,8 +293,22 @@ def load_font(size: int) -> ImageFont.ImageFont:
 
 
 def text_size(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont) -> Tuple[int, int]:
-    bbox = draw.textbbox((0, 0), text or "", font=font)
-    return bbox[2] - bbox[0], bbox[3] - bbox[1]
+    try:
+        from pilmoji import Pilmoji
+        with Pilmoji(draw.im, draw=draw) as pilmoji:
+            return pilmoji.getsize(text or "", font=font)
+    except ImportError:
+        bbox = draw.textbbox((0, 0), text or "", font=font)
+        return bbox[2] - bbox[0], bbox[3] - bbox[1]
+
+def draw_text_with_emoji(draw: ImageDraw.ImageDraw, xy: Tuple[int, int], text: str, font: ImageFont.ImageFont, fill: Any = None, **kwargs: Any) -> None:
+    try:
+        from pilmoji import Pilmoji
+        with Pilmoji(draw.im, draw=draw) as pilmoji:
+            pilmoji.text(xy, text, fill=fill, font=font, **kwargs)
+    except ImportError:
+        draw.text(xy, text, fill=fill, font=font, **kwargs)
+
 
 
 def is_ignored_file(path: Path) -> bool:
@@ -2137,10 +2151,10 @@ class TitleStyleRenderer:
             title_font = load_font(64)
             sub_font = load_font(32)
             tw, th = text_size(draw, title, title_font)
-            draw.text(((w - tw) // 2, by + 20), title, font=title_font, fill=(52, 211, 153, 255))
+            draw_text_with_emoji(draw, ((w - tw) // 2, by + 20), title, font=title_font, fill=(52, 211, 153, 255))
             if subtitle:
                 sw, sh = text_size(draw, subtitle, sub_font)
-                draw.text(((w - sw) // 2, by + 90), subtitle, font=sub_font, fill=(30, 41, 59, 200))
+                draw_text_with_emoji(draw, ((w - sw) // 2, by + 90), subtitle, font=sub_font, fill=(30, 41, 59, 200))
 
         elif preset == "travel_postcard":
             # Bordered card effect
@@ -2150,11 +2164,11 @@ class TitleStyleRenderer:
             title_font = load_font(72)
             sub_font = load_font(36)
             tw, th = text_size(draw, title, title_font)
-            draw.text(((w - tw) // 2 + 3, (h - th) // 2 - 17), title, font=title_font, fill=(35, 24, 18, 190))
-            draw.text(((w - tw) // 2, (h - th) // 2 - 20), title, font=title_font, fill=(255, 245, 210, 255))
+            draw_text_with_emoji(draw, ((w - tw) // 2 + 3, (h - th) // 2 - 17), title, font=title_font, fill=(35, 24, 18, 190))
+            draw_text_with_emoji(draw, ((w - tw) // 2, (h - th) // 2 - 20), title, font=title_font, fill=(255, 245, 210, 255))
             if subtitle:
                 sw, sh = text_size(draw, subtitle, sub_font)
-                draw.text(((w - sw) // 2, (h - sh) // 2 + 60), subtitle, font=sub_font, fill=(251, 191, 36, 230))
+                draw_text_with_emoji(draw, ((w - sw) // 2, (h - sh) // 2 + 60), subtitle, font=sub_font, fill=(251, 191, 36, 230))
 
         elif preset == "impact_flash":
             title_font = load_font(92)
@@ -2162,13 +2176,13 @@ class TitleStyleRenderer:
             tw, th = text_size(draw, title, title_font)
             x, y = (w - tw) // 2, (h - th) // 2 - 26
             for offset in [(6, 6), (-5, 4), (4, -5), (-4, -4)]:
-                draw.text((x + offset[0], y + offset[1]), title, font=title_font, fill=(17, 24, 39, 240))
-            draw.text((x + 2, y + 2), title, font=title_font, fill=(239, 68, 68, 210))
-            draw.text((x, y), title, font=title_font, fill=(255, 255, 255, 255))
+                draw_text_with_emoji(draw, (x + offset[0], y + offset[1]), title, font=title_font, fill=(17, 24, 39, 240))
+            draw_text_with_emoji(draw, (x + 2, y + 2), title, font=title_font, fill=(239, 68, 68, 210))
+            draw_text_with_emoji(draw, (x, y), title, font=title_font, fill=(255, 255, 255, 255))
             if subtitle:
                 sw, sh = text_size(draw, subtitle, sub_font)
                 draw.rounded_rectangle(((w - sw) // 2 - 18, y + th + 16, (w + sw) // 2 + 18, y + th + 62), radius=8, fill=(15, 23, 42, 210))
-                draw.text(((w - sw) // 2, y + th + 22), subtitle, font=sub_font, fill=(255, 255, 255, 235))
+                draw_text_with_emoji(draw, ((w - sw) // 2, y + th + 22), subtitle, font=sub_font, fill=(255, 255, 255, 235))
 
         elif preset == "documentary_lower_third":
             band_h = 170 if subtitle else 126
@@ -2177,9 +2191,9 @@ class TitleStyleRenderer:
             draw.rectangle((0, y0, 12, y0 + band_h), fill=(214, 182, 107, 255))
             title_font = load_font(60)
             sub_font = load_font(30)
-            draw.text((56, y0 + 28), title, font=title_font, fill=(250, 246, 235, 255))
+            draw_text_with_emoji(draw, (56, y0 + 28), title, font=title_font, fill=(250, 246, 235, 255))
             if subtitle:
-                draw.text((58, y0 + 98), subtitle, font=sub_font, fill=(214, 182, 107, 230))
+                draw_text_with_emoji(draw, (58, y0 + 98), subtitle, font=sub_font, fill=(214, 182, 107, 230))
 
         elif preset == "minimal_editorial":
             title_font = load_font(56)
@@ -2188,9 +2202,9 @@ class TitleStyleRenderer:
             x = int(w * 0.12) if is_full_card else int(w * 0.07)
             y = (h - th) // 2 - 10
             draw.rectangle((x, y - 28, x + 2, y + th + 80), fill=(255, 255, 255, 190))
-            draw.text((x + 28, y), title, font=title_font, fill=(255, 255, 255, 235))
+            draw_text_with_emoji(draw, (x + 28, y), title, font=title_font, fill=(255, 255, 255, 235))
             if subtitle:
-                draw.text((x + 30, y + th + 24), subtitle, font=sub_font, fill=(255, 255, 255, 170))
+                draw_text_with_emoji(draw, (x + 30, y + th + 24), subtitle, font=sub_font, fill=(255, 255, 255, 170))
 
         elif preset == "handwritten_note":
             box_w = min(int(w * 0.62), 980)
@@ -2200,11 +2214,11 @@ class TitleStyleRenderer:
             title_font = load_font(66)
             sub_font = load_font(32)
             tw, th = text_size(draw, title, title_font)
-            draw.text(((w - tw) // 2 + 3, by + 28 + 3), title, font=title_font, fill=(14, 165, 233, 110))
-            draw.text(((w - tw) // 2, by + 28), title, font=title_font, fill=(31, 41, 55, 255))
+            draw_text_with_emoji(draw, ((w - tw) // 2 + 3, by + 28 + 3), title, font=title_font, fill=(14, 165, 233, 110))
+            draw_text_with_emoji(draw, ((w - tw) // 2, by + 28), title, font=title_font, fill=(31, 41, 55, 255))
             if subtitle:
                 sw, sh = text_size(draw, subtitle, sub_font)
-                draw.text(((w - sw) // 2, by + 106), subtitle, font=sub_font, fill=(234, 88, 12, 220))
+                draw_text_with_emoji(draw, ((w - sw) // 2, by + 106), subtitle, font=sub_font, fill=(234, 88, 12, 220))
 
         elif preset == "neon_night":
             title_font = load_font(74)
@@ -2214,12 +2228,12 @@ class TitleStyleRenderer:
             for radius, alpha in [(10, 70), (5, 120), (2, 210)]:
                 glow = Image.new("RGBA", self.target_size, (0, 0, 0, 0))
                 glow_draw = ImageDraw.Draw(glow)
-                glow_draw.text((x, y), title, font=title_font, fill=(244, 114, 182, alpha))
+                draw_text_with_emoji(glow_draw, (x, y), title, font=title_font, fill=(244, 114, 182, alpha))
                 img.alpha_composite(glow.filter(ImageFilter.GaussianBlur(radius)))
-            draw.text((x, y), title, font=title_font, fill=(255, 240, 252, 255))
+            draw_text_with_emoji(draw, (x, y), title, font=title_font, fill=(255, 240, 252, 255))
             if subtitle:
                 sw, sh = text_size(draw, subtitle, sub_font)
-                draw.text(((w - sw) // 2, y + th + 32), subtitle, font=sub_font, fill=(125, 211, 252, 230))
+                draw_text_with_emoji(draw, ((w - sw) // 2, y + th + 32), subtitle, font=sub_font, fill=(125, 211, 252, 230))
 
         elif preset == "film_subtitle":
             title_font = load_font(56)
@@ -2227,10 +2241,10 @@ class TitleStyleRenderer:
             tw, th = text_size(draw, title, title_font)
             y = int(h * 0.68) if is_full_card else int(h * 0.72)
             draw.rectangle((0, y - 34, w, y + 116), fill=(0, 0, 0, 115))
-            draw.text(((w - tw) // 2, y), title, font=title_font, fill=(248, 240, 220, 245))
+            draw_text_with_emoji(draw, ((w - tw) // 2, y), title, font=title_font, fill=(248, 240, 220, 245))
             if subtitle:
                 sw, sh = text_size(draw, subtitle, sub_font)
-                draw.text(((w - sw) // 2, y + 62), subtitle, font=sub_font, fill=(248, 240, 220, 190))
+                draw_text_with_emoji(draw, ((w - sw) // 2, y + 62), subtitle, font=sub_font, fill=(248, 240, 220, 190))
             for i in range(8):
                 yy = 40 + i * 52
                 draw.rectangle((32, yy, 48, yy + 20), outline=(248, 240, 220, 80), width=1)
@@ -2245,19 +2259,19 @@ class TitleStyleRenderer:
             draw.ellipse((x1 - 7, y1 - 7, x1 + 7, y1 + 7), fill=(255, 255, 255, 240))
             tw, th = text_size(draw, title, title_font)
             draw.rounded_rectangle(((w - tw) // 2 - 32, y0 + 28, (w + tw) // 2 + 32, y0 + 118), radius=18, fill=(255, 251, 235, 220))
-            draw.text(((w - tw) // 2, y0 + 42), title, font=title_font, fill=(23, 32, 26, 255))
+            draw_text_with_emoji(draw, ((w - tw) // 2, y0 + 42), title, font=title_font, fill=(23, 32, 26, 255))
             if subtitle:
                 sw, sh = text_size(draw, subtitle, sub_font)
-                draw.text(((w - sw) // 2, y0 + 112), subtitle, font=sub_font, fill=(47, 111, 143, 230))
+                draw_text_with_emoji(draw, ((w - sw) // 2, y0 + 112), subtitle, font=sub_font, fill=(47, 111, 143, 230))
 
         else: # cinematic_bold (default)
             title_font = load_font(78)
             sub_font = load_font(34)
             tw, th = text_size(draw, title, title_font)
-            draw.text(((w - tw) // 2, (h - th) // 2 - 40), title, font=title_font, fill=(255, 255, 255, 255))
+            draw_text_with_emoji(draw, ((w - tw) // 2, (h - th) // 2 - 40), title, font=title_font, fill=(255, 255, 255, 255))
             if subtitle:
                 sw, sh = text_size(draw, subtitle, sub_font)
-                draw.text(((w - sw) // 2, (h - sh) // 2 + 55), subtitle, font=sub_font, fill=(52, 211, 153, 255))
+                draw_text_with_emoji(draw, ((w - sw) // 2, (h - sh) // 2 + 55), subtitle, font=sub_font, fill=(52, 211, 153, 255))
 
         return img
 
@@ -3308,6 +3322,44 @@ class Renderer:
             "style": style,
         }
 
+    def _get_proxy_source(self, source: Path, is_video: bool) -> Path:
+        if not self.params.get("preview"):
+            return source
+            
+        proxy_dir = self.render_cache_dir.parent / "proxies"
+        proxy_dir.mkdir(parents=True, exist_ok=True)
+        
+        tw, th = self.target_size
+        proxy_key = f"{source.stat().st_mtime}_{source.stat().st_size}_{tw}x{th}"
+        proxy_hash = hashlib.md5(proxy_key.encode()).hexdigest()
+        
+        ext = ".mp4" if is_video else ".jpg"
+        proxy_path = proxy_dir / f"proxy_{proxy_hash}{ext}"
+        
+        if proxy_path.exists():
+            return proxy_path
+            
+        emit_event("log", message=f"正在生成极速预览代理: {source.name}")
+        try:
+            if is_video:
+                cmd = [
+                    "ffmpeg", "-y", "-i", str(source),
+                    "-vf", f"scale='min({tw},iw)':'min({th},ih)':force_original_aspect_ratio=decrease",
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
+                    "-c:a", "copy",
+                    str(proxy_path)
+                ]
+                subprocess.run(cmd, check=True, capture_output=True)
+            else:
+                with Image.open(source) as img:
+                    img = ImageOps.exif_transpose(img).convert("RGB")
+                    img.thumbnail((tw, th), Image.Resampling.LANCZOS)
+                    img.save(proxy_path, quality=85)
+            return proxy_path
+        except Exception as e:
+            emit_event("log", message=f"预览代理生成失败，回退原图: {e}")
+            return source
+
     def _image_clip(
         self,
         source: Path,
@@ -3315,6 +3367,7 @@ class Renderer:
         motion_config: Optional[Dict[str, Any]] = None,
         overlay_spec: Optional[Dict[str, Any]] = None,
     ):
+        source = self._get_proxy_source(source, is_video=False)
         fixed = self._cache_path("fixed_images", source, ".jpg", "exif_rgb_v1")
         if not fixed.exists():
             with Image.open(source) as img:
@@ -3339,6 +3392,7 @@ class Renderer:
         motion_config: Optional[Dict[str, Any]] = None,
         prefer_ffmpeg: bool = False,
     ):
+        source = self._get_proxy_source(source, is_video=True)
         if prefer_ffmpeg:
             self.video_segment_cache_stats["eligible"] += 1
             motion_spec = self._ffmpeg_video_motion_cache_spec(motion_config)
@@ -3516,6 +3570,8 @@ class Renderer:
         return self._video_overlay_fitted_safe(seg)
 
     def _can_use_ffmpeg_direct_chunk_segment(self, seg: Dict[str, Any]) -> bool:
+        if self.params.get("preview"):
+            return False
         if seg.get("type") != "video" or seg.get("overlay_text"):
             return False
 
@@ -3829,7 +3885,7 @@ class Renderer:
 
         img = Image.new("RGBA", (tw + 32, th + 24), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
-        draw.text((16, 10), text, font=font, fill=(255, 255, 255, 150))
+        draw_text_with_emoji(draw, (16, 10), text, font=font, fill=(255, 255, 255, 150))
 
         wm = ImageClip(np.array(img)).set_duration(video.duration).set_position(("right", "bottom"))
         return CompositeVideoClip([video, wm], size=video.size)
@@ -3975,17 +4031,28 @@ def _v56_build_chunk_groups(
 
     for seg in segments:
         duration = float(seg.get("duration") or 0.0)
-        if current and current_duration + duration > chunk_seconds:
-            groups.append({
-                "index": len(groups),
-                "segments": current,
-                "duration": round(current_duration, 3),
-                "cache_key": _v56_stable_json_hash(current_keys),
-                **chunk_route_payload(current),
-            })
-            current = []
-            current_duration = 0.0
-            current_keys = []
+        route = str(seg.get("runtime_render_route") or seg.get("render_route") or "moviepy_required")
+        is_direct = (route == "direct_chunk_candidate")
+        
+        if current:
+            # Check if current group is direct
+            current_routes = [str(s.get("runtime_render_route") or s.get("render_route") or "moviepy_required") for s in current]
+            current_is_direct = all(r == "direct_chunk_candidate" for r in current_routes)
+            
+            time_exceeded = (current_duration + duration > chunk_seconds)
+            route_changed = (current_is_direct != is_direct)
+            
+            if time_exceeded or route_changed:
+                groups.append({
+                    "index": len(groups),
+                    "segments": current,
+                    "duration": round(current_duration, 3),
+                    "cache_key": _v56_stable_json_hash(current_keys),
+                    **chunk_route_payload(current),
+                })
+                current = []
+                current_duration = 0.0
+                current_keys = []
 
         current.append(seg)
         current_duration += duration
