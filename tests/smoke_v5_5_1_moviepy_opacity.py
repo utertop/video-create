@@ -18,6 +18,16 @@ def main() -> None:
     spec.loader.exec_module(mod)
 
     renderer = mod.TitleStyleRenderer((320, 180))
+    text_layer = renderer.render_layer(
+        "To be continued!",
+        None,
+        {"preset": "film_subtitle", "motion": "static_hold"},
+        is_full_card=True,
+    )
+    old_perforation_area = text_layer.getchannel("A").crop((4, 4, 12, 82))
+    if old_perforation_area.getbbox() is not None:
+        raise AssertionError("film_subtitle full-card layer should not render left-side perforation boxes")
+
     img = mod.Image.new("RGBA", (320, 180), (0, 0, 0, 0))
     clip = mod.ImageClip(mod.np.array(img)).set_duration(1.2)
 

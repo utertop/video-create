@@ -30,6 +30,9 @@ export interface VideoEvent {
   saved_live_composes?: number;
   saved_render_seconds?: number;
   saved_live_fits?: number;
+  job_id?: string;
+  status?: string;
+  position?: number;
 }
 
 export interface PhotoSegmentCacheStats {
@@ -51,6 +54,13 @@ export interface VideoSegmentCacheStats {
   fallback: number;
   saved_live_fits: number;
   saved_render_seconds: number;
+}
+
+export interface ProxyMediaStats {
+  eligible: number;
+  hit: number;
+  created: number;
+  fallback: number;
 }
 
 export type BackgroundPickerTarget =

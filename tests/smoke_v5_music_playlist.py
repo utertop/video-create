@@ -128,8 +128,45 @@ def test_music_bed_and_playlist_render() -> None:
     assert ok, reason
     assert duration and 7.6 <= duration <= 8.4
     assert engine.video_has_audio_stream(output)
+    report_path = root / ".video_create_project" / "build_report.json"
+    assert report_path.exists()
+    report = engine.read_json(str(report_path))
+    assert report["render_mode"] == "v5_standard"
+    assert report["proxy_media"]["eligible"] >= 1
+    assert report["diagnostics"]["audio_mix"]["music_mode"] == "manual"
+
+
+def test_audio_loudness_normalized_cache_is_distinct() -> None:
+    root = Path("tests/tmp_vcs_audio_loudness_cache")
+    if root.exists():
+        shutil.rmtree(root)
+    root.mkdir(parents=True)
+
+    bgm = root / "bgm.m4a"
+    cache_root = root / ".video_create_project" / "audio_cache"
+    make_audio(bgm, duration=1.0, frequency=440)
+
+    plain = engine.prepare_cached_audio_for_mix(bgm, cache_root)
+    normalized = engine.prepare_cached_audio_for_mix(
+        bgm,
+        cache_root,
+        normalize_audio=True,
+        target_lufs=-18.0,
+    )
+    normalized_again = engine.prepare_cached_audio_for_mix(
+        bgm,
+        cache_root,
+        normalize_audio=True,
+        target_lufs=-18.0,
+    )
+
+    assert plain.exists()
+    assert normalized.exists()
+    assert normalized != plain
+    assert normalized_again == normalized
 
 
 if __name__ == "__main__":
     test_music_bed_and_playlist_render()
+    test_audio_loudness_normalized_cache_is_distinct()
     print("V5 music playlist smoke test passed")

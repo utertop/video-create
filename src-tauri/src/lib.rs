@@ -14,6 +14,8 @@ use tauri::{AppHandle, Emitter, Manager, State};
 #[derive(Clone, Default)]
 struct JobManager {
     current: Arc<Mutex<Option<ActiveJob>>>,
+    queued: Arc<Mutex<Vec<QueuedJob>>>,
+    queue_lock: Arc<Mutex<()>>,
     worker: Arc<Mutex<Option<WorkerProcess>>>,
 }
 
@@ -21,6 +23,12 @@ struct JobManager {
 struct ActiveJob {
     id: String,
     pid: u32,
+    cancelled: Arc<AtomicBool>,
+}
+
+#[derive(Clone)]
+struct QueuedJob {
+    id: String,
     cancelled: Arc<AtomicBool>,
 }
 
@@ -340,6 +348,22 @@ fn generate_video_blocking(
 
 #[tauri::command]
 fn cancel_video(manager: State<'_, JobManager>, job_id: String) -> GenerateVideoResult {
+    if let Ok(mut queued) = manager.queued.lock() {
+        if let Some(index) = queued.iter().position(|job| job.id == job_id) {
+            let job = queued.remove(index);
+            job.cancelled.store(true, Ordering::SeqCst);
+            return GenerateVideoResult {
+                ok: true,
+                message: "Queued V5 render task cancelled.".to_string(),
+                command_preview: String::new(),
+                output_path: None,
+                output_dir: None,
+                cancelled: true,
+                is_dry_run: false,
+            };
+        }
+    }
+
     let job = manager
         .current
         .lock()
@@ -701,6 +725,18 @@ fn render_v5_with_worker_blocking(
     let task_params = serde_json::from_str::<serde_json::Value>(&params_json)
         .unwrap_or_else(|_| json!({}));
 
+    let queue_position = enqueue_render_job(&app, &manager, &job_id, cancelled.clone())?;
+    let _queue_guard = manager
+        .queue_lock
+        .lock()
+        .map_err(|_| "render queue lock poisoned".to_string())?;
+    remove_queued_job(&manager, &job_id);
+    if cancelled.load(Ordering::SeqCst) {
+        emit_render_queue_event(&app, &job_id, "cancelled", queue_position, Some("V5 render was cancelled before start"));
+        return Err("V5 render was cancelled before start.".to_string());
+    }
+    emit_render_queue_event(&app, &job_id, "running", 0, Some("V5 render task started"));
+
     let result = run_v5_worker_task(
         &app,
         &manager,
@@ -717,12 +753,18 @@ fn render_v5_with_worker_blocking(
     clear_job(&manager, &job_id);
 
     if cancelled.load(Ordering::SeqCst) {
+        emit_render_queue_event(&app, &job_id, "cancelled", 0, Some("V5 render was cancelled"));
         return Err("V5 render was cancelled.".to_string());
     }
-    result?;
+    if let Err(err) = result {
+        emit_render_queue_event(&app, &job_id, "failed", 0, Some(&err));
+        return Err(err);
+    }
 
     if !output_file.is_file() {
-        return Err(format!("V5 worker finished but output file was not created: {}", output_file.display()));
+        let err = format!("V5 worker finished but output file was not created: {}", output_file.display());
+        emit_render_queue_event(&app, &job_id, "failed", 0, Some(&err));
+        return Err(err);
     }
 
     let payload = json!({
@@ -732,6 +774,7 @@ fn render_v5_with_worker_blocking(
         "message": "V5 render completed by local worker"
     });
     let _ = app.emit("video-progress", payload.to_string());
+    emit_render_queue_event(&app, &job_id, "done", 0, Some("V5 render task completed"));
     Ok(())
 }
 
@@ -925,6 +968,55 @@ fn run_v5_worker_task(
             return Err(value.get("message").and_then(|v| v.as_str()).unwrap_or("worker task failed").to_string());
         }
     }
+}
+
+fn enqueue_render_job(
+    app: &AppHandle,
+    manager: &JobManager,
+    job_id: &str,
+    cancelled: Arc<AtomicBool>,
+) -> Result<usize, String> {
+    let position = {
+        let mut queued = manager
+            .queued
+            .lock()
+            .map_err(|_| "render queue lock poisoned".to_string())?;
+        if queued.iter().any(|job| job.id == job_id) {
+            return Err(format!("render job already queued: {}", job_id));
+        }
+        queued.push(QueuedJob {
+            id: job_id.to_string(),
+            cancelled,
+        });
+        queued.len()
+    };
+    emit_render_queue_event(app, job_id, "queued", position, Some("V5 render task queued"));
+    Ok(position)
+}
+
+fn remove_queued_job(manager: &JobManager, job_id: &str) {
+    if let Ok(mut queued) = manager.queued.lock() {
+        if let Some(index) = queued.iter().position(|job| job.id == job_id) {
+            queued.remove(index);
+        }
+    }
+}
+
+fn emit_render_queue_event(
+    app: &AppHandle,
+    job_id: &str,
+    status: &str,
+    position: usize,
+    message: Option<&str>,
+) {
+    let payload = json!({
+        "type": "render_queue",
+        "job_id": job_id,
+        "status": status,
+        "position": position,
+        "message": message.unwrap_or(status),
+    });
+    let _ = app.emit("video-progress", payload.to_string());
 }
 
 fn start_v5_worker(app: &AppHandle) -> Result<WorkerProcess, String> {

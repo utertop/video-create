@@ -106,7 +106,7 @@ except Exception:
 # =========================
 
 SCHEMA_VERSION = "5.5"
-ENGINE_VERSION = "video-create-engine-v5.6.1"
+ENGINE_VERSION = "video-create-engine-v5.6.3"
 
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
 VIDEO_EXTS = (".mp4", ".mov", ".avi", ".mkv", ".m4v")
@@ -653,14 +653,27 @@ def probe_audio_file(source: Path) -> Dict[str, Any]:
     return media
 
 
-def prepare_cached_audio_for_mix(source: Path, cache_root: Path) -> Path:
+def prepare_cached_audio_for_mix(
+    source: Path,
+    cache_root: Path,
+    normalize_audio: bool = False,
+    target_lufs: float = -16.0,
+) -> Path:
     """Normalize audio once and reuse it across renders."""
     if not source.exists():
         raise FileNotFoundError(f"Audio source not found: {source}")
 
     bucket = cache_root / "normalized"
     bucket.mkdir(parents=True, exist_ok=True)
-    cache_path = bucket / f"{file_hash_light(source, 'audio_mix_aac_48k_stereo_v1')}.m4a"
+    try:
+        target_lufs = float(target_lufs)
+    except Exception:
+        target_lufs = -16.0
+    if not math.isfinite(target_lufs):
+        target_lufs = -16.0
+    target_lufs = max(-30.0, min(-8.0, target_lufs))
+    cache_extra = f"audio_mix_aac_48k_stereo_v2|loudnorm={bool(normalize_audio)}|target_lufs={target_lufs:.1f}"
+    cache_path = bucket / f"{file_hash_light(source, cache_extra)}.m4a"
     if cache_path.exists() and cache_path.stat().st_size > 1024:
         emit_event("log", message=f"Audio cache hit: {cache_path.name}")
         return cache_path
@@ -669,25 +682,33 @@ def prepare_cached_audio_for_mix(source: Path, cache_root: Path) -> Path:
     try:
         import imageio_ffmpeg
 
+        cmd = [
+            imageio_ffmpeg.get_ffmpeg_exe(),
+            "-y",
+            "-i",
+            str(source),
+            "-vn",
+            "-ac",
+            "2",
+            "-ar",
+            "48000",
+        ]
+        if normalize_audio:
+            cmd.extend([
+                "-af",
+                f"loudnorm=I={target_lufs:.1f}:TP=-1.5:LRA=11.0",
+            ])
+        cmd.extend([
+            "-c:a",
+            "aac",
+            "-b:a",
+            "160k",
+            "-movflags",
+            "+faststart",
+            str(tmp_path),
+        ])
         completed = subprocess.run(
-            [
-                imageio_ffmpeg.get_ffmpeg_exe(),
-                "-y",
-                "-i",
-                str(source),
-                "-vn",
-                "-ac",
-                "2",
-                "-ar",
-                "48000",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "160k",
-                "-movflags",
-                "+faststart",
-                str(tmp_path),
-            ],
+            cmd,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -2276,9 +2297,8 @@ class TitleStyleRenderer:
             if subtitle:
                 sw, sh = text_size(draw, subtitle, sub_font)
                 draw_text_with_emoji(draw, ((w - sw) // 2, y + 62), subtitle, font=sub_font, fill=(248, 240, 220, 190))
-            for i in range(8):
-                yy = 40 + i * 52
-                draw.rectangle((32, yy, 48, yy + 20), outline=(248, 240, 220, 80), width=1)
+            if not is_full_card:
+                draw.rectangle((28, 36, 30, h - 36), fill=(248, 240, 220, 42))
 
         elif preset == "route_marker":
             title_font = load_font(64)
@@ -2460,6 +2480,12 @@ class Renderer:
             "motion_fallback": 0,
             "saved_live_fits": 0,
             "saved_render_seconds": 0,
+        }
+        self.proxy_media_stats: Dict[str, int] = {
+            "eligible": 0,
+            "hit": 0,
+            "created": 0,
+            "fallback": 0,
         }
         self.render_scheduler_summary: Dict[str, Any] = self._apply_runtime_render_scheduler()
 
@@ -2694,6 +2720,25 @@ class Renderer:
         )
         emit_event("video_cache", **video_cache)
 
+    def _proxy_media_summary(self) -> Dict[str, int]:
+        return dict(self.proxy_media_stats)
+
+    def _emit_proxy_media_summary(self) -> None:
+        proxy_cache = self._proxy_media_summary()
+        if proxy_cache["eligible"] <= 0:
+            return
+        emit_event(
+            "log",
+            message=(
+                "Proxy media summary: "
+                f"eligible={proxy_cache['eligible']}, "
+                f"hit={proxy_cache['hit']}, "
+                f"created={proxy_cache['created']}, "
+                f"fallback={proxy_cache['fallback']}"
+            ),
+        )
+        emit_event("proxy_cache", **proxy_cache)
+
     def _prepare_music_path(self) -> Optional[Path]:
         paths = self._prepare_music_paths()
         return paths[0] if paths else None
@@ -2717,7 +2762,12 @@ class Renderer:
             if not source.exists():
                 continue
             try:
-                prepared.append(prepare_cached_audio_for_mix(source, self.audio_cache_dir))
+                prepared.append(prepare_cached_audio_for_mix(
+                    source,
+                    self.audio_cache_dir,
+                    normalize_audio=bool(self.audio_settings.get("normalize_audio", False)),
+                    target_lufs=float(self.audio_settings.get("target_lufs", -16.0) or -16.0),
+                ))
             except Exception as exc:
                 emit_event("log", message=f"Audio cache fallback to source: {exc}")
                 prepared.append(source)
@@ -2762,7 +2812,12 @@ class Renderer:
         try:
             # Normalize embedded source audio into the same cache contract so
             # stable-mode optimizations do not flatten or silently drop it.
-            prepared = prepare_cached_audio_for_mix(source, self.audio_cache_dir)
+            prepared = prepare_cached_audio_for_mix(
+                source,
+                self.audio_cache_dir,
+                normalize_audio=bool(self.audio_settings.get("normalize_audio", False)),
+                target_lufs=float(self.audio_settings.get("target_lufs", -16.0) or -16.0),
+            )
         except Exception as exc:
             emit_event("log", message=f"Source audio cache fallback to embedded track: {exc}")
             prepared = None
@@ -2838,6 +2893,8 @@ class Renderer:
             "fade_in_seconds": num("fade_in_seconds", 1.5, 0.0, 10.0),
             "fade_out_seconds": num("fade_out_seconds", 3.0, 0.0, 20.0),
             "duck_bgm_volume": num("duck_bgm_volume", 0.16, 0.0, 1.0),
+            "normalize_audio": bool(audio.get("normalize_audio", False)),
+            "target_lufs": num("target_lufs", -16.0, -30.0, -8.0),
         }
 
     def _segment_keep_audio(self, seg: Dict[str, Any]) -> bool:
@@ -2912,6 +2969,26 @@ class Renderer:
 
             self._emit_photo_segment_cache_summary()
             self._emit_video_segment_cache_summary()
+            self._emit_proxy_media_summary()
+
+            try:
+                project_dir = self.render_cache_dir.parent if self.render_cache_dir.name == "render_cache" else self.output_path.parent / ".video_create_project"
+                _v56_write_build_report(project_dir / "build_report.json", {
+                    "engine_version": ENGINE_VERSION,
+                    "status": "done",
+                    "render_mode": "v5_standard",
+                    "output_path": str(self.output_path),
+                    "output_size_bytes": self.output_path.stat().st_size if self.output_path.exists() else None,
+                    "duration_seconds": float(getattr(final, "duration", 0.0) or 0.0),
+                    "photo_segment_cache": self._photo_segment_cache_summary(),
+                    "video_segment_cache": self._video_segment_cache_summary(),
+                    "proxy_media": self._proxy_media_summary(),
+                    "render_scheduler": self.render_scheduler_summary,
+                    "diagnostics": _v56_render_diagnostics(self, [], [], False),
+                    "created_at": datetime.now().isoformat(),
+                })
+            except Exception as exc:
+                emit_event("log", message=f"build_report write skipped for standard render: {exc}")
 
             emit_event("artifact", artifact="video", path=str(self.output_path), message="最终视频已生成")
             emit_event("phase", phase="complete", message="视频导出成功", percent=100)
@@ -3360,27 +3437,37 @@ class Renderer:
         }
 
     def _get_proxy_source(self, source: Path, is_video: bool) -> Path:
-        if not self.params.get("preview"):
+        use_proxy = bool(
+            self.params.get("preview")
+            or self.params.get("proxy_media")
+            or self.params.get("use_proxy_media")
+            or self.params.get("optimized_media") == "proxy"
+        )
+        if not use_proxy:
             return source
             
         proxy_dir = self.render_cache_dir.parent / "proxies"
         proxy_dir.mkdir(parents=True, exist_ok=True)
         
         tw, th = self.target_size
-        proxy_key = f"{source.stat().st_mtime}_{source.stat().st_size}_{tw}x{th}"
+        self.proxy_media_stats["eligible"] += 1
+        proxy_key = f"{ENGINE_VERSION}|{source.resolve()}|{source.stat().st_mtime_ns}|{source.stat().st_size}|{tw}x{th}|video={is_video}"
         proxy_hash = hashlib.md5(proxy_key.encode()).hexdigest()
         
         ext = ".mp4" if is_video else ".jpg"
         proxy_path = proxy_dir / f"proxy_{proxy_hash}{ext}"
         
         if proxy_path.exists():
+            self.proxy_media_stats["hit"] += 1
             return proxy_path
             
         emit_event("log", message=f"正在生成极速预览代理: {source.name}")
         try:
             if is_video:
+                import imageio_ffmpeg
+
                 cmd = [
-                    "ffmpeg", "-y", "-i", str(source),
+                    imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-i", str(source),
                     "-vf", f"scale='min({tw},iw)':'min({th},ih)':force_original_aspect_ratio=decrease",
                     "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
                     "-c:a", "copy",
@@ -3392,8 +3479,10 @@ class Renderer:
                     img = ImageOps.exif_transpose(img).convert("RGB")
                     img.thumbnail((tw, th), Image.Resampling.LANCZOS)
                     img.save(proxy_path, quality=85)
+            self.proxy_media_stats["created"] += 1
             return proxy_path
         except Exception as e:
+            self.proxy_media_stats["fallback"] += 1
             emit_event("log", message=f"预览代理生成失败，回退原图: {e}")
             return source
 
@@ -4008,6 +4097,40 @@ def _v56_stable_json_hash(data: Any) -> str:
     return hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()
 
 
+def _v56_source_fingerprint(path_value: Any) -> Optional[Dict[str, Any]]:
+    if not path_value:
+        return None
+    path = Path(str(path_value))
+    payload: Dict[str, Any] = {
+        "path": str(path.resolve()) if path.exists() else str(path),
+        "exists": path.exists(),
+    }
+    if path.exists():
+        try:
+            stat = path.stat()
+            payload.update({
+                "size": int(stat.st_size),
+                "mtime_ns": int(stat.st_mtime_ns),
+            })
+        except Exception as exc:
+            payload["stat_error"] = str(exc)
+    return payload
+
+
+def _v56_segment_source_fingerprints(seg: Dict[str, Any]) -> Dict[str, Any]:
+    paths = {
+        "source_path": seg.get("source_path"),
+        "background_source_path": seg.get("background_source_path"),
+        "background_source_path_2": seg.get("background_source_path_2"),
+    }
+    return {
+        name: fingerprint
+        for name, value in paths.items()
+        for fingerprint in [_v56_source_fingerprint(value)]
+        if fingerprint is not None
+    }
+
+
 def _v56_segment_cache_key(seg: Dict[str, Any], params: Dict[str, Any]) -> str:
     stable = {
         "engine_version": ENGINE_VERSION,
@@ -4021,6 +4144,7 @@ def _v56_segment_cache_key(seg: Dict[str, Any], params: Dict[str, Any]) -> str:
         "background_mode": seg.get("background_mode"),
         "background_source_path": seg.get("background_source_path"),
         "background_source_path_2": seg.get("background_source_path_2"),
+        "source_fingerprints": _v56_segment_source_fingerprints(seg),
         "overlay_text": seg.get("overlay_text"),
         "title_style": seg.get("title_style"),
         "overlay_title_style": seg.get("overlay_title_style"),
@@ -4477,12 +4601,124 @@ def _v56_try_write_ffmpeg_direct_chunk(
             pass
 
 
+def _v56_ensure_silent_audio_track(video_path: Path, duration: Optional[float] = None) -> bool:
+    """Ensure chunk files all expose an AAC track so FFmpeg concat keeps audio streams."""
+    if not video_path.exists() or video_has_audio_stream(video_path):
+        return True
+
+    audio_tmp = video_path.with_suffix(".audio-track.tmp.mp4")
+    video_duration = max(0.1, float(duration or 0.0))
+    try:
+        import imageio_ffmpeg
+
+        cmd = [
+            imageio_ffmpeg.get_ffmpeg_exe(),
+            "-y",
+            "-i",
+            str(video_path),
+            "-f",
+            "lavfi",
+            "-t",
+            f"{video_duration:.3f}",
+            "-i",
+            "anullsrc=channel_layout=stereo:sample_rate=48000",
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "160k",
+            "-shortest",
+            "-movflags",
+            "+faststart",
+            str(audio_tmp),
+        ]
+        completed = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if completed.returncode == 0 and audio_tmp.exists() and audio_tmp.stat().st_size > 1024:
+            os.replace(str(audio_tmp), str(video_path))
+            return video_has_audio_stream(video_path)
+        emit_event("log", message=f"Stable chunk silent audio mux failed: {completed.stderr[-800:]}")
+    except Exception as exc:
+        emit_event("log", message=f"Stable chunk silent audio mux raised: {exc}")
+    finally:
+        try:
+            if audio_tmp.exists():
+                audio_tmp.unlink()
+        except Exception:
+            pass
+    return False
+
+
+def _v56_stable_should_force_chunk_audio_track(renderer: Any, segments: List[Dict[str, Any]]) -> bool:
+    settings = getattr(renderer, "audio_settings", {}) or {}
+    if not bool(settings.get("keep_source_audio", True)):
+        return False
+    try:
+        if float(settings.get("source_audio_volume", 1.0)) <= 0:
+            return False
+    except Exception:
+        return False
+
+    for seg in segments:
+        if seg.get("type") != "video" or not renderer._segment_keep_audio(seg):
+            continue
+        source_path = seg.get("source_path")
+        if source_path and video_has_audio_stream(Path(str(source_path))):
+            return True
+    return False
+
+
+def _v56_render_diagnostics(
+    renderer: Any,
+    groups: List[Dict[str, Any]],
+    chunk_reports: List[Dict[str, Any]],
+    force_chunk_audio_track: bool,
+) -> Dict[str, Any]:
+    settings = getattr(renderer, "audio_settings", {}) or {}
+    cached = sum(1 for item in chunk_reports if item.get("status") == "cached")
+    rendered = sum(1 for item in chunk_reports if item.get("status") == "rendered")
+    source_paths = []
+    for seg in getattr(renderer, "plan", {}).get("segments", []) or []:
+        source_path = seg.get("source_path")
+        if source_path:
+            source_paths.append(source_path)
+    return {
+        "strategy_version": "render_diagnostics_v1",
+        "chunk_reuse": {
+            "cached": cached,
+            "rendered": rendered,
+            "total": len(groups),
+        },
+        "smart_invalidation": {
+            "enabled": True,
+            "keys": ["engine_version", "render_params", "source_path", "file_size", "mtime_ns"],
+            "fingerprinted_source_count": len(set(source_paths)),
+        },
+        "audio_mix": {
+            "music_mode": settings.get("music_mode"),
+            "keep_source_audio": bool(settings.get("keep_source_audio", True)),
+            "source_audio_volume": settings.get("source_audio_volume"),
+            "bgm_volume": settings.get("bgm_volume"),
+            "auto_ducking": bool(settings.get("auto_ducking", True)),
+            "normalize_audio": bool(settings.get("normalize_audio", False)),
+            "target_lufs": settings.get("target_lufs"),
+            "force_chunk_audio_track": bool(force_chunk_audio_track),
+        },
+        "proxy_media": renderer._proxy_media_summary() if hasattr(renderer, "_proxy_media_summary") else {},
+    }
+
+
 def _v56_write_chunk_video(
     renderer: Any,
     chunk: Dict[str, Any],
     chunk_path: Path,
     fps: int,
     params: Dict[str, Any],
+    ensure_audio_track: bool = False,
 ) -> None:
     clips = []
     rendered_segments = []
@@ -4492,6 +4728,10 @@ def _v56_write_chunk_video(
     try:
         chunk_route = str(chunk.get("runtime_chunk_route") or "")
         if chunk_route == "ffmpeg_direct_chunk" and _v56_try_write_ffmpeg_direct_chunk(renderer, chunk, tmp_chunk, params):
+            if ensure_audio_track:
+                ok, _reason, duration = _v56_validate_video(tmp_chunk)
+                if ok and not _v56_ensure_silent_audio_track(tmp_chunk, duration):
+                    raise RuntimeError("failed to ensure audio-ready stable chunk")
             _v56_atomic_replace(tmp_chunk, chunk_path)
             return
 
@@ -4525,6 +4765,9 @@ def _v56_write_chunk_video(
         ok, reason, _duration = _v56_validate_video(tmp_chunk)
         if not ok:
             raise RuntimeError(f"chunk 校验失败: {reason}")
+
+        if ensure_audio_track and not _v56_ensure_silent_audio_track(tmp_chunk, _duration):
+            raise RuntimeError("failed to ensure audio-ready stable chunk")
 
         _v56_atomic_replace(tmp_chunk, chunk_path)
     finally:
@@ -4615,6 +4858,7 @@ class V56StableRenderer:
 
         renderer = Renderer(self.plan, str(self.output), self.params)
         segments = self.plan.get("segments", [])
+        force_chunk_audio_track = _v56_stable_should_force_chunk_audio_track(renderer, segments)
         groups = _v56_build_chunk_groups(segments, self.chunk_seconds, self.params)
         chunk_route_counts: Dict[str, int] = {}
         for group in groups:
@@ -4659,7 +4903,14 @@ class V56StableRenderer:
                 continue
 
             try:
-                _v56_write_chunk_video(renderer, group, chunk_path, self.fps, self.params)
+                _v56_write_chunk_video(
+                    renderer,
+                    group,
+                    chunk_path,
+                    self.fps,
+                    self.params,
+                    ensure_audio_track=force_chunk_audio_track,
+                )
                 ok, reason, duration = _v56_validate_video(chunk_path)
                 if not ok:
                     raise RuntimeError(reason)
@@ -4700,12 +4951,14 @@ class V56StableRenderer:
                     "chunks": chunk_reports,
                     "photo_segment_cache": renderer._photo_segment_cache_summary(),
                     "video_segment_cache": renderer._video_segment_cache_summary(),
+                    "proxy_media": renderer._proxy_media_summary(),
                     "render_scheduler": renderer.render_scheduler_summary,
                     "chunk_scheduler": {
                         "strategy_version": "chunk_rules_v1",
                         "route_counts": chunk_route_counts,
                         "total_chunks": len(groups),
                     },
+                    "diagnostics": _v56_render_diagnostics(renderer, groups, chunk_reports, force_chunk_audio_track),
                     "created_at": datetime.now().isoformat(),
                 })
                 raise
@@ -4746,6 +4999,7 @@ class V56StableRenderer:
         elapsed = (datetime.now() - started_at).total_seconds()
         renderer._emit_photo_segment_cache_summary()
         renderer._emit_video_segment_cache_summary()
+        renderer._emit_proxy_media_summary()
         report = {
             "engine_version": ENGINE_VERSION,
             "status": "done",
@@ -4760,12 +5014,14 @@ class V56StableRenderer:
             "chunks": chunk_reports,
             "photo_segment_cache": renderer._photo_segment_cache_summary(),
             "video_segment_cache": renderer._video_segment_cache_summary(),
+            "proxy_media": renderer._proxy_media_summary(),
             "render_scheduler": renderer.render_scheduler_summary,
             "chunk_scheduler": {
                 "strategy_version": "chunk_rules_v1",
                 "route_counts": chunk_route_counts,
                 "total_chunks": len(groups),
             },
+            "diagnostics": _v56_render_diagnostics(renderer, groups, chunk_reports, force_chunk_audio_track),
             "created_at": datetime.now().isoformat(),
         }
         _v56_write_build_report(self.report_path, report)

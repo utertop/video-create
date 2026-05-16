@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+import shutil
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -139,7 +140,63 @@ def test_renderer_applies_runtime_render_routes() -> None:
     assert direct_only_groups[0]["runtime_chunk_route_reason"] == "all_segments_direct_chunk_safe"
 
 
+def test_stable_chunk_cache_key_tracks_source_file_changes() -> None:
+    root = Path("tests/tmp_vcs_smart_invalidation")
+    if root.exists():
+        shutil.rmtree(root)
+    root.mkdir(parents=True)
+
+    source = root / "clip.mp4"
+    source.write_bytes(b"old source")
+    seg = {
+        "segment_id": "seg_cache_key",
+        "type": "video",
+        "source_path": str(source),
+        "duration": 1.0,
+        "transition_config": {"type": "cut", "duration": 0},
+        "motion_config": {"type": "none"},
+        "keep_audio": False,
+    }
+    params = {"fps": 12, "quality": "draft"}
+
+    first = engine._v56_segment_cache_key(seg, params)
+    source.write_bytes(b"new source with different bytes")
+    second = engine._v56_segment_cache_key(seg, params)
+
+    assert first != second, "stable chunk cache key must invalidate when source file content changes"
+
+
+def test_proxy_media_cache_is_opt_in_and_reportable() -> None:
+    root = Path("tests/tmp_vcs_proxy_media")
+    if root.exists():
+        shutil.rmtree(root)
+    root.mkdir(parents=True)
+
+    source = root / "image_01.jpg"
+    engine.Image.new("RGB", (320, 180), (64, 120, 180)).save(source, quality=90)
+    plan = {"render_settings": {"fps": 12, "aspect_ratio": "16:9"}, "segments": []}
+    renderer = engine.Renderer(
+        plan,
+        str(root / "output.mp4"),
+        {"fps": 12, "quality": "draft", "proxy_media": True},
+    )
+
+    proxy_a = renderer._get_proxy_source(source, is_video=False)
+    proxy_b = renderer._get_proxy_source(source, is_video=False)
+    stats = renderer._proxy_media_summary()
+
+    assert proxy_a == proxy_b
+    assert proxy_a.exists()
+    assert proxy_a.parent == root / ".video_create_project" / "proxies"
+    assert stats["eligible"] == 2
+    assert stats["created"] == 1
+    assert stats["hit"] == 1
+    assert stats["fallback"] == 0
+
+
 if __name__ == "__main__":
     test_compile_emits_render_scheduler_hints()
     test_renderer_applies_runtime_render_routes()
+    test_stable_chunk_cache_key_tracks_source_file_changes()
+    test_proxy_media_cache_is_opt_in_and_reportable()
     print("V5 render scheduler smoke test passed")

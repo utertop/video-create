@@ -323,7 +323,84 @@ def test_manual_bgm_mix_preserves_source_audio_tone() -> None:
     assert_contains_source_and_bgm_audio(stable_output)
 
 
+def test_stable_bgm_mix_preserves_source_audio_after_silent_leading_chunk() -> None:
+    root = Path("tests/tmp_vcs_bgm_leading_silent_chunk")
+    if root.exists():
+        shutil.rmtree(root)
+    root.mkdir(parents=True)
+
+    lead_image = root / "lead.jpg"
+    source = root / "source_880hz.mp4"
+    bgm = root / "bgm_440hz.m4a"
+    output = root / "stable_mixed_after_silent_lead.mp4"
+    plan_path = root / "render_plan.json"
+    make_image(lead_image, (64, 92, 128))
+    make_video_with_tone(source, duration=2.0, frequency=880)
+    make_bgm(bgm, duration=3.0)
+
+    plan = {
+        "document_type": "render_plan",
+        "render_settings": {"fps": 12, "aspect_ratio": "16:9", "quality": "draft"},
+        "total_duration": 3.0,
+        "segments": [
+            {
+                "segment_id": "seg_lead_image",
+                "type": "image",
+                "source_path": str(lead_image),
+                "duration": 1.0,
+                "start_time": 0.0,
+                "end_time": 1.0,
+                "text": "Lead",
+                "transition_config": {"type": "cut", "duration": 0},
+                "motion_config": {"type": "none"},
+            },
+            {
+                "segment_id": "seg_source_video",
+                "type": "video",
+                "source_path": str(source),
+                "duration": 2.0,
+                "start_time": 1.0,
+                "end_time": 3.0,
+                "text": "Source Audio",
+                "keep_audio": True,
+                "transition_config": {"type": "cut", "duration": 0},
+                "motion_config": {"type": "none"},
+            },
+        ],
+    }
+    audio_settings = {
+        "music_mode": "manual",
+        "music_path": str(bgm),
+        "music_source": "manual",
+        "bgm_volume": 0.35,
+        "source_audio_volume": 1.0,
+        "keep_source_audio": True,
+        "auto_ducking": False,
+        "fade_in_seconds": 0.0,
+        "fade_out_seconds": 0.0,
+    }
+
+    plan_path.write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
+    engine.render_with_v56_stability(
+        str(plan_path),
+        str(output),
+        {
+            "fps": 12,
+            "quality": "draft",
+            "performance_mode": "stable",
+            "chunk_seconds": 30,
+            "cover": False,
+            "audio": audio_settings,
+        },
+    )
+    ok, reason, duration = engine._v56_validate_video(output, min_size=512)
+    assert ok, reason
+    assert duration and 2.8 <= duration <= 3.3
+    assert_contains_source_and_bgm_audio(output)
+
+
 if __name__ == "__main__":
     test_manual_bgm_mix_adds_audio_stream()
     test_manual_bgm_mix_preserves_source_audio_tone()
+    test_stable_bgm_mix_preserves_source_audio_after_silent_leading_chunk()
     print("V5 BGM mix smoke test passed")

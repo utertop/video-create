@@ -14,7 +14,11 @@ import {
   X,
   Wand2,
   ListChecks,
+  Clock,
+  History,
+  Loader2,
   PlayCircle,
+  RotateCcw,
   Calendar,
   Folder,
   Layers,
@@ -67,9 +71,31 @@ import { MaterialGallery, PreviewModal } from "./components/MaterialGallery";
 import { PerformanceModeControl, PerformanceRecommendation, performanceModeLabel } from "./components/PerformanceModeControl";
 import { normalizeTitleStyle, titleTemplateLabel, TitleStyleLab } from "./components/TitleStylePreview";
 import { StudioState, useStudio } from "./store/studio";
-import { BackgroundPickerTarget, PhotoSegmentCacheStats, VideoEvent, VideoSegmentCacheStats } from "./types/studio";
+import { BackgroundPickerTarget, PhotoSegmentCacheStats, ProxyMediaStats, VideoEvent, VideoSegmentCacheStats } from "./types/studio";
 import { applyStructuredEvent, detectPhase, formatProgressLine, parseProgress, parseVideoEvent } from "./lib/progress";
 import "./v5-background.css";
+
+type RenderQueueStatus = "queued" | "running" | "done" | "failed" | "cancelled";
+
+interface RenderQueueItem {
+  id: string;
+  label: string;
+  status: RenderQueueStatus;
+  position: number;
+  progress: number;
+  message?: string;
+  planPath?: string;
+  outputPath?: string;
+  outputDir?: string;
+  commandPreview?: string;
+  params?: RenderV5Params;
+  createdAt: number;
+  startedAt?: number;
+  finishedAt?: number;
+  retryCount: number;
+}
+
+const ACTIVE_RENDER_QUEUE_STATUSES = new Set<RenderQueueStatus>(["queued", "running"]);
 
 function ProgressBar({ percent, phase, isDryRun }: { percent: number; phase: string; isDryRun: boolean }) {
   return (
@@ -109,6 +135,8 @@ export function App() {
   const [materials, setMaterials] = useState<VideoEvent[]>([]);
   const [photoSegmentCache, setPhotoSegmentCache] = useState<PhotoSegmentCacheStats | null>(null);
   const [videoSegmentCache, setVideoSegmentCache] = useState<VideoSegmentCacheStats | null>(null);
+  const [proxyMedia, setProxyMedia] = useState<ProxyMediaStats | null>(null);
+  const [renderQueue, setRenderQueue] = useState<RenderQueueItem[]>([]);
   const [selectedMaterial, setSelectedMaterial] = useState<VideoEvent | null>(null);
   const [showGalleryOverlay, setShowGalleryOverlay] = useState(false);
   const [galleryView, setGalleryView] = useState<"chapter" | "type" | "time">("chapter");
@@ -132,6 +160,8 @@ export function App() {
     setMaterials([]);
     setPhotoSegmentCache(null);
     setVideoSegmentCache(null);
+    setProxyMedia(null);
+    setRenderQueue([]);
     setSelectedMaterial(null);
     setShowGalleryOverlay(false);
     setRenderPreviewPath(null);
@@ -148,12 +178,65 @@ export function App() {
     document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
+  function syncRenderQueueEvent(event: VideoEvent) {
+    if (event.type === "render_queue" && event.job_id && event.status) {
+      const status = normalizeQueueStatus(event.status);
+      if (status === "running") {
+        activeJobRef.current = event.job_id;
+        setIsCancelling(false);
+      }
+      if (!ACTIVE_RENDER_QUEUE_STATUSES.has(status) && activeJobRef.current === event.job_id) {
+        activeJobRef.current = null;
+        setIsCancelling(false);
+      }
+
+      setRenderQueue((prev) => {
+        const now = Date.now();
+        const existing = prev.find((item) => item.id === event.job_id);
+        const nextItem: RenderQueueItem = {
+          ...(existing || {
+            id: event.job_id!,
+            label: shortJobId(event.job_id!),
+            status,
+            position: Number(event.position || 0),
+            progress: 0,
+            createdAt: now,
+            retryCount: 0,
+          }),
+          status,
+          position: Number(event.position || 0),
+          message: event.message || existing?.message,
+          startedAt: status === "running" ? existing?.startedAt || now : existing?.startedAt,
+          finishedAt: ACTIVE_RENDER_QUEUE_STATUSES.has(status) ? existing?.finishedAt : existing?.finishedAt || now,
+          progress: status === "done" ? 100 : existing?.progress || 0,
+        };
+        if (existing) return prev.map((item) => (item.id === event.job_id ? nextItem : item));
+        return [...prev, nextItem];
+      });
+      return;
+    }
+
+    if (typeof event.percent === "number" || event.message) {
+      setRenderQueue((prev) =>
+        prev.map((item) => {
+          if (item.status !== "running") return item;
+          return {
+            ...item,
+            progress: typeof event.percent === "number" ? Math.max(0, Math.min(100, event.percent)) : item.progress,
+            message: event.message || item.message,
+          };
+        }),
+      );
+    }
+  }
+
   useEffect(() => {
     const unlisten = listen<string>("video-progress", (event) => {
       const raw = event.payload;
       const structured = parseVideoEvent(raw);
       if (structured) {
-        applyStructuredEvent(structured, setPhase, setProgress, setLogs, setMaterials, setPhotoSegmentCache, setVideoSegmentCache);
+        syncRenderQueueEvent(structured);
+        applyStructuredEvent(structured, setPhase, setProgress, setLogs, setMaterials, setPhotoSegmentCache, setVideoSegmentCache, setProxyMedia);
         return;
       }
 
@@ -187,6 +270,15 @@ export function App() {
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [logs]);
+
+  useEffect(() => {
+    const hasLiveJobs = renderQueue.some((item) => ACTIVE_RENDER_QUEUE_STATUSES.has(item.status));
+    setIsRendering(hasLiveJobs);
+    if (!hasLiveJobs) {
+      activeJobRef.current = null;
+      setIsCancelling(false);
+    }
+  }, [renderQueue]);
 
   const v5ProjectDir = useMemo(() => {
     const base = state.outputFolder || state.inputFolder || "";
@@ -398,12 +490,99 @@ export function App() {
     }
   }
 
-  async function onGenerate(dryRun: boolean = false) {
-    if (isRendering) {
-      await onCancel();
+  function enqueueV5RenderJob() {
+    if (!v5PlanPath || !v5OutputPath) {
+      const message = "V5 render plan or output path is missing. Please compile the V5 plan first.";
+      setResult({ ok: false, message, commandPreview: v5CommandPreview });
+      setToast(message);
       return;
     }
 
+    const hasLiveJobs = renderQueue.some((item) => ACTIVE_RENDER_QUEUE_STATUSES.has(item.status));
+    if (!hasLiveJobs) {
+      setToast(null);
+      setResult(null);
+      setLogs([]);
+      setProgress(0);
+      setPhase("V5 render queued");
+      setIsCancelling(false);
+    }
+
+    const jobId = crypto.randomUUID();
+    const job: RenderQueueItem = {
+      id: jobId,
+      label: v5FinalOutputName,
+      status: "queued",
+      position: 0,
+      progress: 0,
+      message: hasLiveJobs ? "Waiting for current render" : "Ready to start",
+      planPath: v5PlanPath,
+      outputPath: v5OutputPath,
+      outputDir: state.outputFolder || undefined,
+      commandPreview: v5CommandPreview,
+      params: v5RenderParams,
+      createdAt: Date.now(),
+      retryCount: 0,
+    };
+
+    setRenderQueue((prev) => [...prev, job]);
+    setLogs((prev) => [...prev, `Render queued: ${job.label} (${shortJobId(job.id)})`].slice(-100));
+    void runRenderQueueJob(job);
+  }
+
+  async function runRenderQueueJob(job: RenderQueueItem) {
+    if (!job.planPath || !job.outputPath || !job.params) return;
+    try {
+      await renderV5(job.planPath, job.outputPath, job.params, job.id);
+      setRenderQueue((prev) =>
+        prev.map((item) =>
+          item.id === job.id
+            ? {
+                ...item,
+                status: "done",
+                progress: 100,
+                message: "Render completed",
+                finishedAt: item.finishedAt || Date.now(),
+              }
+            : item,
+        ),
+      );
+      setResult({
+        ok: true,
+        message: `V5 render completed: ${job.outputPath}`,
+        commandPreview: job.commandPreview || v5CommandPreview,
+        outputPath: job.outputPath,
+        outputDir: job.outputDir,
+      });
+      setProgress(100);
+      setPhase("Render complete");
+    } catch (err: any) {
+      const message = String(err);
+      let shouldShowFailure = true;
+      setRenderQueue((prev) =>
+        prev.map((item) => {
+          if (item.id !== job.id) return item;
+          const wasCancelled = item.status === "cancelled" || message.toLowerCase().includes("cancel");
+          shouldShowFailure = !wasCancelled;
+          return {
+            ...item,
+            status: wasCancelled ? "cancelled" : "failed",
+            message: wasCancelled ? "Render cancelled" : message,
+            finishedAt: item.finishedAt || Date.now(),
+          };
+        }),
+      );
+      if (shouldShowFailure) {
+        setResult({
+          ok: false,
+          message: `V5 render failed: ${message}`,
+          commandPreview: job.commandPreview || v5CommandPreview,
+        });
+      }
+    }
+  }
+
+  async function onGenerate(dryRun: boolean = false) {
     if (!state.inputFolder || (!dryRun && !state.outputFolder)) {
       const warning = !state.inputFolder ? "请先选择素材目录。" : "请先选择输出目录。";
       setResult({
@@ -418,6 +597,8 @@ export function App() {
 
     // V5 渲染路径
     if (state.v5Stage === "RENDER" && !dryRun) {
+      enqueueV5RenderJob();
+      return;
       setToast(null);
       setIsRendering(true);
       setIsCancelling(false);
@@ -608,6 +789,65 @@ export function App() {
       setToast(response.message);
       setIsCancelling(false);
     }
+  }
+
+  async function onCancelQueueJob(jobId: string) {
+    const isCurrent = activeJobRef.current === jobId;
+    if (isCurrent) setIsCancelling(true);
+    setRenderQueue((prev) =>
+      prev.map((item) =>
+        item.id === jobId && ACTIVE_RENDER_QUEUE_STATUSES.has(item.status)
+          ? { ...item, message: "Cancelling..." }
+          : item,
+      ),
+    );
+    const response = await cancelVideo(jobId);
+    if (!response.ok) {
+      setToast(response.message);
+      if (isCurrent) setIsCancelling(false);
+      return;
+    }
+    setRenderQueue((prev) =>
+      prev.map((item) =>
+        item.id === jobId
+          ? {
+              ...item,
+              status: "cancelled",
+              message: response.message || "Render cancelled",
+              finishedAt: item.finishedAt || Date.now(),
+            }
+          : item,
+      ),
+    );
+  }
+
+  function onRetryQueueJob(item: RenderQueueItem) {
+    if (!item.planPath || !item.outputPath || !item.params) {
+      setToast("This render job cannot be retried because its render parameters are missing.");
+      return;
+    }
+    const hasLiveJobs = renderQueue.some((queueItem) => ACTIVE_RENDER_QUEUE_STATUSES.has(queueItem.status));
+    if (!hasLiveJobs) {
+      setResult(null);
+      setProgress(0);
+      setPhase("V5 render queued");
+      setIsCancelling(false);
+    }
+    const retryJob: RenderQueueItem = {
+      ...item,
+      id: crypto.randomUUID(),
+      status: "queued",
+      position: 0,
+      progress: 0,
+      message: "Retry queued",
+      createdAt: Date.now(),
+      startedAt: undefined,
+      finishedAt: undefined,
+      retryCount: item.retryCount + 1,
+    };
+    setRenderQueue((prev) => [...prev, retryJob]);
+    setLogs((prev) => [...prev, `Retry queued: ${retryJob.label} (${shortJobId(retryJob.id)})`].slice(-100));
+    void runRenderQueueJob(retryJob);
   }
 
   return (
@@ -828,6 +1068,13 @@ export function App() {
                 </div>
               ) : null}
               <MusicAudioPanel state={state} onPickMusicFile={onPickMusicFile} onPickMusicFiles={onPickMusicFiles} />
+              {proxyMedia && proxyMedia.eligible > 0 ? (
+                <StatusItem
+                  label="Proxy media"
+                  value={proxyMediaLabel(proxyMedia)}
+                  highlight={proxyMedia.hit > 0}
+                />
+              ) : null}
             </div>
 
             <div className="option-row">
@@ -921,13 +1168,21 @@ export function App() {
                <div className="render-stage-container">
                   <SectionTitle icon={<FileVideo size={18} />} title="渲染执行" />
                   
-                   {(isRendering || logs.length > 0) && (
+                  {(isRendering || logs.length > 0) && (
                     <div className="render-progress-area">
                       <ProgressBar isDryRun={state.isDryRun} percent={progress || 0} phase={phase} />
                     </div>
                   )}
 
-                  {!isRendering && (
+                  {renderQueue.length > 0 && (
+                    <RenderQueuePanel
+                      queue={renderQueue}
+                      onCancel={onCancelQueueJob}
+                      onRetry={onRetryQueueJob}
+                    />
+                  )}
+
+                  {(
                     <div className="v5-render-trigger">
                        <button className="secondary-action" disabled={!state.v5RenderPlan || isPreviewRendering} onClick={onPreviewRenderSample}>
                           <Play size={18} /> {isPreviewRendering ? "正在生成低清预览..." : "生成低清小样"}
@@ -941,8 +1196,8 @@ export function App() {
                            <video src={convertFileSrc(renderPreviewPath)} controls />
                          </div>
                        )}
-                       <button className="primary-action pulse-guidance" disabled={!state.outputFolder || isRendering} onClick={() => onGenerate(false)}>
-                          <PlayCircle size={24} /> 立即开始最终合成
+                       <button className="primary-action pulse-guidance" disabled={!state.outputFolder} onClick={() => onGenerate(false)}>
+                          {isRendering ? <Clock size={24} /> : <PlayCircle size={24} />} {isRendering ? "Add to render queue" : "Start final render"}
                        </button>
                        <p className="hint-text">点击上方按钮，启动 V5 渲染引擎合并素材并导出视频。</p>
                     </div>
@@ -1099,6 +1354,144 @@ export function App() {
     )}
     </>
   );
+}
+
+function RenderQueuePanel({
+  queue,
+  onCancel,
+  onRetry,
+}: {
+  queue: RenderQueueItem[];
+  onCancel: (jobId: string) => void;
+  onRetry: (item: RenderQueueItem) => void;
+}) {
+  const current = queue.find((item) => item.status === "running") || null;
+  const waiting = queue.filter((item) => item.status === "queued");
+  const history = queue
+    .filter((item) => !ACTIVE_RENDER_QUEUE_STATUSES.has(item.status))
+    .slice()
+    .reverse();
+
+  return (
+    <div className="render-queue-panel">
+      <div className="render-queue-header">
+        <div>
+          <strong>Render queue</strong>
+          <span>{waiting.length} waiting, {history.length} finished</span>
+        </div>
+      </div>
+
+      <div className="render-queue-grid">
+        <div className="render-queue-section current">
+          <div className="render-queue-section-title">
+            <Loader2 size={16} className={current ? "spin" : undefined} />
+            Current
+          </div>
+          {current ? (
+            <RenderQueueRow item={current} onCancel={onCancel} onRetry={onRetry} />
+          ) : (
+            <div className="render-queue-empty">No active render</div>
+          )}
+        </div>
+
+        <div className="render-queue-section">
+          <div className="render-queue-section-title">
+            <Clock size={16} />
+            Waiting
+          </div>
+          {waiting.length > 0 ? (
+            waiting.map((item) => <RenderQueueRow key={item.id} item={item} onCancel={onCancel} onRetry={onRetry} />)
+          ) : (
+            <div className="render-queue-empty">Queue is empty</div>
+          )}
+        </div>
+
+        <div className="render-queue-section history">
+          <div className="render-queue-section-title">
+            <History size={16} />
+            History
+          </div>
+          {history.length > 0 ? (
+            history.map((item) => <RenderQueueRow key={item.id} item={item} onCancel={onCancel} onRetry={onRetry} />)
+          ) : (
+            <div className="render-queue-empty">No completed jobs yet</div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RenderQueueRow({
+  item,
+  onCancel,
+  onRetry,
+}: {
+  item: RenderQueueItem;
+  onCancel: (jobId: string) => void;
+  onRetry: (item: RenderQueueItem) => void;
+}) {
+  const canCancel = ACTIVE_RENDER_QUEUE_STATUSES.has(item.status);
+  const canRetry = item.status === "failed";
+  return (
+    <div className={`render-queue-row ${item.status}`}>
+      <div className="render-queue-main">
+        <div className="render-queue-name">
+          <span className={`render-queue-status-dot ${item.status}`} />
+          <strong>{item.label}</strong>
+          {item.retryCount > 0 && <span className="render-queue-retry-badge">retry {item.retryCount}</span>}
+        </div>
+        <div className="render-queue-meta">
+          <span>{queueStatusLabel(item.status)}</span>
+          <span>{shortJobId(item.id)}</span>
+          {item.position > 0 && <span>#{item.position}</span>}
+          <span>{formatQueueTime(item.finishedAt || item.startedAt || item.createdAt)}</span>
+        </div>
+        {item.message && <div className="render-queue-message">{item.message}</div>}
+        {item.status === "running" && (
+          <div className="render-queue-progress">
+            <div style={{ width: `${Math.max(2, item.progress)}%` }} />
+          </div>
+        )}
+      </div>
+      <div className="render-queue-actions">
+        {canCancel && (
+          <button className="render-queue-icon-btn danger" type="button" onClick={() => onCancel(item.id)} title="Cancel render">
+            <Square size={14} />
+          </button>
+        )}
+        {canRetry && (
+          <button className="render-queue-icon-btn" type="button" onClick={() => onRetry(item)} title="Retry failed render">
+            <RotateCcw size={14} />
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function normalizeQueueStatus(status: string): RenderQueueStatus {
+  if (status === "running" || status === "done" || status === "failed" || status === "cancelled") return status;
+  return "queued";
+}
+
+function queueStatusLabel(status: RenderQueueStatus): string {
+  return {
+    queued: "Waiting",
+    running: "Rendering",
+    done: "Done",
+    failed: "Failed",
+    cancelled: "Cancelled",
+  }[status];
+}
+
+function shortJobId(jobId: string): string {
+  return jobId.length > 8 ? jobId.slice(0, 8) : jobId;
+}
+
+function formatQueueTime(timestamp?: number): string {
+  if (!timestamp) return "";
+  return new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
 function ResultCard({ result }: { result: GenerateVideoResult }) {
@@ -1738,6 +2131,14 @@ function photoSegmentCacheLabel(stats: PhotoSegmentCacheStats): string {
     parts.push(`节省 ${formatDurationCompact(stats.saved_render_seconds)}`);
   }
   return `${parts.join(" / ")} · 候选 ${stats.eligible}`;
+}
+
+function proxyMediaLabel(stats: ProxyMediaStats): string {
+  const parts = [`reuse ${stats.hit}`, `new ${stats.created}`];
+  if (stats.fallback > 0) {
+    parts.push(`fallback ${stats.fallback}`);
+  }
+  return `${parts.join(" / ")} of ${stats.eligible}`;
 }
 
 function photoSegmentCacheHeadline(stats: PhotoSegmentCacheStats): string {

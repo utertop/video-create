@@ -1,5 +1,5 @@
 import React from "react";
-import { PhotoSegmentCacheStats, VideoEvent, VideoSegmentCacheStats } from "../types/studio";
+import { PhotoSegmentCacheStats, ProxyMediaStats, VideoEvent, VideoSegmentCacheStats } from "../types/studio";
 
 export function formatProgressLine(line: string): string | null {
   const trimmed = line.trim();
@@ -39,6 +39,7 @@ export function applyStructuredEvent(
   setMaterials: React.Dispatch<React.SetStateAction<VideoEvent[]>>,
   setPhotoSegmentCache: React.Dispatch<React.SetStateAction<PhotoSegmentCacheStats | null>>,
   setVideoSegmentCache: React.Dispatch<React.SetStateAction<VideoSegmentCacheStats | null>>,
+  setProxyMedia: React.Dispatch<React.SetStateAction<ProxyMediaStats | null>>,
 ) {
   if (event.type === "media") {
     setMaterials((prev) => [...prev, event]);
@@ -67,6 +68,22 @@ export function applyStructuredEvent(
       saved_live_fits: Number(event.saved_live_fits || 0),
       saved_render_seconds: Number(event.saved_render_seconds || 0),
     });
+  }
+
+  if (event.type === "proxy_cache") {
+    setProxyMedia({
+      eligible: Number(event.eligible || 0),
+      hit: Number(event.hit || 0),
+      created: Number(event.created || 0),
+      fallback: Number(event.fallback || 0),
+    });
+  }
+
+  if (event.type === "render_queue" && event.status) {
+    if (event.status === "running") setPhase("Rendering");
+    if (event.status === "done") setPhase("Render complete");
+    if (event.status === "failed") setPhase("Render failed");
+    if (event.status === "cancelled") setPhase("Render cancelled");
   }
 
   if (typeof event.percent === "number") {
@@ -115,6 +132,14 @@ export function formatStructuredEvent(event: VideoEvent): string | null {
   }
   if (event.type === "video_cache") {
     return `视频段缓存：复用 ${event.hit || 0}，节省 ${(event.saved_render_seconds || 0)} 秒视频适配，新建 ${event.created || 0}，回退 ${event.fallback || 0}`;
+  }
+  if (event.type === "proxy_cache") {
+    return `Proxy media: reused ${event.hit || 0}, created ${event.created || 0}, fallback ${event.fallback || 0}`;
+  }
+  if (event.type === "render_queue") {
+    const status = event.status || "queued";
+    const suffix = event.position && event.position > 0 ? ` #${event.position}` : "";
+    return `${event.message || "Render queue"} (${status}${suffix})`;
   }
   return event.message || null;
 }
