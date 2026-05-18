@@ -4,8 +4,12 @@
   "version": "5.6.0",
   "type": "module",
   "scripts": {
+    "build:web": "tsc && vite build",
     "dev": "vite --host 127.0.0.1 --port 1420",
-    "build": "tsc && vite build",
+    "build": "npm run build:web",
+    "build:worker": "powershell -ExecutionPolicy Bypass -File .\\scripts\\package-worker.ps1",
+    "build:desktop-assets": "npm run build:web && npm run build:worker",
+    "verify:worker-packaged": "powershell -ExecutionPolicy Bypass -Command \"$env:VCS_WORKER_EXE=(Resolve-Path .\\src-tauri\\bin\\video-create-worker.exe).Path; .\\src-tauri\\bin\\video-create-worker.exe --health; python .\\tests\\smoke_v5_worker_protocol.py\"",
     "preview": "vite preview --host 127.0.0.1 --port 4173",
     "tauri": "tauri"
   },

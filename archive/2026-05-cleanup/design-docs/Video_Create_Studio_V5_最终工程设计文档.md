@@ -1,7 +1,7 @@
 # Video Create Studio V5 最终工程设计文档
 
 **副标题：** 素材库 · 故事蓝图 · 渲染计划 · GUI 工作台 · Python CLI 协议  
-**版本：** V5 Engineering Design Final Draft  
+**版本：** V5 工程设计最终稿  
 **适用项目：** `utertop/video-create` / Video Create Studio  
 **文档日期：** 2026-05-11  
 **目标读者：** 产品设计、前端 GUI、Tauri 后端、Python 渲染引擎、后续 AI 能力设计
@@ -26,11 +26,11 @@ V5 的分层目标：
 
 | 层级 | 负责内容 | 不应该负责 |
 |---|---|---|
-| Media Library | 文件事实、目录结构、EXIF、尺寸、时长、缓存 key、可用性 | 不决定最终故事顺序 |
-| Story Blueprint | 城市/日期/景点章节、节奏、叙事角色、用户覆盖、风格模板 | 不直接执行视频渲染 |
-| Render Plan | 精确时间线、片段参数、转场、背景、音频、水印、缓存依赖 | 不再做复杂目录推断 |
-| GUI | 可视化审核、拖拽调整、启用/禁用、参数修改、状态展示 | 不直接处理视频编码 |
-| Python CLI | scan/plan/compile/render/all/validate/clean-cache | 不做用户界面决策 |
+| Media Library（素材库） | 文件事实、目录结构、EXIF、尺寸、时长、缓存 key、可用性 | 不决定最终故事顺序 |
+| Story Blueprint（故事蓝图） | 城市 / 日期 / 景点章节、节奏、叙事角色、用户覆盖、风格模板 | 不直接执行视频渲染 |
+| Render Plan（渲染计划） | 精确时间线、片段参数、转场、背景、音频、水印、缓存依赖 | 不再做复杂目录推断 |
+| GUI（图形界面） | 可视化审核、拖拽调整、启用 / 禁用、参数修改、状态展示 | 不直接处理视频编码 |
+| Python CLI（命令入口） | `scan` / `plan` / `compile` / `render` / `all` / `validate` / `clean-cache` | 不做用户界面决策 |
 
 V5 的优先级落地原则：
 
@@ -66,7 +66,7 @@ flowchart TD
     K --> L[封面图 + 构建报告 + 输出目录]
 ```
 
-### 1.2 V5 为什么必须增加 Render Plan 层
+### 1.2 V5 为什么必须增加渲染计划层
 
 V4 的 Story Blueprint 已经能描述“视频想怎么讲”，但它不应该直接被渲染器执行。原因如下：
 
@@ -105,7 +105,7 @@ render_plan.json        记录“具体怎么渲染”
 
 ---
 
-## 2. Media Library JSON Schema
+## 2. 素材库 JSON 结构
 
 ### 2.1 设计目标
 

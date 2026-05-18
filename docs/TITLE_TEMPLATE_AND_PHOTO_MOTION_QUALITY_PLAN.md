@@ -1,100 +1,104 @@
-# Title Template and Photo Motion Quality Plan
+# 标题模板与照片运动质感提升方案
 
-## Goals
+## 目标
 
-This upgrade addresses two viewer-facing quality problems:
+这轮升级主要解决两个直接影响观看体验的质量问题：
 
-- Chapter/title text currently feels too simple because "style + motion" is exposed as two small engineering controls instead of a designed title package.
-- Photo segments can feel shaky or dizzy because still-image motion is too noticeable for long viewing.
+- 章节标题和叠加文字目前仍然像“工程参数组合”，缺少一个真正有设计感的标题包装系统。
+- 照片段运动在长时间观看时偶尔会显得晃、飘或让人眩晕，影响成片舒适度。
 
-The product goal is to make generated videos feel packaged, intentional, and comfortable to watch.
+产品目标是让自动生成的视频在观感上更像“被认真包装过的成片”，而不是单纯把素材拼起来。
 
-## Problem 1: Title Text Quality
+## 问题一：标题文字质感不足
 
-### Current State
+### 当前状态
 
-- The blueprint editor exposes separate controls for text preset and motion.
-- Existing presets are visually useful, but too few and too plain for modern travel/vlog packaging.
-- Preview and the text motion lab are valuable and should remain.
-- Opening title, chapter cards, overlays, ending cards, and cover generation should share the same title-template language.
+- 蓝图编辑器目前把文字预设和动效拆成两个独立控制项。
+- 现有预设虽然能用，但数量偏少，视觉上也不够适合当代旅行 / vlog 包装。
+- 预览能力和文字动效实验区很有价值，应该保留。
+- 开场标题、章节卡、叠加标题、结尾卡和封面生成，应该使用同一套标题模板语言。
 
-### New Model
+### 新模型
 
-Replace the row-level "style + motion" control with one title-template button. A template is a designed package:
+把逐行的“风格 + 动效”控制替换成一个“标题模板”按钮。一个模板应该是完整设计包，包含：
 
-- typography direction
-- layout
-- texture/decorative treatment
-- best matching motion
-- static-compatible mode for covers and still title cards
+- 字体方向
+- 版式布局
+- 纹理或装饰处理
+- 最匹配的动效
+- 兼容静态导出的模式，供封面和静态标题卡使用
 
-The lab keeps more control: users can choose a template package, override motion, preview instantly, render a real low-resolution preview, apply to current/same-type/all chapters, and save as default.
+实验区继续保留更强控制力：用户可以选择模板包、单独覆盖动效、即时预览、真实渲染低清预览、应用到当前章节 / 同类型章节 / 所有章节，并保存为默认值。
 
-### Template Set
+### 模板集合
 
-| Preset ID | Label | Matching Motion ID | Use |
+| 预设 ID | 中文名称 | 匹配动效 ID | 适用场景 |
 | --- | --- | --- | --- |
-| `cinematic_bold` | Cinematic Bold / 电影感 | `cinematic_reveal` | mountains, city scale, dramatic chapter breaks |
-| `travel_postcard` | Travel Postcard / 旅游明信片 | `postcard_drift` | travel, food, old streets, warm vlogs |
-| `playful_pop` | Playful Pop / 活泼弹跳 | `playful_bounce` | pets, daily life, light clips |
-| `impact_flash` | Impact Flash / 冲击标题 | `impact_slam` | sports, snow, high-energy scenes |
-| `minimal_editorial` | Minimal Editorial / 极简高级 | `editorial_fade` | architecture, photography, city mood |
-| `documentary_lower_third` | Documentary Lower-third / 记录片字幕条 | `lower_third_slide` | location, people, time notes |
-| `handwritten_note` | Handwritten Note / 手写贴纸 | `handwritten_draw` | vlog notes, seaside, casual travel |
-| `neon_night` | Neon Night / 霓虹夜景 | `neon_flicker` | night city, cyber, nightlife |
-| `film_subtitle` | Film Subtitle / 胶片字幕 | `film_burn` | warm memory, golden hour, cinematic subtitles |
-| `route_marker` | Route Marker / 地图路线标记 | `route_trace` | route, itinerary, day markers |
+| `cinematic_bold` | 电影感粗体 | `cinematic_reveal` | 山景、城市大全景、戏剧化章节切分 |
+| `travel_postcard` | 旅行明信片 | `postcard_drift` | 旅行、美食、老街、温暖 vlog |
+| `playful_pop` | 活泼跳色 | `playful_bounce` | 宠物、日常、轻松片段 |
+| `impact_flash` | 冲击闪现 | `impact_slam` | 运动、滑雪、高能场景 |
+| `minimal_editorial` | 极简编辑感 | `editorial_fade` | 建筑、摄影、城市氛围 |
+| `documentary_lower_third` | 纪录片下三分之一字幕条 | `lower_third_slide` | 地点、人名、时间说明 |
+| `handwritten_note` | 手写贴纸便签 | `handwritten_draw` | vlog 笔记、海边、随性旅行 |
+| `neon_night` | 霓虹夜景 | `neon_flicker` | 夜城市、赛博感、夜生活 |
+| `film_subtitle` | 胶片字幕 | `film_burn` | 温暖回忆、黄金时刻、电影感字幕 |
+| `route_marker` | 路线标记 | `route_trace` | 路书、行程、天数标记 |
 
-Motion also includes `static_hold` for cover/end-card/still-image export.
+另外保留 `static_hold` 动效，用于封面、结尾卡和静态图片导出。
 
-### Implementation Rules
+### 实施规则
 
-- Keep JSON fields as `title_style.preset` and `title_style.motion` for compatibility.
-- Template buttons set both preset and matching motion.
-- Motion override remains available in the lab, including `static_hold`.
-- If an old preset or old motion appears, normalize it to the closest new template/motion.
-- Cover/title/end rendering uses the same renderer, with `static_hold` disabling animation.
+- 为兼容旧数据，JSON 字段仍保留 `title_style.preset` 和 `title_style.motion`。
+- 模板按钮一次性写入预设和匹配动效。
+- 实验区仍可单独覆盖动效，包括 `static_hold`。
+- 如果遇到旧预设或旧动效，统一归一到最接近的新模板 / 新动效。
+- 封面、标题、结尾等静态渲染统一走同一套 renderer，`static_hold` 负责关闭动画。
 
-## Problem 2: Photo Motion Comfort
+## 问题二：照片运动舒适度不足
 
-### Current State
+### 当前状态
 
-- Static images receive motion like Ken Burns, push, or punch zoom.
-- This avoids dead stills, but can create visible shake or viewer dizziness.
-- The issue is most visible in travel projects with many photos.
+- 静态图片会被施加 Ken Burns、推进或 punch zoom 等运动。
+- 这样确实避免了“完全静止”的死板感，但在某些项目里会造成明显晃动或眩晕感。
+- 旅行类项目中如果照片很多，这个问题会更突出。
 
-### New Motion Policy
+### 新运动策略
 
-Default photo motion should be "steady premium":
+默认的照片运动应当是“稳定且有质感”的：
 
-- No visible shake.
-- No elastic bounce on ordinary photo segments.
-- Use very slow, very small scale drift.
-- Keep the image center stable.
-- Stronger motion belongs mostly to title text, not every photo.
+- 不要有明显抖动。
+- 普通照片段不使用弹跳式运动。
+- 只保留非常慢、非常小幅度的缩放和位移。
+- 尽量让画面视觉中心稳定。
+- 更强的动势应主要放在标题文字，而不是每一张照片上。
 
-### Motion Mapping
+### 运动映射
 
-| Motion Type | Old Feeling | New Behavior |
+| 运动类型 | 旧体感 | 新行为 |
 | --- | --- | --- |
-| `ken_burns` | noticeable movement | very slow 2.2% zoom |
-| `gentle_push` | moving push | 1.8% slow push |
-| `slow_push` | moving push | 1.5% slow push |
-| `subtle_ken_burns` | subtle but visible | 1.2% breathe |
-| `punch_zoom` | punchy photo hit | reduced to 3.5%, short ease only |
-| `micro_zoom` | small hit | reduced to 2.5%, short ease only |
-| `none` / `still_hold` | stable | unchanged |
+| `ken_burns` | 位移感明显 | 改为非常缓慢的 2.2% 缩放 |
+| `gentle_push` | 推进感偏强 | 改为 1.8% 的缓慢推进 |
+| `slow_push` | 持续推进 | 改为 1.5% 的慢推进 |
+| `subtle_ken_burns` | 虽轻但仍可感知 | 改为 1.2% 的轻呼吸感 |
+| `punch_zoom` | 冲击式照片击打 | 降到 3.5%，仅保留短促 ease |
+| `micro_zoom` | 小幅击打感 | 降到 2.5%，仅保留短促 ease |
+| `none` / `still_hold` | 稳定 | 保持不变 |
 
-### Verification
+## 验证要求
 
-After title-renderer or photo-motion changes:
+完成标题 renderer 或照片运动相关改动后，应至少运行：
 
-- `npm.cmd run build`
-- `python tests\smoke_v5_edit_strategy_compile.py`
-- `python tests\smoke_v5_low_res_preview.py`
-- `python tests\smoke_v5_video_geometry.py`
+```powershell
+npm.cmd run build
+python tests\smoke_v5_edit_strategy_compile.py
+python tests\smoke_v5_low_res_preview.py
+python tests\smoke_v5_video_geometry.py
+```
 
-For audio or long-video side effects:
+如果改动可能影响音频或长视频稳定性，还应继续验证：
 
-- `python tests\smoke_v5_bgm_mix.py`
-- `python tests\smoke_v5_6_long_video_stability.py`
+```powershell
+python tests\smoke_v5_bgm_mix.py
+python tests\smoke_v5_6_long_video_stability.py
+```

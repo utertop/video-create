@@ -12,6 +12,7 @@ import json
 import sys
 import traceback
 from argparse import Namespace
+from pathlib import Path
 from typing import Any, Dict
 
 import video_engine_v5 as engine
@@ -29,12 +30,74 @@ def worker_health() -> Dict[str, Any]:
     }
 
 
+def _ensure_parent(path: str) -> None:
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+
+
+def _read_output_json(path: str) -> Dict[str, Any]:
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
 def run_task(task: Dict[str, Any]) -> Dict[str, Any]:
     task_type = str(task.get("type") or task.get("command") or "").strip()
     task_id = str(task.get("id") or "")
 
     if task_type == "health":
         return {"type": "result", "id": task_id, **worker_health()}
+
+    if task_type == "scan":
+        output_path = str(task["output_path"])
+        _ensure_parent(output_path)
+        engine.command_scan(
+            Namespace(
+                input_folder=str(task["input_folder"]),
+                output=output_path,
+                recursive=bool(task.get("recursive", True)),
+            )
+        )
+        return {
+            "type": "result",
+            "id": task_id,
+            "ok": True,
+            "output_path": output_path,
+            "document": _read_output_json(output_path),
+        }
+
+    if task_type == "plan":
+        output_path = str(task["output_path"])
+        _ensure_parent(output_path)
+        engine.command_plan(
+            Namespace(
+                library=str(task["library_path"]),
+                output=output_path,
+                strategy=str(task.get("strategy") or "city_date_spot"),
+            )
+        )
+        return {
+            "type": "result",
+            "id": task_id,
+            "ok": True,
+            "output_path": output_path,
+            "document": _read_output_json(output_path),
+        }
+
+    if task_type == "compile":
+        output_path = str(task["output_path"])
+        _ensure_parent(output_path)
+        engine.command_compile(
+            Namespace(
+                blueprint=str(task["blueprint_path"]),
+                library=str(task["library_path"]),
+                output=output_path,
+            )
+        )
+        return {
+            "type": "result",
+            "id": task_id,
+            "ok": True,
+            "output_path": output_path,
+            "document": _read_output_json(output_path),
+        }
 
     if task_type == "render":
         engine.render_with_v56_stability(
@@ -56,6 +119,26 @@ def run_task(task: Dict[str, Any]) -> Dict[str, Any]:
         )
         engine.command_preview_render(args)
         return {"type": "result", "id": task_id, "ok": True, "output_path": task["output_path"]}
+
+    if task_type == "preview-title":
+        output_path = str(task["output_path"])
+        _ensure_parent(output_path)
+        args = Namespace(
+            title=str(task.get("title") or ""),
+            subtitle=str(task.get("subtitle") or ""),
+            style_json=json.dumps(task.get("style") or {}, ensure_ascii=False),
+            output=output_path,
+            aspect_ratio=str(task.get("aspect_ratio") or "16:9"),
+            background=str(task.get("background") or "travel"),
+            duration=str(task.get("duration") or "3.0"),
+        )
+        engine.command_preview_title(args)
+        return {
+            "type": "result",
+            "id": task_id,
+            "ok": True,
+            "output_path": output_path,
+        }
 
     if task_type in {"stop", "shutdown"}:
         return {"type": "result", "id": task_id, "ok": True, "stopping": True}

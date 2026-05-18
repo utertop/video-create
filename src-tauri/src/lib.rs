@@ -38,6 +38,18 @@ struct WorkerProcess {
     stdout: BufReader<ChildStdout>,
 }
 
+enum WorkerLaunchKind {
+    BundledExecutable,
+    PythonScript,
+}
+
+struct WorkerLaunchSpec {
+    program: PathBuf,
+    args: Vec<String>,
+    working_dir: Option<PathBuf>,
+    kind: WorkerLaunchKind,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GenerateVideoPayload {
@@ -455,29 +467,31 @@ fn open_in_explorer(path: String) {
 #[tauri::command]
 async fn scan_v5(
     app: AppHandle,
+    manager: State<'_, JobManager>,
     input_folder: String,
     project_dir: Option<String>,
     recursive: Option<bool>,
 ) -> Result<String, String> {
+    let manager = manager.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let script_path = find_v5_engine_script(&app)?;
         let workspace = project_workspace(&input_folder, project_dir)?;
         std::fs::create_dir_all(&workspace)
             .map_err(|e| format!("无法创建 V5 项目目录 {}: {}", workspace.display(), e))?;
         let output_path = workspace.join("media_library.json");
-
-        let mut args = vec![
-            "scan".to_string(),
-            "--input_folder".to_string(),
-            input_folder.clone(),
-            "--output".to_string(),
-            output_path.display().to_string(),
-        ];
-        if recursive.unwrap_or(true) {
-            args.push("--recursive".to_string());
-        }
-
-        run_python_to_json_file(&script_path, &args, &output_path, "扫描失败")
+        run_v5_worker_json_task(
+            &app,
+            &manager,
+            "v5-scan",
+            json!({
+                "type": "scan",
+                "id": "v5-scan",
+                "input_folder": input_folder.clone(),
+                "output_path": output_path.display().to_string(),
+                "recursive": recursive.unwrap_or(true),
+            }),
+            &output_path,
+            "扫描失败",
+        )
     })
     .await
     .map_err(|e| format!("V5 scan 后台任务异常: {}", e))?
@@ -486,11 +500,12 @@ async fn scan_v5(
 #[tauri::command]
 async fn plan_v5(
     app: AppHandle,
+    manager: State<'_, JobManager>,
     library_path: String,
     output_path: Option<String>,
 ) -> Result<String, String> {
+    let manager = manager.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let script_path = find_v5_engine_script(&app)?;
         let lib_path = PathBuf::from(&library_path);
         let output_path = output_path
             .map(PathBuf::from)
@@ -500,16 +515,19 @@ async fn plan_v5(
                     .unwrap_or_else(|| Path::new("."))
                     .join("story_blueprint.json")
             });
-
-        let args = vec![
-            "plan".to_string(),
-            "--library".to_string(),
-            library_path.clone(),
-            "--output".to_string(),
-            output_path.display().to_string(),
-        ];
-
-        run_python_to_json_file(&script_path, &args, &output_path, "生成蓝图失败")
+        run_v5_worker_json_task(
+            &app,
+            &manager,
+            "v5-plan",
+            json!({
+                "type": "plan",
+                "id": "v5-plan",
+                "library_path": library_path.clone(),
+                "output_path": output_path.display().to_string(),
+            }),
+            &output_path,
+            "生成蓝图失败",
+        )
     })
     .await
     .map_err(|e| format!("V5 plan 后台任务异常: {}", e))?
@@ -532,12 +550,13 @@ async fn save_blueprint_v5(path: String, content: String) -> Result<(), String> 
 #[tauri::command]
 async fn compile_v5(
     app: AppHandle,
+    manager: State<'_, JobManager>,
     blueprint_path: String,
     library_path: String,
     output_path: Option<String>,
 ) -> Result<String, String> {
+    let manager = manager.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let script_path = find_v5_engine_script(&app)?;
         let bp_path = PathBuf::from(&blueprint_path);
         let output_path = output_path
             .map(PathBuf::from)
@@ -547,18 +566,20 @@ async fn compile_v5(
                     .unwrap_or_else(|| Path::new("."))
                     .join("render_plan.json")
             });
-
-        let args = vec![
-            "compile".to_string(),
-            "--blueprint".to_string(),
-            blueprint_path.clone(),
-            "--library".to_string(),
-            library_path.clone(),
-            "--output".to_string(),
-            output_path.display().to_string(),
-        ];
-
-        run_python_to_json_file(&script_path, &args, &output_path, "编译渲染计划失败")
+        run_v5_worker_json_task(
+            &app,
+            &manager,
+            "v5-compile",
+            json!({
+                "type": "compile",
+                "id": "v5-compile",
+                "blueprint_path": blueprint_path.clone(),
+                "library_path": library_path.clone(),
+                "output_path": output_path.display().to_string(),
+            }),
+            &output_path,
+            "编译渲染计划失败",
+        )
     })
     .await
     .map_err(|e| format!("V5 compile 后台任务异常: {}", e))?
@@ -584,14 +605,15 @@ async fn render_v5(
 #[tauri::command]
 async fn preview_title_v5(
     app: AppHandle,
+    manager: State<'_, JobManager>,
     title: String,
     subtitle: Option<String>,
     style_json: String,
     aspect_ratio: Option<String>,
     background: Option<String>,
 ) -> Result<String, String> {
+    let manager = manager.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let script_path = find_v5_engine_script(&app)?;
         let mut output_dir = app.path().app_cache_dir().unwrap_or_else(|_| {
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("..")
@@ -599,7 +621,7 @@ async fn preview_title_v5(
         });
         output_dir.push("title_previews");
         std::fs::create_dir_all(&output_dir)
-            .map_err(|e| format!("æ— æ³•åˆ›å»ºé¢„è§ˆç¼“å­˜ç›®å½• {}: {}", output_dir.display(), e))?;
+            .map_err(|e| format!("无法创建标题预览缓存目录 {}: {}", output_dir.display(), e))?;
 
         let aspect_ratio = aspect_ratio.unwrap_or_else(|| "16:9".to_string());
         let background = background.unwrap_or_else(|| "travel".to_string());
@@ -612,34 +634,32 @@ async fn preview_title_v5(
         if output_path.is_file() {
             return Ok(output_path.display().to_string());
         }
-
-        let args = vec![
-            "preview-title".to_string(),
-            "--title".to_string(),
-            title,
-            "--subtitle".to_string(),
-            subtitle,
-            "--style_json".to_string(),
-            style_json,
-            "--output".to_string(),
-            output_path.display().to_string(),
-            "--aspect_ratio".to_string(),
-            aspect_ratio,
-            "--background".to_string(),
-            background,
-            "--duration".to_string(),
-            "3.0".to_string(),
-        ];
-
-        run_python_preview_command(&script_path, &args, &output_path)
+        run_v5_worker_preview_task(
+            &app,
+            &manager,
+            "v5-preview-title",
+            json!({
+                "type": "preview-title",
+                "id": "v5-preview-title",
+                "title": title.clone(),
+                "subtitle": subtitle.clone(),
+                "style": serde_json::from_str::<serde_json::Value>(&style_json).unwrap_or_else(|_| json!({})),
+                "output_path": output_path.display().to_string(),
+                "aspect_ratio": aspect_ratio.clone(),
+                "background": background.clone(),
+                "duration": 3.0,
+            }),
+            &output_path,
+        )
     })
     .await
-    .map_err(|e| format!("V5 title preview åŽå°ä»»åŠ¡å¼‚å¸¸: {}", e))?
+    .map_err(|e| format!("V5 title preview 后台任务异常: {}", e))?
 }
 
 #[tauri::command]
 async fn preview_render_v5(
     app: AppHandle,
+    manager: State<'_, JobManager>,
     plan_path: String,
     params_json: String,
     max_duration: Option<f64>,
@@ -647,8 +667,8 @@ async fn preview_render_v5(
     height: Option<u32>,
     fps: Option<u32>,
 ) -> Result<String, String> {
+    let manager = manager.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let script_path = find_v5_engine_script(&app)?;
         let mut output_dir = app.path().app_cache_dir().unwrap_or_else(|_| {
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("..")
@@ -681,26 +701,23 @@ async fn preview_render_v5(
         if output_path.is_file() {
             return Ok(output_path.display().to_string());
         }
-
-        let args = vec![
-            "preview-render".to_string(),
-            "--plan".to_string(),
-            plan_path,
-            "--output".to_string(),
-            output_path.display().to_string(),
-            "--params".to_string(),
-            params_json,
-            "--height".to_string(),
-            height.unwrap_or(540).to_string(),
-            "--fps".to_string(),
-            fps.unwrap_or(15).to_string(),
-            "--max_duration".to_string(),
-            max_duration.unwrap_or(20.0).to_string(),
-            "--max_segments".to_string(),
-            max_segments.unwrap_or(8).to_string(),
-        ];
-
-        run_python_preview_command(&script_path, &args, &output_path)
+        run_v5_worker_preview_task(
+            &app,
+            &manager,
+            "v5-preview-render",
+            json!({
+                "type": "preview-render",
+                "id": "v5-preview-render",
+                "plan_path": plan_path.clone(),
+                "output_path": output_path.display().to_string(),
+                "params": serde_json::from_str::<serde_json::Value>(&params_json).unwrap_or_else(|_| json!({})),
+                "height": height.unwrap_or(540),
+                "fps": fps.unwrap_or(15),
+                "max_duration": max_duration.unwrap_or(20.0),
+                "max_segments": max_segments.unwrap_or(8),
+            }),
+            &output_path,
+        )
     })
     .await
     .map_err(|e| format!("V5 render preview task failed: {}", e))?
@@ -1019,17 +1036,56 @@ fn emit_render_queue_event(
     let _ = app.emit("video-progress", payload.to_string());
 }
 
+fn run_v5_worker_json_task(
+    app: &AppHandle,
+    manager: &JobManager,
+    job_id: &str,
+    task: serde_json::Value,
+    output_path: &Path,
+    error_prefix: &str,
+) -> Result<String, String> {
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let result = run_v5_worker_task(app, manager, job_id, cancelled, task);
+    clear_job(manager, job_id);
+    result.map_err(|e| format!("{}: {}", error_prefix, e))?;
+    std::fs::read_to_string(output_path)
+        .map_err(|e| format!("无法读取生成文件 {}: {}", output_path.display(), e))
+}
+
+fn run_v5_worker_preview_task(
+    app: &AppHandle,
+    manager: &JobManager,
+    job_id: &str,
+    task: serde_json::Value,
+    output_path: &Path,
+) -> Result<String, String> {
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let result = run_v5_worker_task(app, manager, job_id, cancelled, task);
+    clear_job(manager, job_id);
+    result?;
+    if !output_path.is_file() {
+        return Err(format!(
+            "worker finished but preview file was not created: {}",
+            output_path.display()
+        ));
+    }
+    Ok(output_path.display().to_string())
+}
+
 fn start_v5_worker(app: &AppHandle) -> Result<WorkerProcess, String> {
-    let script_path = find_v5_worker_script(app)?;
-    let mut cmd = Command::new("python");
-    prepare_python_command(&mut cmd);
-    cmd.arg(&script_path)
+    let launch = find_v5_worker_entrypoint(app)?;
+    let mut cmd = Command::new(&launch.program);
+    match launch.kind {
+        WorkerLaunchKind::BundledExecutable => prepare_hidden_command(&mut cmd),
+        WorkerLaunchKind::PythonScript => prepare_python_command(&mut cmd),
+    }
+    cmd.args(&launch.args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    if let Some(script_dir) = script_path.parent() {
-        cmd.current_dir(script_dir);
+    if let Some(working_dir) = launch.working_dir.as_ref() {
+        cmd.current_dir(working_dir);
     }
 
     let mut child = cmd
@@ -1076,78 +1132,6 @@ fn project_workspace(input_folder: &str, project_dir: Option<String>) -> Result<
         }
     }
     Ok(PathBuf::from(input_folder).join(".video_create_project"))
-}
-
-fn run_python_to_json_file(
-    script_path: &Path,
-    args: &[String],
-    output_path: &Path,
-    error_prefix: &str,
-) -> Result<String, String> {
-    let mut cmd = Command::new("python");
-    prepare_python_command(&mut cmd);
-    cmd.arg(script_path).args(args);
-
-    if let Some(script_dir) = script_path.parent() {
-        cmd.current_dir(script_dir);
-    }
-
-    let output = cmd
-        .output()
-        .map_err(|e| format!("启动 V5 引擎失败: {}", e))?;
-
-    if !output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
-            "{}: {}\n{}",
-            error_prefix,
-            stderr.trim(),
-            stdout.trim()
-        ));
-    }
-
-    let content = std::fs::read_to_string(output_path)
-        .map_err(|e| format!("无法读取生成文件 {}: {}", output_path.display(), e))?;
-
-    Ok(content)
-}
-
-fn run_python_preview_command(
-    script_path: &Path,
-    args: &[String],
-    output_path: &Path,
-) -> Result<String, String> {
-    let mut cmd = Command::new("python");
-    prepare_python_command(&mut cmd);
-    cmd.arg(script_path).args(args);
-
-    if let Some(script_dir) = script_path.parent() {
-        cmd.current_dir(script_dir);
-    }
-
-    let output = cmd
-        .output()
-        .map_err(|e| format!("å¯åŠ¨ V5 é¢„è§ˆå¼•æ“Žå¤±è´¥: {}", e))?;
-
-    if !output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
-            "ç”ŸæˆçœŸå®žé¢„è§ˆå¤±è´¥: {}\n{}",
-            stderr.trim(),
-            stdout.trim()
-        ));
-    }
-
-    if !output_path.is_file() {
-        return Err(format!(
-            "é¢„è§ˆå¼•æ“Žå·²ç»“æŸï¼Œä½†æ²¡æœ‰æ‰¾åˆ°è¾“å‡ºæ–‡ä»¶: {}",
-            output_path.display()
-        ));
-    }
-
-    Ok(output_path.display().to_string())
 }
 
 fn stable_hash(value: &str) -> u64 {
@@ -1383,6 +1367,68 @@ fn find_v5_worker_script(app: &AppHandle) -> Result<PathBuf, String> {
         "video_engine_worker.py",
         "Cannot find V5 worker script video_engine_worker.py.",
     )
+}
+
+fn find_v5_worker_entrypoint(app: &AppHandle) -> Result<WorkerLaunchSpec, String> {
+    for candidate in worker_executable_candidates(app) {
+        if candidate.is_file() {
+            let working_dir = candidate.parent().map(Path::to_path_buf);
+            return Ok(WorkerLaunchSpec {
+                program: candidate,
+                args: Vec::new(),
+                working_dir,
+                kind: WorkerLaunchKind::BundledExecutable,
+            });
+        }
+    }
+
+    let script_path = find_v5_worker_script(app)?;
+    let working_dir = script_path.parent().map(Path::to_path_buf);
+    Ok(WorkerLaunchSpec {
+        program: PathBuf::from("python"),
+        args: vec![script_path.display().to_string()],
+        working_dir,
+        kind: WorkerLaunchKind::PythonScript,
+    })
+}
+
+fn worker_executable_candidates(app: &AppHandle) -> Vec<PathBuf> {
+    #[cfg(target_os = "windows")]
+    let names = ["video-create-worker.exe"];
+    #[cfg(not(target_os = "windows"))]
+    let names = ["video-create-worker"];
+
+    let mut candidates = Vec::new();
+
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        for name in names {
+            candidates.push(resource_dir.join(name));
+            candidates.push(resource_dir.join("bin").join(name));
+        }
+    }
+
+    if let Ok(current_dir) = std::env::current_dir() {
+        for name in names {
+            candidates.push(current_dir.join(name));
+            candidates.push(current_dir.join("bin").join(name));
+            candidates.push(current_dir.join("src-tauri").join("bin").join(name));
+        }
+        if let Some(parent) = current_dir.parent() {
+            for name in names {
+                candidates.push(parent.join(name));
+                candidates.push(parent.join("bin").join(name));
+                candidates.push(parent.join("src-tauri").join("bin").join(name));
+            }
+        }
+    }
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for name in names {
+        candidates.push(manifest_dir.join("bin").join(name));
+        candidates.push(manifest_dir.join("..").join("src-tauri").join("bin").join(name));
+    }
+
+    candidates
 }
 
 fn find_generator_script(app: &AppHandle) -> Result<PathBuf, String> {

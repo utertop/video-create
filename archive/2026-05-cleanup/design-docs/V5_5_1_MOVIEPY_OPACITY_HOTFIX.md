@@ -1,32 +1,32 @@
-# V5.5.1 MoviePy Dynamic Opacity Hotfix
+# V5.5.1 MoviePy 动态透明度热修说明
 
-## Problem
+## 问题现象
 
-Rendering fails after clicking final render:
+点击最终渲染后，渲染流程失败：
 
 ```text
 TypeError: unsupported operand type(s) for *: 'function' and 'float'
 ```
 
-The traceback points to:
+报错栈定位到：
 
 ```python
 clip.set_opacity(lambda t: self._fade_curve(t, duration))
 ```
 
-## Root cause
+## 根因分析
 
-MoviePy 1.0.3 does not support callable opacity in `VideoClip.set_opacity()`. It expects a numeric value. When a function is passed, MoviePy later tries to do `op * pic`, where `op` is the function object.
+MoviePy 1.0.3 不支持在 `VideoClip.set_opacity()` 中传入可调用对象。它只接受数值透明度。当传入函数时，MoviePy 后续会执行 `op * pic`，此时 `op` 实际上是函数对象，因此触发类型错误。
 
-## Fix
+## 修复方案
 
-V5.5.1 replaces callable `set_opacity(lambda...)` with mask-based dynamic opacity:
+V5.5.1 将可调用 `set_opacity(lambda ...)` 替换为基于 mask 的动态透明度实现：
 
 ```python
 base_mask.fl(lambda gf, t: gf(t) * alpha(t))
 ```
 
-## Usage
+## 使用方式
 
 ```powershell
 cd D:\Automatic\video_create
@@ -37,7 +37,7 @@ python .\tests\smoke_v5_5_1_moviepy_opacity.py
 npm run build
 ```
 
-If Tauri still uses the old copied resource, restart `npm run tauri dev` or delete:
+如果 Tauri 仍然加载旧的复制资源，请重启 `npm run tauri dev`，或者删除：
 
 ```powershell
 Remove-Item .\src-tauri\target\debug\video_engine_v5.py -Force

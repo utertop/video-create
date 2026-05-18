@@ -27,3 +27,7 @@ tests/tmp_vcs_*/
 
 # Local scratch space
 scratch/
+
+# Bundled Python worker artifact
+src-tauri/bin/video-create-worker
+src-tauri/bin/video-create-worker.exe
