@@ -111,9 +111,11 @@ try:
         moviepy_audio_loop = None
 
     HAS_MOVIEPY = True
-except Exception:
+    MOVIEPY_IMPORT_ERROR = ""
+except Exception as exc:
     HAS_MOVIEPY = False
     moviepy_audio_loop = None
+    MOVIEPY_IMPORT_ERROR = str(exc)
 
 
 # =========================
@@ -2917,9 +2919,11 @@ class Renderer:
 
     def render(self) -> None:
         if not HAS_MOVIEPY:
+            detail = f" Import failed: {MOVIEPY_IMPORT_ERROR}" if MOVIEPY_IMPORT_ERROR else ""
             raise RuntimeError(
                 "MoviePy not installed. Please run: "
                 "python -m pip install moviepy==1.0.3 pillow numpy imageio-ffmpeg"
+                + detail
             )
 
         ensure_parent(self.output_path)

@@ -1,6 +1,6 @@
 moviepy==1.0.3
 pillow>=10.0.0
-numpy>=1.24.0
+numpy>=1.24.0,<2.0.0
 imageio-ffmpeg>=0.4.9
 proglog>=0.1.10
 pilmoji>=2.0.0
