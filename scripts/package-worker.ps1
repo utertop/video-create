@@ -44,11 +44,16 @@ $args = @(
   "--workpath", $workDir,
   "--specpath", $specDir,
   "--collect-all", "moviepy",
+  "--collect-all", "imageio",
   "--collect-all", "imageio_ffmpeg",
   "--collect-all", "proglog",
   "--collect-all", "pilmoji",
   "--collect-all", "PIL",
   "--collect-all", "requests",
+  "--copy-metadata", "moviepy",
+  "--copy-metadata", "imageio",
+  "--copy-metadata", "imageio-ffmpeg",
+  "--copy-metadata", "proglog",
   $workerScript
 )
 
