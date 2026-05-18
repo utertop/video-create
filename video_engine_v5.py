@@ -63,6 +63,21 @@ if any(arg in {"-h", "--help"} for arg in sys.argv[1:]):
     _print_early_help_without_optional_deps()
     raise SystemExit(0)
 
+
+def _configure_utf8_stdio() -> None:
+    """Force UTF-8 stdio on Windows/CI so JSON progress events can carry Chinese text safely."""
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+
+_configure_utf8_stdio()
+
 try:
     from proglog import ProgressBarLogger
 except Exception:  # pragma: no cover
