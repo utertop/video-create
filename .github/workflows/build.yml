@@ -59,6 +59,12 @@ jobs:
       - name: Python worker protocol smoke test
         run: python .\tests\smoke_v5_worker_protocol.py
 
+      - name: Python card segment cache smoke test
+        run: python .\tests\smoke_v5_card_segment_cache.py
+
+      - name: Python audio visual cache smoke test
+        run: python .\tests\smoke_v5_audio_visual_cache.py
+
       - name: Python V5.6 long-video stability smoke test
         run: python .\tests\smoke_v5_6_long_video_stability.py
 

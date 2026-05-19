@@ -2486,6 +2486,21 @@ class Renderer:
             "saved_live_composes": 0,
             "saved_render_seconds": 0,
         }
+        self.card_segment_cache_stats: Dict[str, int] = {
+            "eligible": 0,
+            "hit": 0,
+            "created": 0,
+            "fallback": 0,
+            "saved_live_composes": 0,
+            "saved_render_seconds": 0,
+        }
+        self.visual_base_cache_stats: Dict[str, int] = {
+            "eligible": 0,
+            "hit": 0,
+            "created": 0,
+            "fallback": 0,
+            "saved_render_seconds": 0,
+        }
         self.video_segment_cache_stats: Dict[str, int] = {
             "eligible": 0,
             "hit": 0,
@@ -2571,6 +2586,27 @@ class Renderer:
         key_extra = f"{extra}|target={self.target_size[0]}x{self.target_size[1]}"
         key = file_hash_light(source, key_extra) if source.exists() else safe_id(f"{source}|{key_extra}")
         return bucket / f"{key}{suffix}"
+
+    def _cache_bucket_path(self, kind: str, suffix: str, key: str) -> Path:
+        bucket = self.render_cache_dir / kind
+        bucket.mkdir(parents=True, exist_ok=True)
+        return bucket / f"{safe_id(key)}{suffix}"
+
+    def _cache_identity_for_source(self, source_path: Optional[str], role: str) -> str:
+        if not source_path:
+            return f"{role}:none"
+        source = Path(str(source_path))
+        if not source.exists():
+            return f"{role}:missing:{source}"
+        return f"{role}:{file_hash_light(source, role)}"
+
+    def _visual_stage_audio_cache_payload(self) -> Dict[str, Any]:
+        return {
+            "keep_source_audio": bool(self.audio_settings.get("keep_source_audio", True)),
+            "source_audio_volume": float(self.audio_settings.get("source_audio_volume", 1.0)),
+            "normalize_audio": bool(self.audio_settings.get("normalize_audio", False)),
+            "target_lufs": float(self.audio_settings.get("target_lufs", -16.0)),
+        }
 
     def _should_prerender_image_segment(self, duration: float, motion_config: Optional[Dict[str, Any]] = None) -> bool:
         performance_mode = str(self.params.get("performance_mode") or self.plan.get("render_settings", {}).get("performance_mode") or "").lower()
@@ -2714,6 +2750,336 @@ class Renderer:
             ),
         )
         emit_event("photo_cache", **photo_cache)
+
+    def _should_prerender_card_segment(self, seg: Dict[str, Any], duration: float) -> bool:
+        return str(seg.get("type") or "") in {"title", "chapter", "end"} and float(duration or 0.0) > 0.1
+
+    def _build_card_segment_clip(self, seg: Dict[str, Any], duration: float):
+        stype = str(seg.get("type") or "")
+        if stype == "title":
+            background_source = self.params.get("title_background_path") or self.first_visual_source
+            return self._text_card(
+                seg.get("text") or "",
+                seg.get("subtitle"),
+                duration,
+                main=True,
+                background_source=background_source,
+                background_position="first",
+                title_style=self.params.get("title_style") or seg.get("title_style"),
+            )
+        if stype == "end":
+            background_source = self.params.get("end_background_path") or self.last_visual_source
+            return self._text_card(
+                seg.get("text") or "",
+                seg.get("subtitle"),
+                duration,
+                main=False,
+                background_source=background_source,
+                background_position="last",
+                title_style=self.params.get("end_title_style") or seg.get("title_style"),
+            )
+        return self._chapter_card(seg, duration)
+
+    def _card_segment_cache_path(self, seg: Dict[str, Any], duration: float) -> Path:
+        stype = str(seg.get("type") or "")
+        if stype == "title":
+            background_source = self.params.get("title_background_path") or self.first_visual_source
+            background_position = "first"
+            background_source_2 = None
+            background_position_2 = "first"
+            blend_sources = False
+            title_style = self.params.get("title_style") or seg.get("title_style")
+            main = True
+        elif stype == "end":
+            background_source = self.params.get("end_background_path") or self.last_visual_source
+            background_position = "last"
+            background_source_2 = None
+            background_position_2 = "first"
+            blend_sources = False
+            title_style = self.params.get("end_title_style") or seg.get("title_style")
+            main = False
+        else:
+            background_source = seg.get("background_source_path")
+            background_position = seg.get("background_source_position") or "first"
+            background_source_2 = seg.get("background_source_path_2")
+            background_position_2 = seg.get("background_source_position_2") or "first"
+            blend_sources = bool((seg.get("background_mode") or "bridge_blur") == "bridge_blur")
+            title_style = seg.get("title_style")
+            main = False
+
+        fps = int(self.params.get("fps") or self.plan.get("render_settings", {}).get("fps") or 30)
+        key_payload = {
+            "version": "card_seg_v1",
+            "segment_id": seg.get("segment_id"),
+            "segment_type": stype,
+            "duration": round(float(duration or 0.0), 3),
+            "text": seg.get("text"),
+            "subtitle": seg.get("subtitle"),
+            "title_style": title_style or {},
+            "main": main,
+            "background_mode": seg.get("background_mode"),
+            "background_position": background_position,
+            "background_position_2": background_position_2,
+            "blend_sources": blend_sources,
+            "fps": fps,
+            "target_size": list(self.target_size),
+            "source_1": self._cache_identity_for_source(background_source, "source_1"),
+            "source_2": self._cache_identity_for_source(background_source_2, "source_2"),
+        }
+        return self._cache_bucket_path(
+            "card_segments",
+            ".mp4",
+            json.dumps(key_payload, ensure_ascii=False, sort_keys=True),
+        )
+
+    def _prerender_card_segment(self, seg: Dict[str, Any], duration: float) -> Optional[Path]:
+        stype = str(seg.get("type") or "")
+        out = self._card_segment_cache_path(seg, duration)
+        if out.exists() and out.stat().st_size > 1024:
+            self.card_segment_cache_stats["hit"] += 1
+            self.card_segment_cache_stats["saved_live_composes"] += 1
+            self.card_segment_cache_stats["saved_render_seconds"] += int(round(float(duration or 0.0)))
+            emit_event("log", message=f"Card segment cache hit: {out.name}")
+            return out
+
+        clip = None
+        fps = int(self.params.get("fps") or self.plan.get("render_settings", {}).get("fps") or 30)
+        try:
+            clip = self._build_card_segment_clip(seg, duration)
+            clip.write_videofile(
+                str(out),
+                fps=fps,
+                codec="libx264",
+                audio=False,
+                preset="veryfast",
+                threads=1,
+                verbose=False,
+                logger=None,
+                ffmpeg_params=[
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-movflags",
+                    "+faststart",
+                    "-crf",
+                    quality_to_crf(self.params.get("python_quality") or self.params.get("quality") or "standard"),
+                ],
+            )
+            ok, _reason, _duration = _v56_validate_video(out, min_size=512)
+            if ok:
+                self.card_segment_cache_stats["created"] += 1
+                emit_event("log", message=f"Card segment cache created: {out.name}")
+                return out
+        except Exception as exc:
+            self.card_segment_cache_stats["fallback"] += 1
+            emit_event("log", message=f"Card segment prerender fallback to live compose: {seg.get('segment_id') or stype}: {exc}")
+        finally:
+            if clip is not None:
+                close_clip(clip)
+            clip = None
+            try:
+                gc.collect()
+            except Exception:
+                pass
+
+        try:
+            if out.exists():
+                out.unlink()
+        except Exception:
+            pass
+        return None
+
+    def _cached_card_segment(self, seg: Dict[str, Any], duration: float):
+        if not self._should_prerender_card_segment(seg, duration):
+            return self._build_card_segment_clip(seg, duration)
+        self.card_segment_cache_stats["eligible"] += 1
+        cached = self._prerender_card_segment(seg, duration)
+        if cached is not None and cached.exists():
+            return VideoFileClip(str(cached))
+        return self._build_card_segment_clip(seg, duration)
+
+    def _card_segment_cache_summary(self) -> Dict[str, int]:
+        return dict(self.card_segment_cache_stats)
+
+    def _emit_card_segment_cache_summary(self) -> None:
+        card_cache = self._card_segment_cache_summary()
+        if card_cache["eligible"] <= 0:
+            return
+        emit_event(
+            "log",
+            message=(
+                "Card segment cache summary: "
+                f"eligible={card_cache['eligible']}, "
+                f"hit={card_cache['hit']}, "
+                f"created={card_cache['created']}, "
+                f"fallback={card_cache['fallback']}, "
+                f"saved_live_composes={card_cache['saved_live_composes']}, "
+                f"saved_render_seconds={card_cache['saved_render_seconds']}"
+            ),
+        )
+        emit_event("card_cache", **card_cache)
+
+    def _standard_visual_cache_path(self) -> Path:
+        fps = int(self.params.get("fps") or self.plan.get("render_settings", {}).get("fps") or 30)
+        key_payload = {
+            "version": "standard_visual_base_v1",
+            "engine_version": ENGINE_VERSION,
+            "segments": self.plan.get("segments", []) or [],
+            "aspect_ratio": self.params.get("aspect_ratio") or self.plan.get("render_settings", {}).get("aspect_ratio"),
+            "fps": fps,
+            "quality": self.params.get("quality") or self.plan.get("render_settings", {}).get("quality"),
+            "python_quality": self.params.get("python_quality"),
+            "preview": bool(self.params.get("preview")),
+            "preview_height": self.params.get("preview_height"),
+            "watermark": self.params.get("watermark"),
+            "target_size": list(self.target_size),
+            "audio_visual": self._visual_stage_audio_cache_payload(),
+        }
+        return self._cache_bucket_path(
+            "final_video_bases",
+            ".mp4",
+            json.dumps(key_payload, ensure_ascii=False, sort_keys=True),
+        )
+
+    def _emit_visual_base_cache_summary(self) -> None:
+        stats = dict(self.visual_base_cache_stats)
+        if stats["eligible"] <= 0:
+            return
+        emit_event(
+            "log",
+            message=(
+                "Visual base cache summary: "
+                f"eligible={stats['eligible']}, "
+                f"hit={stats['hit']}, "
+                f"created={stats['created']}, "
+                f"fallback={stats['fallback']}, "
+                f"saved_render_seconds={stats['saved_render_seconds']}"
+            ),
+        )
+        emit_event("visual_base_cache", **stats)
+
+    def _render_visual_timeline_clip(self) -> Tuple[Any, List[Dict[str, Any]]]:
+        clips: List[Any] = []
+        rendered_segments: List[Dict[str, Any]] = []
+        segments = self.plan.get("segments", [])
+        total = max(1, len(segments))
+        self._emit_render_scheduler_summary()
+
+        for idx, seg in enumerate(segments, 1):
+            emit_event(
+                "phase",
+                phase="render",
+                message=f"Processing segment {idx}/{total}: {seg.get('type')}",
+                percent=min(90, int(idx / total * 90)),
+            )
+            clip = self._segment(seg)
+            if clip is not None:
+                clips.append(clip)
+                rendered_segments.append(seg)
+
+        if not clips:
+            raise RuntimeError("No valid clips generated")
+
+        emit_event("phase", phase="render", message="å§ï½…æ¹ªéšå Ÿåžšéˆâ‚¬ç¼å Ÿæ¤‚é—‚å¯¸åšŽ", percent=91)
+        final = self._compose_timeline(clips, rendered_segments)
+
+        if self.params.get("watermark"):
+            emit_event("phase", phase="render", message="å§ï½…æ¹ªå¨£è¯²å§žå§˜æ‘åµƒ", percent=92)
+            final = self._add_watermark(final, str(self.params.get("watermark")))
+
+        return final, rendered_segments
+
+    def _write_visual_base_video(self, output_path: Path) -> float:
+        final = None
+        duration = 0.0
+        try:
+            final, _rendered_segments = self._render_visual_timeline_clip()
+            duration = float(getattr(final, "duration", 0.0) or 0.0)
+            logger = JsonMoviePyLogger(base_percent=92, span_percent=7)
+            final.write_videofile(
+                str(output_path),
+                fps=int(self.params.get("fps") or self.plan.get("render_settings", {}).get("fps") or 30),
+                codec="libx264",
+                audio_codec="aac",
+                preset="medium",
+                threads=4,
+                temp_audiofile=str(self.temp_dir / "temp_audio.m4a"),
+                remove_temp=True,
+                ffmpeg_params=[
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-movflags",
+                    "+faststart",
+                    "-crf",
+                    quality_to_crf(self.params.get("python_quality") or self.params.get("quality")),
+                ],
+                logger=logger,
+            )
+            return duration
+        finally:
+            if final is not None:
+                close_clip(final)
+
+    def _materialize_standard_visual_base(self) -> Tuple[Path, float]:
+        self.visual_base_cache_stats["eligible"] += 1
+        out = self._standard_visual_cache_path()
+        ok, _reason, duration = _v56_validate_video(out, min_size=512)
+        if ok:
+            self.visual_base_cache_stats["hit"] += 1
+            self.visual_base_cache_stats["saved_render_seconds"] += int(round(float(duration or 0.0)))
+            emit_event("log", message=f"Visual base cache hit: {out.name}")
+            return out, float(duration or 0.0)
+
+        try:
+            if out.exists():
+                out.unlink()
+        except Exception:
+            pass
+
+        try:
+            duration = self._write_visual_base_video(out)
+            ok, _reason, validated_duration = _v56_validate_video(out, min_size=512)
+            if ok:
+                self.visual_base_cache_stats["created"] += 1
+                emit_event("log", message=f"Visual base cache created: {out.name}")
+                return out, float(validated_duration or duration or 0.0)
+        except Exception:
+            self.visual_base_cache_stats["fallback"] += 1
+            raise
+
+        self.visual_base_cache_stats["fallback"] += 1
+        raise RuntimeError("Failed to materialize standard visual base video")
+
+    def _finalize_output_from_visual_base(self, visual_base_path: Path, output_path: Path, duration: float) -> float:
+        mixed_output = output_path.with_suffix(".audio.tmp.mp4")
+        try:
+            if mixed_output.exists():
+                mixed_output.unlink()
+        except Exception:
+            pass
+
+        final_duration = float(duration or 0.0)
+        if _v56_apply_final_bgm_mix(
+            visual_base_path,
+            mixed_output,
+            self.audio_settings,
+            final_duration,
+            prepared_bgm_path=self._prepare_music_bed(final_duration) or self._prepare_music_path(),
+            prepared_bgm_is_bed=True,
+        ):
+            ok, reason, validated_duration = _v56_validate_video(mixed_output, min_size=512)
+            if not ok:
+                raise RuntimeError(f"éˆâ‚¬ç¼å £î‹æ£°æˆ¦ç…¶æ£°æˆžè´©éšå æ‚—éï¿ ç™æ¾¶è¾«è§¦é”›å±¼ç¬‰ç‘•å—™æ´ŠéƒÑ„æžƒæµ ? {reason}")
+            _v56_atomic_replace(mixed_output, output_path)
+            return float(validated_duration or final_duration)
+
+        ensure_parent(output_path)
+        if output_path.exists():
+            output_path.unlink()
+        shutil.copy2(visual_base_path, output_path)
+        ok, reason, validated_duration = _v56_validate_video(output_path, min_size=512)
+        if not ok:
+            raise RuntimeError(f"éˆâ‚¬ç¼å £î‹æ£°æˆžç‰Žæ¥ å±½ã‘ç’ãƒ¯ç´æ¶“å¶ˆî›«é©æ ¨æ£«é‚å›¦æ¬¢: {reason}")
+        return float(validated_duration or final_duration)
 
     def _video_segment_cache_summary(self) -> Dict[str, int]:
         return dict(self.video_segment_cache_stats)
@@ -2927,6 +3293,7 @@ class Renderer:
             )
 
         ensure_parent(self.output_path)
+        return self._render_with_visual_cache()
         clips: List[Any] = []
         rendered_segments: List[Dict[str, Any]] = []
         final = None
@@ -2987,6 +3354,7 @@ class Renderer:
                 self._create_cover()
 
             self._emit_photo_segment_cache_summary()
+            self._emit_card_segment_cache_summary()
             self._emit_video_segment_cache_summary()
             self._emit_proxy_media_summary()
 
@@ -3000,6 +3368,7 @@ class Renderer:
                     "output_size_bytes": self.output_path.stat().st_size if self.output_path.exists() else None,
                     "duration_seconds": float(getattr(final, "duration", 0.0) or 0.0),
                     "photo_segment_cache": self._photo_segment_cache_summary(),
+                    "card_segment_cache": self._card_segment_cache_summary(),
                     "video_segment_cache": self._video_segment_cache_summary(),
                     "proxy_media": self._proxy_media_summary(),
                     "render_scheduler": self.render_scheduler_summary,
@@ -3019,36 +3388,57 @@ class Renderer:
                 close_clip(clip)
             shutil.rmtree(self.temp_dir, ignore_errors=True)
 
+    def _render_with_visual_cache(self) -> None:
+        final_duration = 0.0
+        try:
+            visual_base_path, visual_duration = self._materialize_standard_visual_base()
+            final_duration = self._finalize_output_from_visual_base(
+                visual_base_path,
+                self.output_path,
+                visual_duration,
+            )
+
+            if self.params.get("cover"):
+                self._create_cover()
+
+            self._emit_visual_base_cache_summary()
+            self._emit_photo_segment_cache_summary()
+            self._emit_card_segment_cache_summary()
+            self._emit_video_segment_cache_summary()
+            self._emit_proxy_media_summary()
+
+            try:
+                project_dir = self.render_cache_dir.parent if self.render_cache_dir.name == "render_cache" else self.output_path.parent / ".video_create_project"
+                _v56_write_build_report(project_dir / "build_report.json", {
+                    "engine_version": ENGINE_VERSION,
+                    "status": "done",
+                    "render_mode": "v5_standard",
+                    "output_path": str(self.output_path),
+                    "output_size_bytes": self.output_path.stat().st_size if self.output_path.exists() else None,
+                    "duration_seconds": final_duration,
+                    "visual_base_cache": dict(self.visual_base_cache_stats),
+                    "photo_segment_cache": self._photo_segment_cache_summary(),
+                    "card_segment_cache": self._card_segment_cache_summary(),
+                    "video_segment_cache": self._video_segment_cache_summary(),
+                    "proxy_media": self._proxy_media_summary(),
+                    "render_scheduler": self.render_scheduler_summary,
+                    "diagnostics": _v56_render_diagnostics(self, [], [], False),
+                    "created_at": datetime.now().isoformat(),
+                })
+            except Exception as exc:
+                emit_event("log", message=f"build_report write skipped for standard render: {exc}")
+
+            emit_event("artifact", artifact="video", path=str(self.output_path), message="video exported")
+            emit_event("phase", phase="complete", message="Render complete", percent=100)
+        finally:
+            shutil.rmtree(self.temp_dir, ignore_errors=True)
+
     def _segment(self, seg: Dict[str, Any]):
         stype = seg.get("type")
         duration = float(seg.get("duration") or 3.0)
 
         if stype in {"title", "chapter", "end"}:
-            if stype == "title":
-                background_source = self.params.get("title_background_path") or self.first_visual_source
-                return self._text_card(
-                    seg.get("text") or "",
-                    seg.get("subtitle"),
-                    duration,
-                    main=True,
-                    background_source=background_source,
-                    background_position="first",
-                    title_style=self.params.get("title_style") or seg.get("title_style"),
-                )
-
-            if stype == "end":
-                background_source = self.params.get("end_background_path") or self.last_visual_source
-                return self._text_card(
-                    seg.get("text") or "",
-                    seg.get("subtitle"),
-                    duration,
-                    main=False,
-                    background_source=background_source,
-                    background_position="last",
-                    title_style=self.params.get("end_title_style") or seg.get("title_style"),
-                )
-
-            return self._chapter_card(seg, duration)
+            return self._cached_card_segment(seg, duration)
 
         if stype == "image":
             overlay_spec = self._image_overlay_cache_spec(seg, duration)
@@ -4150,6 +4540,18 @@ def _v56_segment_source_fingerprints(seg: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _v56_chunk_visual_audio_payload(params: Dict[str, Any]) -> Dict[str, Any]:
+    audio = params.get("audio")
+    if not isinstance(audio, dict):
+        audio = {}
+    return {
+        "keep_source_audio": bool(audio.get("keep_source_audio", True)),
+        "source_audio_volume": audio.get("source_audio_volume"),
+        "normalize_audio": bool(audio.get("normalize_audio", False)),
+        "target_lufs": audio.get("target_lufs"),
+    }
+
+
 def _v56_segment_cache_key(seg: Dict[str, Any], params: Dict[str, Any]) -> str:
     stable = {
         "engine_version": ENGINE_VERSION,
@@ -4173,7 +4575,7 @@ def _v56_segment_cache_key(seg: Dict[str, Any], params: Dict[str, Any]) -> str:
         "motion_config": seg.get("motion_config"),
         "rhythm_config": seg.get("rhythm_config"),
         "keep_audio": seg.get("keep_audio"),
-        "audio": params.get("audio"),
+        "audio_visual": _v56_chunk_visual_audio_payload(params),
         "aspect_ratio": params.get("aspect_ratio"),
         "fps": params.get("fps"),
         "quality": params.get("quality"),
@@ -4969,6 +5371,7 @@ class V56StableRenderer:
                     "chunk_dir": str(self.chunk_dir),
                     "chunks": chunk_reports,
                     "photo_segment_cache": renderer._photo_segment_cache_summary(),
+                    "card_segment_cache": renderer._card_segment_cache_summary(),
                     "video_segment_cache": renderer._video_segment_cache_summary(),
                     "proxy_media": renderer._proxy_media_summary(),
                     "render_scheduler": renderer.render_scheduler_summary,
@@ -5017,6 +5420,7 @@ class V56StableRenderer:
 
         elapsed = (datetime.now() - started_at).total_seconds()
         renderer._emit_photo_segment_cache_summary()
+        renderer._emit_card_segment_cache_summary()
         renderer._emit_video_segment_cache_summary()
         renderer._emit_proxy_media_summary()
         report = {
@@ -5032,6 +5436,7 @@ class V56StableRenderer:
             "chunk_dir": str(self.chunk_dir),
             "chunks": chunk_reports,
             "photo_segment_cache": renderer._photo_segment_cache_summary(),
+            "card_segment_cache": renderer._card_segment_cache_summary(),
             "video_segment_cache": renderer._video_segment_cache_summary(),
             "proxy_media": renderer._proxy_media_summary(),
             "render_scheduler": renderer.render_scheduler_summary,
