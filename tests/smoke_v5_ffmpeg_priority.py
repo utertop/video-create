@@ -373,6 +373,85 @@ def test_ffmpeg_image_chunk_renders_safe_image_overlay_stable_chunk() -> None:
     assert rendered, "expected cached photo overlay segments for safe image overlay chunk"
 
 
+def test_ffmpeg_fitted_video_chunk_renders_safe_video_motion_and_overlay() -> None:
+    root = Path("tests/tmp_vcs_ffmpeg_fitted_video_chunk")
+    if root.exists():
+        shutil.rmtree(root)
+    root.mkdir(parents=True)
+
+    first = root / "first.mp4"
+    second = root / "second.mp4"
+    make_video(first)
+    make_video(second)
+
+    plan = {
+        "render_settings": {
+            "fps": 12,
+            "aspect_ratio": "16:9",
+            "edit_strategy": "long_stable",
+            "performance_mode": "stable",
+            "render_mode": "long_stable",
+        },
+        "total_duration": 2.0,
+        "segments": [
+            {
+                "segment_id": "seg_vid_fit_0001",
+                "type": "video",
+                "source_path": str(first),
+                "duration": 1.0,
+                "start_time": 0.0,
+                "end_time": 1.0,
+                "text": None,
+                "transition": "soft_crossfade",
+                "transition_config": {"type": "soft_crossfade", "duration": 0.3},
+                "motion_config": {"type": "micro_zoom"},
+                "keep_audio": False,
+            },
+            {
+                "segment_id": "seg_vid_fit_0002",
+                "type": "video",
+                "source_path": str(second),
+                "duration": 1.0,
+                "start_time": 1.0,
+                "end_time": 2.0,
+                "text": None,
+                "transition": "soft_crossfade",
+                "transition_config": {"type": "soft_crossfade", "duration": 0.3},
+                "motion_config": {"type": "subtle_ken_burns"},
+                "keep_audio": False,
+                "overlay_text": "Safe Overlay",
+                "overlay_subtitle": "Video fit",
+                "overlay_duration": 1.0,
+                "overlay_title_style": {
+                    "preset": "minimal_editorial",
+                    "motion": "editorial_fade",
+                    "position": "lower_left",
+                },
+            },
+        ],
+    }
+    output = root / "output.mp4"
+    params = {"fps": 12, "quality": "draft", "render_mode": "long_stable", "performance_mode": "stable"}
+
+    groups = engine._v56_build_chunk_groups(plan["segments"], 30, params)
+    assert groups
+    assert groups[0]["runtime_chunk_route"] == "ffmpeg_fitted_video_chunk"
+
+    engine.V56StableRenderer(plan, str(output), params).render()
+    ok, reason, _duration = engine._v56_validate_video(output, min_size=512)
+    assert ok, reason
+
+    report_path = root / ".video_create_project" / "build_report.json"
+    report = engine.read_json(str(report_path))
+    route_counts = ((report.get("chunk_scheduler") or {}).get("route_counts") or {})
+    assert route_counts.get("ffmpeg_fitted_video_chunk") == 1
+
+    motion_fitted = list((root / ".video_create_project" / "render_cache" / "motion_fitted_videos").glob("*.mp4"))
+    overlay_fitted = list((root / ".video_create_project" / "render_cache" / "overlay_fitted_videos").glob("*.mp4"))
+    assert motion_fitted, "expected motion-fitted video cache for safe video chunk"
+    assert overlay_fitted, "expected cached overlay-fitted video segment"
+
+
 def test_ffmpeg_video_segment_cache_stats() -> None:
     root = Path("tests/tmp_vcs_ffmpeg_video_cache_stats")
     if root.exists():

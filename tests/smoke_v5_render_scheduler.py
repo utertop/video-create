@@ -1,6 +1,9 @@
+import shutil
+import subprocess
 import sys
 from pathlib import Path
-import shutil
+
+import imageio_ffmpeg
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -135,9 +138,9 @@ def test_renderer_applies_runtime_render_routes() -> None:
     assert [group["runtime_chunk_route"] for group in chunk_groups] == [
         "ffmpeg_image_chunk",
         "ffmpeg_direct_chunk",
-        "moviepy_chunk",
+        "ffmpeg_fitted_video_chunk",
     ]
-    assert chunk_groups[2]["runtime_chunk_route_reason"] == "contains_video_timeline_segments"
+    assert chunk_groups[2]["runtime_chunk_route_reason"] == "all_segments_ffmpeg_fitted_video_safe"
 
     direct_only_groups = engine._v56_build_chunk_groups([plan["segments"][1]], 30, {"performance_mode": "balanced"})
     assert direct_only_groups[0]["runtime_chunk_route"] == "ffmpeg_direct_chunk"
@@ -146,6 +149,10 @@ def test_renderer_applies_runtime_render_routes() -> None:
     image_only_groups = engine._v56_build_chunk_groups([plan["segments"][0]], 30, {"performance_mode": "balanced"})
     assert image_only_groups[0]["runtime_chunk_route"] == "ffmpeg_image_chunk"
     assert image_only_groups[0]["runtime_chunk_route_reason"] == "all_segments_ffmpeg_image_chunk_safe"
+
+    motion_only_groups = engine._v56_build_chunk_groups([plan["segments"][2]], 30, {"performance_mode": "balanced"})
+    assert motion_only_groups[0]["runtime_chunk_route"] == "ffmpeg_fitted_video_chunk"
+    assert motion_only_groups[0]["runtime_chunk_route_reason"] == "all_segments_ffmpeg_fitted_video_safe"
 
 
 def test_standard_visual_chunk_groups_prefer_ffmpeg_for_safe_image_units() -> None:
@@ -335,6 +342,96 @@ def test_standard_visual_chunk_groups_prefer_ffmpeg_for_static_card_units() -> N
     assert groups
     assert groups[0]["runtime_chunk_route"] == "ffmpeg_card_chunk"
     assert groups[0]["runtime_chunk_route_reason"] == "all_segments_ffmpeg_card_chunk_safe"
+
+
+def test_standard_visual_chunk_groups_prefer_ffmpeg_for_safe_video_fit_units() -> None:
+    root = Path("tests/tmp_vcs_standard_visual_ffmpeg_video_chunk")
+    if root.exists():
+        shutil.rmtree(root)
+    root.mkdir(parents=True)
+
+    first = root / "first.mp4"
+    second = root / "second.mp4"
+    subprocess.check_call(
+        [
+            imageio_ffmpeg.get_ffmpeg_exe(),
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=640x360:rate=12:duration=1.0",
+            "-pix_fmt",
+            "yuv420p",
+            str(first),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    subprocess.check_call(
+        [
+            imageio_ffmpeg.get_ffmpeg_exe(),
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=640x360:rate=12:duration=1.0",
+            "-pix_fmt",
+            "yuv420p",
+            str(second),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    plan = {
+        "total_duration": 2.0,
+        "render_settings": {
+            "fps": 12,
+            "aspect_ratio": "16:9",
+            "edit_strategy": "fast_assembly",
+            "performance_mode": "balanced",
+            "render_mode": "standard",
+        },
+        "segments": [
+            {
+                "segment_id": "seg_vid_fit_1",
+                "type": "video",
+                "source_path": str(first),
+                "duration": 1.0,
+                "start_time": 0.0,
+                "end_time": 1.0,
+                "transition_config": {"type": "soft_crossfade", "duration": 0.3},
+                "motion_config": {"type": "micro_zoom"},
+                "keep_audio": False,
+            },
+            {
+                "segment_id": "seg_vid_fit_2",
+                "type": "video",
+                "source_path": str(second),
+                "duration": 1.0,
+                "start_time": 1.0,
+                "end_time": 2.0,
+                "transition_config": {"type": "soft_crossfade", "duration": 0.3},
+                "motion_config": {"type": "subtle_ken_burns"},
+                "keep_audio": False,
+                "overlay_text": "Safe Overlay",
+                "overlay_subtitle": "Video fit",
+                "overlay_duration": 1.0,
+                "overlay_title_style": {"preset": "minimal_editorial", "motion": "editorial_fade", "position": "lower_left"},
+            },
+        ],
+    }
+
+    renderer = engine.Renderer(
+        plan,
+        str(root / "output.mp4"),
+        {"fps": 12, "quality": "draft", "render_mode": "standard", "performance_mode": "balanced", "edit_strategy": "fast_assembly"},
+    )
+    groups = renderer._build_standard_visual_chunk_groups()
+
+    assert groups
+    assert groups[0]["runtime_chunk_route"] == "ffmpeg_fitted_video_chunk"
+    assert groups[0]["runtime_chunk_route_reason"] == "all_segments_ffmpeg_fitted_video_safe"
 
 
 def test_stable_chunk_cache_key_tracks_source_file_changes() -> None:

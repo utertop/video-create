@@ -1532,6 +1532,10 @@ def _v56_is_ffmpeg_card_chunk_candidate(
     return motion == "static_hold"
 
 
+def _v56_is_ffmpeg_fitted_video_chunk_route(route: str) -> bool:
+    return str(route or "") in {"video_fit", "video_motion_fit"}
+
+
 def _v56_chunk_route_family(
     seg: Dict[str, Any],
     params: Optional[Dict[str, Any]] = None,
@@ -1539,6 +1543,8 @@ def _v56_chunk_route_family(
     route = str(seg.get("runtime_render_route") or seg.get("render_route") or "moviepy_required")
     if route == "direct_chunk_candidate":
         return "direct"
+    if _v56_is_ffmpeg_fitted_video_chunk_route(route):
+        return "video"
     if _v56_is_ffmpeg_card_chunk_candidate(seg, params):
         return "card"
     if _v56_is_ffmpeg_image_chunk_candidate(seg, params):
@@ -3085,7 +3091,7 @@ class Compiler:
 
     def _compile_video_motion_fit_candidate(self, seg: RenderSegment) -> bool:
         motion_type = str((seg.motion_config or {}).get("type") or "none")
-        return motion_type in {"gentle_push", "slow_push"}
+        return motion_type in {"gentle_push", "slow_push", "micro_zoom", "subtle_ken_burns"}
 
     def _compile_video_fitted_candidate(self, seg: RenderSegment) -> bool:
         if seg.type != "video":
@@ -4659,6 +4665,13 @@ class Renderer:
                 "runtime_chunk_route_tags": ["ffmpeg", "chunk", "direct", "visual_base"],
                 "runtime_chunk_route_counts": route_counts,
             }
+        if items and all(_v56_is_ffmpeg_fitted_video_chunk_route(route) for route in routes):
+            return {
+                "runtime_chunk_route": "ffmpeg_fitted_video_chunk",
+                "runtime_chunk_route_reason": "all_segments_ffmpeg_fitted_video_safe",
+                "runtime_chunk_route_tags": ["ffmpeg", "chunk", "video_fit", "visual_base"],
+                "runtime_chunk_route_counts": route_counts,
+            }
         if items and all(self._can_use_ffmpeg_card_chunk_segment(seg) for seg in items):
             return {
                 "runtime_chunk_route": "ffmpeg_card_chunk",
@@ -5972,6 +5985,10 @@ class Renderer:
             return {"type": motion_type, "mode": "progressive_zoom", "amount": 0.018}
         if motion_type == "slow_push":
             return {"type": motion_type, "mode": "progressive_zoom", "amount": 0.015}
+        if motion_type == "micro_zoom":
+            return {"type": motion_type, "mode": "progressive_zoom", "amount": 0.024}
+        if motion_type == "subtle_ken_burns":
+            return {"type": motion_type, "mode": "progressive_zoom", "amount": 0.012}
         return None
 
     def _can_use_ffmpeg_fitted_video(self, seg: Dict[str, Any]) -> bool:
@@ -6229,6 +6246,75 @@ class Renderer:
             self.video_segment_cache_stats["fallback"] += 1
             self.video_segment_cache_stats["motion_fallback"] += 1
             emit_event("log", message=f"FFmpeg 视频 motion 预适配异常，回退 MoviePy: {source.name}: {exc}")
+
+        try:
+            if out.exists():
+                out.unlink()
+        except Exception:
+            pass
+        return None
+
+    def _prerender_safe_video_overlay_segment(
+        self,
+        fitted_source: Path,
+        seg: Dict[str, Any],
+        duration: float,
+    ) -> Optional[Path]:
+        overlay_spec = self._image_overlay_cache_spec(seg, duration)
+        if overlay_spec is None:
+            return fitted_source
+
+        overlay_key = json.dumps(overlay_spec, ensure_ascii=False, sort_keys=True)
+        out = self._cache_path(
+            "overlay_fitted_videos",
+            fitted_source,
+            ".mp4",
+            f"overlay_fit_v1|duration={round(float(duration or 0.0), 3)}|overlay={overlay_key}",
+        )
+        if out.exists() and out.stat().st_size > 1024:
+            emit_event("log", message=f"Video overlay cache hit: {out.name}")
+            return out
+
+        clip = None
+        final = None
+        try:
+            clip = VideoFileClip(str(fitted_source)).set_duration(duration)
+            final = self._apply_overlay_title(clip, seg)
+            has_audio = getattr(final, "audio", None) is not None
+            final.write_videofile(
+                str(out),
+                fps=int(self.params.get("fps") or self.plan.get("render_settings", {}).get("fps") or 30),
+                codec="libx264",
+                audio=has_audio,
+                audio_codec="aac" if has_audio else None,
+                preset="veryfast",
+                threads=1,
+                verbose=False,
+                logger=None,
+                ffmpeg_params=[
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-movflags",
+                    "+faststart",
+                    "-crf",
+                    quality_to_crf(self.params.get("python_quality") or self.params.get("quality") or "standard"),
+                ],
+            )
+            ok, _reason, _duration = _v56_validate_video(out, min_size=512)
+            if ok:
+                emit_event("log", message=f"Video overlay cache created: {out.name}")
+                return out
+        except Exception as exc:
+            emit_event("log", message=f"Video overlay prerender fallback: {exc}")
+        finally:
+            if final is not None:
+                close_clip(final)
+            if clip is not None:
+                close_clip(clip)
+            try:
+                gc.collect()
+            except Exception:
+                pass
 
         try:
             if out.exists():
@@ -6511,6 +6597,13 @@ def _v56_build_chunk_groups(
                 "runtime_chunk_route": "ffmpeg_direct_chunk",
                 "runtime_chunk_route_reason": "all_segments_direct_chunk_safe",
                 "runtime_chunk_route_tags": ["ffmpeg", "chunk", "direct"],
+                "runtime_chunk_route_counts": route_counts,
+            }
+        if items and all(_v56_is_ffmpeg_fitted_video_chunk_route(route) for route in routes):
+            return {
+                "runtime_chunk_route": "ffmpeg_fitted_video_chunk",
+                "runtime_chunk_route_reason": "all_segments_ffmpeg_fitted_video_safe",
+                "runtime_chunk_route_tags": ["ffmpeg", "chunk", "video_fit"],
                 "runtime_chunk_route_counts": route_counts,
             }
         if items and all(_v56_is_ffmpeg_card_chunk_candidate(seg, params) for seg in items):
@@ -7028,6 +7121,85 @@ def _v56_try_write_ffmpeg_image_chunk(
             pass
 
 
+def _v56_try_write_ffmpeg_fitted_video_chunk(
+    renderer: Any,
+    chunk: Dict[str, Any],
+    tmp_chunk: Path,
+    params: Dict[str, Any],
+) -> bool:
+    segments = chunk.get("segments") or []
+    if not segments:
+        return False
+    if str(chunk.get("runtime_chunk_route") or "") not in {"", "ffmpeg_fitted_video_chunk"}:
+        return False
+
+    rendered_segments: List[Path] = []
+    for seg in segments:
+        source_path = seg.get("source_path")
+        if not source_path:
+            return False
+        source = Path(str(source_path))
+        if not source.exists() or not renderer._can_use_ffmpeg_fitted_video(seg):
+            return False
+        duration = float(seg.get("duration") or 0.1)
+        keep_audio = renderer._segment_keep_audio(seg) if hasattr(renderer, "_segment_keep_audio") else bool(seg.get("keep_audio", True))
+        motion_spec = renderer._ffmpeg_video_motion_cache_spec(seg.get("motion_config"))
+        if motion_spec is not None:
+            base = renderer._ffmpeg_fit_motion_video_segment(source, duration, motion_spec, keep_audio=keep_audio)
+        else:
+            base = renderer._ffmpeg_fit_video_segment(source, duration, keep_audio=keep_audio)
+        if not base or not base.exists():
+            return False
+        prepared = renderer._prerender_safe_video_overlay_segment(base, seg, duration)
+        if not prepared or not prepared.exists():
+            return False
+        rendered_segments.append(prepared)
+
+    concat_list = tmp_chunk.with_suffix(".concat.txt")
+    try:
+        with concat_list.open("w", encoding="utf-8", newline="\n") as f:
+            for rendered in rendered_segments:
+                escaped = rendered.resolve().as_posix().replace("'", r"'\''")
+                f.write(f"file '{escaped}'\n")
+
+        import imageio_ffmpeg
+
+        cmd = [
+            imageio_ffmpeg.get_ffmpeg_exe(),
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(concat_list),
+            "-c",
+            "copy",
+            "-movflags",
+            "+faststart",
+            str(tmp_chunk),
+        ]
+        emit_event("phase", phase="render", message=f"使用 FFmpeg 拼接轻量视频分段 {chunk['index'] + 1}", percent=min(94, 10 + chunk["index"]))
+        completed = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if completed.returncode != 0:
+            emit_event("log", message=f"FFmpeg 轻量视频分段拼接失败，回退 MoviePy: {completed.stderr[-800:]}")
+            return False
+        ok, reason, _duration = _v56_validate_video(tmp_chunk)
+        if not ok:
+            emit_event("log", message=f"FFmpeg 轻量视频分段校验失败，回退 MoviePy: {reason}")
+            return False
+        return True
+    except Exception as exc:
+        emit_event("log", message=f"FFmpeg 轻量视频分段异常，回退 MoviePy: {exc}")
+        return False
+    finally:
+        try:
+            if concat_list.exists():
+                concat_list.unlink()
+        except Exception:
+            pass
+
+
 def _v56_try_write_ffmpeg_card_chunk(
     renderer: Any,
     chunk: Dict[str, Any],
@@ -7227,6 +7399,13 @@ def _v56_write_chunk_video(
     try:
         chunk_route = str(chunk.get("runtime_chunk_route") or "")
         if chunk_route == "ffmpeg_direct_chunk" and _v56_try_write_ffmpeg_direct_chunk(renderer, chunk, tmp_chunk, params):
+            if ensure_audio_track:
+                ok, _reason, duration = _v56_validate_video(tmp_chunk)
+                if ok and not _v56_ensure_silent_audio_track(tmp_chunk, duration):
+                    raise RuntimeError("failed to ensure audio-ready stable chunk")
+            _v56_atomic_replace(tmp_chunk, chunk_path)
+            return
+        if chunk_route == "ffmpeg_fitted_video_chunk" and _v56_try_write_ffmpeg_fitted_video_chunk(renderer, chunk, tmp_chunk, params):
             if ensure_audio_track:
                 ok, _reason, duration = _v56_validate_video(tmp_chunk)
                 if ok and not _v56_ensure_silent_audio_track(tmp_chunk, duration):
