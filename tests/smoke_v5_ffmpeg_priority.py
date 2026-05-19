@@ -298,6 +298,81 @@ def test_ffmpeg_card_chunk_renders_safe_static_cards() -> None:
     assert rendered, "expected static card segment cache"
 
 
+def test_ffmpeg_image_chunk_renders_safe_image_overlay_stable_chunk() -> None:
+    root = Path("tests/tmp_vcs_ffmpeg_image_overlay_chunk")
+    if root.exists():
+        shutil.rmtree(root)
+    root.mkdir(parents=True)
+
+    first = root / "first.jpg"
+    second = root / "second.jpg"
+    engine.Image.new("RGB", (960, 540), (96, 126, 176)).save(first, quality=92)
+    engine.Image.new("RGB", (960, 540), (160, 104, 84)).save(second, quality=92)
+
+    plan = {
+        "render_settings": {
+            "fps": 12,
+            "aspect_ratio": "16:9",
+            "edit_strategy": "long_stable",
+            "performance_mode": "stable",
+            "render_mode": "long_stable",
+        },
+        "total_duration": 2.0,
+        "segments": [
+            {
+                "segment_id": "seg_img_overlay_0001",
+                "type": "image",
+                "source_path": str(first),
+                "duration": 1.0,
+                "start_time": 0.0,
+                "end_time": 1.0,
+                "text": None,
+                "transition": "cut",
+                "transition_config": {"type": "cut", "duration": 0},
+                "motion_config": {"type": "gentle_push"},
+                "overlay_text": "Tokyo Walk",
+                "overlay_subtitle": "Golden hour",
+                "overlay_duration": 1.0,
+                "overlay_title_style": {"preset": "minimal_editorial", "motion": "editorial_fade", "position": "lower_left"},
+            },
+            {
+                "segment_id": "seg_img_overlay_0002",
+                "type": "image",
+                "source_path": str(second),
+                "duration": 1.0,
+                "start_time": 1.0,
+                "end_time": 2.0,
+                "text": None,
+                "transition": "cut",
+                "transition_config": {"type": "cut", "duration": 0},
+                "motion_config": {"type": "slow_push"},
+                "overlay_text": "Neon Street",
+                "overlay_subtitle": None,
+                "overlay_duration": 1.0,
+                "overlay_title_style": {"preset": "minimal_editorial", "motion": "editorial_fade", "position": "lower_left"},
+            },
+        ],
+    }
+    output = root / "output.mp4"
+    params = {"fps": 12, "quality": "draft", "render_mode": "long_stable", "performance_mode": "stable"}
+
+    groups = engine._v56_build_chunk_groups(plan["segments"], 30, params)
+    assert groups
+    assert groups[0]["runtime_chunk_route"] == "ffmpeg_image_chunk"
+
+    engine.V56StableRenderer(plan, str(output), params).render()
+    ok, reason, _duration = engine._v56_validate_video(output, min_size=512)
+    assert ok, reason
+
+    report_path = root / ".video_create_project" / "build_report.json"
+    report = engine.read_json(str(report_path))
+    route_counts = ((report.get("chunk_scheduler") or {}).get("route_counts") or {})
+    assert route_counts.get("ffmpeg_image_chunk") == 1
+
+    rendered = list((root / ".video_create_project" / "render_cache" / "photo_segments").glob("*.mp4"))
+    assert rendered, "expected cached photo overlay segments for safe image overlay chunk"
+
+
 def test_ffmpeg_video_segment_cache_stats() -> None:
     root = Path("tests/tmp_vcs_ffmpeg_video_cache_stats")
     if root.exists():

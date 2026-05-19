@@ -29,6 +29,7 @@ import sys
 import subprocess
 import tempfile
 import gc
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -44,7 +45,7 @@ def _print_early_help_without_optional_deps() -> None:
 
 usage:
   python video_engine_v5.py scan    --input_folder <folder> --output <media_library.json> [--recursive]
-  python video_engine_v5.py plan    --library <media_library.json> --output <story_blueprint.json>
+  python video_engine_v5.py plan    --library <media_library.json> --output <story_blueprint.json> [--template auto]
   python video_engine_v5.py compile --blueprint <story_blueprint.json> --library <media_library.json> --output <render_plan.json>
   python video_engine_v5.py render  --plan <render_plan.json> --output <video.mp4> [--params <json>]
   python video_engine_v5.py preview-render --plan <render_plan.json> --output <preview.mp4>
@@ -475,6 +476,209 @@ def quality_to_crf(quality: Any) -> str:
         "ultra": "18",
     }
     return mapping.get(str(quality), "20")
+
+
+def _merge_style_dict(base: Optional[Dict[str, Any]], override: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    merged: Dict[str, Any] = dict(base or {})
+    for key, value in dict(override or {}).items():
+        if value is not None:
+            merged[key] = value
+    return merged
+
+
+TEMPLATE_MATCHING_PROFILES: List[Dict[str, Any]] = [
+    {
+        "template_id": "travel_postcard",
+        "display_name": "旅行明信片",
+        "category": "travel",
+        "description": "适合城市、日期、景点层级清晰的旅拍内容，强调章节分段与柔和流动感。",
+        "render_defaults": {
+            "edit_strategy": "travel_soft",
+            "transition_profile": "travel_postcard",
+            "rhythm_profile": "travel_story",
+            "performance_mode": "balanced",
+            "chapter_background_mode": "auto_bridge",
+            "scenic_spot_title_mode": "overlay",
+            "single_section_chapter_card": "auto",
+            "image_motion_profile": "travel_gentle",
+            "title_style": {"preset": "travel_postcard", "motion": "postcard_drift", "position": "center"},
+            "end_title_style": {"preset": "travel_postcard", "motion": "postcard_drift", "position": "center"},
+            "overlay_title_style": {"preset": "travel_postcard", "motion": "postcard_drift", "position": "lower_left"},
+            "chapter_title_style_defaults": {"motion": "postcard_drift"},
+        },
+    },
+    {
+        "template_id": "food_shop_review",
+        "display_name": "探店节奏剪辑",
+        "category": "food",
+        "description": "适合探店、美食、夜市等高频短段落素材，强调节奏感和重点信息露出。",
+        "render_defaults": {
+            "edit_strategy": "beat_cut",
+            "transition_profile": "food_review",
+            "rhythm_profile": "fast_discovery",
+            "performance_mode": "balanced",
+            "chapter_background_mode": "auto_bridge",
+            "scenic_spot_title_mode": "overlay",
+            "single_section_chapter_card": "auto",
+            "image_motion_profile": "dynamic_punch",
+            "title_style": {"preset": "impact_flash", "motion": "impact_slam", "position": "center"},
+            "end_title_style": {"preset": "impact_flash", "motion": "impact_slam", "position": "center"},
+            "overlay_title_style": {"preset": "minimal_editorial", "motion": "editorial_fade", "position": "lower_left"},
+            "chapter_title_style_defaults": {"motion": "impact_slam"},
+        },
+    },
+    {
+        "template_id": "daily_vlog",
+        "display_name": "日常 Vlog",
+        "category": "vlog",
+        "description": "适合轻记录、生活碎片、混合图视频材，保持自然流动而不过度造型。",
+        "render_defaults": {
+            "edit_strategy": "smart_director",
+            "transition_profile": "daily_vlog",
+            "rhythm_profile": "casual_flow",
+            "performance_mode": "balanced",
+            "chapter_background_mode": "auto_bridge",
+            "scenic_spot_title_mode": "overlay",
+            "single_section_chapter_card": "auto",
+            "image_motion_profile": "casual_story",
+            "title_style": {"preset": "playful_pop", "motion": "playful_bounce", "position": "center"},
+            "end_title_style": {"preset": "playful_pop", "motion": "playful_bounce", "position": "center"},
+            "overlay_title_style": {"preset": "minimal_editorial", "motion": "editorial_fade", "position": "lower_left"},
+            "chapter_title_style_defaults": {"motion": "editorial_fade"},
+        },
+    },
+    {
+        "template_id": "product_showcase",
+        "display_name": "产品展示",
+        "category": "product",
+        "description": "适合开箱、测评、教程、功能展示等信息型内容，偏克制与清晰。",
+        "render_defaults": {
+            "edit_strategy": "documentary",
+            "transition_profile": "product_showcase",
+            "rhythm_profile": "feature_focus",
+            "performance_mode": "quality",
+            "chapter_background_mode": "auto_bridge",
+            "scenic_spot_title_mode": "full_card",
+            "single_section_chapter_card": "auto",
+            "image_motion_profile": "product_focus",
+            "title_style": {"preset": "documentary_lower_third", "motion": "lower_third_slide", "position": "center"},
+            "end_title_style": {"preset": "documentary_lower_third", "motion": "lower_third_slide", "position": "center"},
+            "overlay_title_style": {"preset": "documentary_lower_third", "motion": "lower_third_slide", "position": "lower_left"},
+            "chapter_title_style_defaults": {"motion": "lower_third_slide"},
+        },
+    },
+    {
+        "template_id": "photo_story",
+        "display_name": "图文纪实",
+        "category": "photo",
+        "description": "适合图片为主、叙事感更强的长内容，强调稳定阅读与低干扰过渡。",
+        "render_defaults": {
+            "edit_strategy": "long_stable",
+            "transition_profile": "photo_story",
+            "rhythm_profile": "steady_story",
+            "performance_mode": "stable",
+            "chapter_background_mode": "auto_bridge",
+            "scenic_spot_title_mode": "overlay",
+            "single_section_chapter_card": "auto",
+            "image_motion_profile": "photo_story",
+            "title_style": {"preset": "documentary_lower_third", "motion": "static_hold", "position": "center"},
+            "end_title_style": {"preset": "documentary_lower_third", "motion": "static_hold", "position": "center"},
+            "overlay_title_style": {"preset": "documentary_lower_third", "motion": "static_hold", "position": "lower_left"},
+            "chapter_title_style_defaults": {"motion": "static_hold"},
+        },
+    },
+]
+
+TEMPLATE_MATCHING_PROFILE_BY_ID: Dict[str, Dict[str, Any]] = {
+    item["template_id"]: item for item in TEMPLATE_MATCHING_PROFILES
+}
+
+AUDIO_BLUEPRINT_TEMPLATE_PROFILES: Dict[str, Dict[str, Any]] = {
+    "travel_postcard": {
+        "music_profile": "travel_light",
+        "energy_curve_style": "lifted_journey",
+        "music_fit_strategy": "intro_loop_outro",
+        "bgm_volume": 0.26,
+        "source_audio_volume": 1.0,
+        "keep_source_audio": True,
+        "auto_ducking": True,
+        "duck_bgm_volume": 0.14,
+        "fade_in_seconds": 1.6,
+        "fade_out_seconds": 3.2,
+        "normalize_audio": True,
+        "target_lufs": -16.0,
+    },
+    "food_shop_review": {
+        "music_profile": "beat",
+        "energy_curve_style": "fast_discovery",
+        "music_fit_strategy": "auto",
+        "bgm_volume": 0.22,
+        "source_audio_volume": 1.0,
+        "keep_source_audio": True,
+        "auto_ducking": True,
+        "duck_bgm_volume": 0.13,
+        "fade_in_seconds": 0.8,
+        "fade_out_seconds": 1.6,
+        "normalize_audio": True,
+        "target_lufs": -16.0,
+    },
+    "daily_vlog": {
+        "music_profile": "lifestyle",
+        "energy_curve_style": "casual_flow",
+        "music_fit_strategy": "auto",
+        "bgm_volume": 0.25,
+        "source_audio_volume": 1.0,
+        "keep_source_audio": True,
+        "auto_ducking": True,
+        "duck_bgm_volume": 0.15,
+        "fade_in_seconds": 1.0,
+        "fade_out_seconds": 2.2,
+        "normalize_audio": True,
+        "target_lufs": -16.0,
+    },
+    "product_showcase": {
+        "music_profile": "calm_documentary",
+        "energy_curve_style": "feature_focus",
+        "music_fit_strategy": "trim",
+        "bgm_volume": 0.2,
+        "source_audio_volume": 0.98,
+        "keep_source_audio": True,
+        "auto_ducking": True,
+        "duck_bgm_volume": 0.12,
+        "fade_in_seconds": 0.8,
+        "fade_out_seconds": 1.8,
+        "normalize_audio": True,
+        "target_lufs": -15.0,
+    },
+    "photo_story": {
+        "music_profile": "calm_documentary",
+        "energy_curve_style": "steady_story",
+        "music_fit_strategy": "intro_loop_outro",
+        "bgm_volume": 0.23,
+        "source_audio_volume": 1.0,
+        "keep_source_audio": True,
+        "auto_ducking": True,
+        "duck_bgm_volume": 0.14,
+        "fade_in_seconds": 1.8,
+        "fade_out_seconds": 3.6,
+        "normalize_audio": True,
+        "target_lufs": -16.0,
+    },
+    "default": {
+        "music_profile": "lifestyle",
+        "energy_curve_style": "balanced_story",
+        "music_fit_strategy": "auto",
+        "bgm_volume": 0.24,
+        "source_audio_volume": 1.0,
+        "keep_source_audio": True,
+        "auto_ducking": True,
+        "duck_bgm_volume": 0.15,
+        "fade_in_seconds": 1.2,
+        "fade_out_seconds": 2.4,
+        "normalize_audio": True,
+        "target_lufs": -16.0,
+    },
+}
 
 
 def detect_ffmpeg_hardware_encoders() -> List[str]:
@@ -1004,6 +1208,126 @@ def build_music_bed_for_duration(
             pass
 
 
+def build_chapter_restart_music_bed(
+    prepared_tracks: List[Path],
+    chapter_cues: List[Dict[str, Any]],
+    duration: float,
+    cache_root: Path,
+    playlist_mode: str = "chapter_restart",
+    fit_strategy: str = "auto",
+    fade_in: float = 0.0,
+    fade_out: float = 0.0,
+) -> Optional[Path]:
+    if not prepared_tracks or not chapter_cues:
+        return None
+
+    duration = max(0.1, float(duration or 0.0))
+    normalized_cues: List[Dict[str, Any]] = []
+    total_covered = 0.0
+    for cue in chapter_cues:
+        if not isinstance(cue, dict):
+            continue
+        cue_duration = float(cue.get("duration") or 0.0)
+        if cue_duration <= 0:
+            start_time = float(cue.get("start_time") or 0.0)
+            end_time = float(cue.get("end_time") or 0.0)
+            cue_duration = max(0.0, end_time - start_time)
+        if cue_duration <= 0.05:
+            continue
+        remaining = max(0.0, duration - total_covered)
+        if remaining <= 0.05:
+            break
+        cue_duration = min(cue_duration, remaining)
+        normalized_cues.append({
+            "duration": cue_duration,
+            "title": cue.get("title"),
+            "phase": cue.get("phase"),
+        })
+        total_covered += cue_duration
+
+    if not normalized_cues:
+        return None
+    if total_covered < duration - 0.05:
+        normalized_cues.append({"duration": duration - total_covered, "title": "tail_fill", "phase": "outro"})
+
+    bucket = cache_root / "beds"
+    bucket.mkdir(parents=True, exist_ok=True)
+    key = json.dumps(
+        {
+            "tracks": [str(path.resolve()) for path in prepared_tracks if path.exists()],
+            "duration": round(duration, 3),
+            "playlist_mode": playlist_mode,
+            "fit_strategy": fit_strategy,
+            "fade_in": round(float(fade_in or 0.0), 3),
+            "fade_out": round(float(fade_out or 0.0), 3),
+            "chapter_cues": [{"duration": round(float(cue["duration"]), 3), "title": cue.get("title"), "phase": cue.get("phase")} for cue in normalized_cues],
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    cache_path = bucket / f"{safe_id(key)}.m4a"
+    if cache_path.exists() and cache_path.stat().st_size > 1024:
+        emit_event("log", message=f"Chapter restart music bed cache hit: {cache_path.name}")
+        return cache_path
+
+    segment_paths: List[Path] = []
+    tmp_path = cache_path.with_suffix(".tmp.m4a")
+    clips: List[Any] = []
+    try:
+        for index, cue in enumerate(normalized_cues):
+            cue_duration = max(0.1, float(cue["duration"]))
+            track = prepared_tracks[index % len(prepared_tracks)] if len(prepared_tracks) > 1 else prepared_tracks[0]
+            segment_fade_in = min(float(fade_in or 0.0), cue_duration / 3.0)
+            segment_fade_out = min(float(fade_out or 0.0), cue_duration / 3.0)
+            if index > 0:
+                segment_fade_in = min(segment_fade_in, 0.4)
+            if index < len(normalized_cues) - 1:
+                segment_fade_out = min(segment_fade_out, 0.6)
+            segment_path = build_music_bed_for_duration(
+                [track],
+                cue_duration,
+                cache_root,
+                fit_strategy=fit_strategy,
+                fade_in=segment_fade_in,
+                fade_out=segment_fade_out,
+            )
+            if segment_path and segment_path.exists():
+                segment_paths.append(segment_path)
+
+        if not segment_paths:
+            return None
+
+        if not HAS_MOVIEPY:
+            raise RuntimeError("MoviePy is required for chapter restart music bed generation")
+
+        audio_clips = [AudioFileClip(str(path)) for path in segment_paths]
+        clips.extend(audio_clips)
+        final_clip = concatenate_audioclips(audio_clips).set_duration(duration)
+        clips.append(final_clip)
+        final_clip.write_audiofile(
+            str(tmp_path),
+            fps=48000,
+            codec="aac",
+            bitrate="160k",
+            ffmpeg_params=["-movflags", "+faststart"],
+            verbose=False,
+            logger=None,
+        )
+        if not tmp_path.exists() or tmp_path.stat().st_size <= 1024:
+            raise RuntimeError("chapter restart music bed output is empty")
+        os.replace(str(tmp_path), str(cache_path))
+        emit_event("log", message=f"Chapter restart music bed cache created: {cache_path.name}")
+        return cache_path
+    finally:
+        for clip in clips:
+            close_clip(clip)
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except Exception:
+            pass
+
+
 def read_json(path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
@@ -1129,6 +1453,31 @@ def _should_auto_use_stable_renderer(
     return total_duration >= stable_threshold_seconds or segment_count >= stable_threshold_segments
 
 
+def _v56_image_overlay_cache_spec(seg: Dict[str, Any], duration: float) -> Optional[Dict[str, Any]]:
+    text = seg.get("overlay_text")
+    if not text:
+        return None
+    subtitle = seg.get("overlay_subtitle")
+    overlay_duration = min(float(seg.get("overlay_duration") or 1.8), float(duration or 1.8))
+    style = dict(seg.get("overlay_title_style") or {})
+    motion = str(style.get("motion") or "fade_slide_up")
+    position = str(style.get("position") or "lower_left")
+    if motion not in {"fade_slide_up", "editorial_fade", "static_hold", "lower_third_slide", "cinematic_reveal", "postcard_drift"}:
+        return None
+    if position not in {"lower_left", "lower_center", "center"}:
+        return None
+    if len(str(text)) > 42 or len(str(subtitle or "")) > 64:
+        return None
+    if overlay_duration > min(3.2, float(duration or 0.0)):
+        return None
+    return {
+        "text": str(text),
+        "subtitle": str(subtitle) if subtitle else None,
+        "duration": round(overlay_duration, 3),
+        "style": style,
+    }
+
+
 def _v56_is_ffmpeg_image_chunk_candidate(
     seg: Dict[str, Any],
     params: Optional[Dict[str, Any]] = None,
@@ -1136,7 +1485,7 @@ def _v56_is_ffmpeg_image_chunk_candidate(
     params = params or {}
     if bool(params.get("preview")):
         return False
-    if str(seg.get("type") or "") != "image" or seg.get("overlay_text"):
+    if str(seg.get("type") or "") != "image":
         return False
     if not seg.get("source_path"):
         return False
@@ -1146,7 +1495,11 @@ def _v56_is_ffmpeg_image_chunk_candidate(
     if transition_type not in {"none", "cut"} or transition_duration > 0.05:
         return False
     motion_type = str((seg.get("motion_config") or {}).get("type") or "none")
-    return motion_type in {"none", "still_hold", "gentle_push", "slow_push"}
+    if motion_type not in {"none", "still_hold", "gentle_push", "slow_push"}:
+        return False
+    if seg.get("overlay_text"):
+        return _v56_image_overlay_cache_spec(seg, float(seg.get("duration") or 0.0)) is not None
+    return True
 
 
 def _v56_resolved_card_style(seg: Dict[str, Any], params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -1440,6 +1793,7 @@ class Scanner:
         self.proxy_manifest["generated_at"] = datetime.now().isoformat()
         self.cache_cleanup_stats = self._cleanup_scan_cache_dirs()
         emit_event("phase", phase="scan", message="素材扫描完成", percent=100)
+        content_profile = self._build_scan_content_profile()
 
         return {
             "schema_version": SCHEMA_VERSION,
@@ -1460,7 +1814,77 @@ class Scanner:
                 "audio_count": sum(1 for a in self.assets if a.type == "audio"),
                 "skipped_count": self.skipped_count,
                 "error_count": sum(1 for a in self.assets if a.status == "error"),
+                "content_profile": content_profile,
             },
+        }
+
+    def _build_scan_content_profile(self) -> Dict[str, Any]:
+        visual_assets = [a for a in self.assets if a.type in {"image", "video"}]
+        visual_count = len(visual_assets)
+        image_count = sum(1 for a in self.assets if a.type == "image")
+        video_count = sum(1 for a in self.assets if a.type == "video")
+        audio_count = sum(1 for a in self.assets if a.type == "audio")
+        orientation_counts: Counter[str] = Counter()
+        video_durations: List[float] = []
+        keyword_counts: Counter[str] = Counter()
+        node_type_counts: Counter[str] = Counter()
+
+        for node in self.nodes.values():
+            node_type_counts[str(node.detected_type or "unknown")] += 1
+            signals = node.signals or {}
+            for keyword in signals.get("matched_theme_keywords") or []:
+                keyword_counts[str(keyword)] += 2
+            for keyword in signals.get("matched_event_keywords") or []:
+                keyword_counts[str(keyword)] += 2
+
+        for asset in visual_assets:
+            media = asset.media or {}
+            width = int(media.get("width") or 0)
+            height = int(media.get("height") or 0)
+            if width > 0 and height > 0:
+                orientation_counts[orientation_from_size((width, height))] += 1
+            if asset.type == "video":
+                duration = float(media.get("duration_seconds") or 0.0)
+                if duration > 0:
+                    video_durations.append(duration)
+
+        image_ratio = (image_count / visual_count) if visual_count else 0.0
+        video_ratio = (video_count / visual_count) if visual_count else 0.0
+        portrait_ratio = (orientation_counts.get("portrait", 0) / visual_count) if visual_count else 0.0
+        landscape_ratio = (orientation_counts.get("landscape", 0) / visual_count) if visual_count else 0.0
+        square_ratio = (orientation_counts.get("square", 0) / visual_count) if visual_count else 0.0
+
+        dominant_media_type = "mixed"
+        if visual_count == 0:
+            dominant_media_type = "unknown"
+        elif image_ratio >= 0.72:
+            dominant_media_type = "image"
+        elif video_ratio >= 0.72:
+            dominant_media_type = "video"
+
+        return {
+            "visual_asset_count": visual_count,
+            "image_count": image_count,
+            "video_count": video_count,
+            "audio_count": audio_count,
+            "image_ratio": round(image_ratio, 3),
+            "video_ratio": round(video_ratio, 3),
+            "portrait_ratio": round(portrait_ratio, 3),
+            "landscape_ratio": round(landscape_ratio, 3),
+            "square_ratio": round(square_ratio, 3),
+            "dominant_media_type": dominant_media_type,
+            "mixed_media": visual_count > 0 and image_count > 0 and video_count > 0,
+            "total_video_duration_seconds": round(sum(video_durations), 3),
+            "avg_video_duration_seconds": round(sum(video_durations) / len(video_durations), 3) if video_durations else 0.0,
+            "top_level_section_count": sum(1 for node in self.nodes.values() if int(node.depth or 0) == 1),
+            "chapter_node_count": int(node_type_counts.get("chapter", 0)),
+            "city_node_count": int(node_type_counts.get("city", 0)),
+            "date_node_count": int(node_type_counts.get("date", 0)),
+            "scenic_spot_node_count": int(node_type_counts.get("scenic_spot", 0)),
+            "top_keywords": [
+                {"keyword": keyword, "count": int(count)}
+                for keyword, count in keyword_counts.most_common(6)
+            ],
         }
 
     def _cleanup_scan_cache_dirs(self) -> Dict[str, Any]:
@@ -1934,7 +2358,13 @@ class Planner:
         self.nodes = {n["node_id"]: n for n in library.get("directory_nodes", [])}
         self.assets = library.get("assets", [])
 
-    def plan(self, strategy: str = "city_date_spot") -> Dict[str, Any]:
+    def plan(
+        self,
+        strategy: str = "city_date_spot",
+        template_mode: str = "auto",
+        top_n_templates: int = 3,
+        music_blueprint_mode: str = "recommend",
+    ) -> Dict[str, Any]:
         emit_event("phase", phase="plan", message="生成故事蓝图", percent=20)
 
         roots = [n for n in self.nodes.values() if n.get("parent_id") is None]
@@ -1962,6 +2392,22 @@ class Planner:
                     ),
                 )
 
+        template_matching = self._recommend_templates(template_mode=template_mode, top_n=top_n_templates)
+        self._apply_template_defaults_to_sections(sections, template_matching.get("applied_render_defaults") or {})
+        audio_blueprint = self._build_audio_blueprint(
+            sections=sections,
+            template_matching=template_matching,
+            mode=music_blueprint_mode,
+        )
+        metadata: Dict[str, Any] = {
+            "created_at": datetime.now().isoformat(),
+            "template_matching": template_matching,
+            "audio_blueprint": audio_blueprint,
+        }
+        metadata.update(template_matching.get("applied_render_defaults") or {})
+        if audio_blueprint.get("mode") == "apply" and not isinstance(metadata.get("audio"), dict):
+            metadata["audio"] = dict(audio_blueprint.get("recommended_audio_settings") or {})
+
         emit_event("phase", phase="plan", message="故事蓝图完成", percent=100)
         return {
             "schema_version": SCHEMA_VERSION,
@@ -1970,7 +2416,474 @@ class Planner:
             "subtitle": "",
             "strategy": strategy,
             "sections": [section_to_dict(s) for s in sections],
-            "metadata": {"created_at": datetime.now().isoformat()},
+            "metadata": metadata,
+        }
+
+    def _recommend_templates(self, template_mode: str = "auto", top_n: int = 3) -> Dict[str, Any]:
+        mode = str(template_mode or "auto").strip().lower()
+        context = self._build_template_matching_context()
+        recommendations = [self._score_template(profile, context) for profile in TEMPLATE_MATCHING_PROFILES]
+        recommendations.sort(key=lambda item: (-float(item.get("score") or 0.0), str(item.get("template_id") or "")))
+        recommendations = recommendations[: max(int(top_n or 3), 1)]
+
+        selected_source = "auto"
+        selected_template: Optional[Dict[str, Any]] = recommendations[0] if recommendations else None
+        if mode in {"off", "none", "disabled"}:
+            selected_source = "disabled"
+            selected_template = None
+        elif mode not in {"", "auto", "default"}:
+            forced = TEMPLATE_MATCHING_PROFILE_BY_ID.get(mode)
+            if not forced:
+                raise ValueError(f"未知模板 ID: {template_mode}")
+            selected_source = "manual"
+            selected_template = self._score_template(forced, context)
+            if not any(item.get("template_id") == mode for item in recommendations):
+                recommendations = [selected_template] + recommendations[: max(len(recommendations) - 1, 0)]
+
+        applied_render_defaults = dict((selected_template or {}).get("render_defaults") or {})
+        return {
+            "mode": mode or "auto",
+            "selected_source": selected_source,
+            "selected_template_id": selected_template.get("template_id") if selected_template else None,
+            "selected_template": selected_template,
+            "recommendations": recommendations,
+            "context": context,
+            "applied_render_defaults": applied_render_defaults,
+        }
+
+    def _apply_template_defaults_to_sections(
+        self,
+        sections: List[StorySection],
+        applied_render_defaults: Dict[str, Any],
+    ) -> None:
+        chapter_defaults = dict(applied_render_defaults.get("chapter_title_style_defaults") or {})
+        overlay_defaults = dict(applied_render_defaults.get("overlay_title_style") or {})
+        if not chapter_defaults and not overlay_defaults:
+            return
+
+        def visit(section: StorySection) -> None:
+            section_style = asdict(section.title_style) if isinstance(section.title_style, TitleStyle) else dict(section.title_style or {})
+            merged = section_style
+            if section.section_type in {"city", "date", "chapter"} and chapter_defaults:
+                merged = _merge_style_dict(chapter_defaults, merged)
+            elif section.section_type == "scenic_spot" and overlay_defaults:
+                merged = _merge_style_dict(overlay_defaults, merged)
+            if merged:
+                section.title_style = TitleStyle(**merged)
+            for child in section.children:
+                visit(child)
+
+        for section in sections:
+            visit(section)
+
+    def _build_template_matching_context(self) -> Dict[str, Any]:
+        summary = self.library.get("summary") or {}
+        profile = dict(summary.get("content_profile") or {})
+        visual_assets = [a for a in self.assets if a.get("type") in {"image", "video"}]
+        visual_count = int(profile.get("visual_asset_count") or len(visual_assets))
+        image_count = int(profile.get("image_count") or sum(1 for a in self.assets if a.get("type") == "image"))
+        video_count = int(profile.get("video_count") or sum(1 for a in self.assets if a.get("type") == "video"))
+        audio_count = int(profile.get("audio_count") or sum(1 for a in self.assets if a.get("type") == "audio"))
+
+        if "image_ratio" in profile:
+            image_ratio = float(profile.get("image_ratio") or 0.0)
+        else:
+            image_ratio = (image_count / visual_count) if visual_count else 0.0
+        if "video_ratio" in profile:
+            video_ratio = float(profile.get("video_ratio") or 0.0)
+        else:
+            video_ratio = (video_count / visual_count) if visual_count else 0.0
+
+        orientation_counts: Counter[str] = Counter()
+        for asset in visual_assets:
+            media = asset.get("media") or {}
+            width = int(media.get("width") or 0)
+            height = int(media.get("height") or 0)
+            if width > 0 and height > 0:
+                orientation_counts[orientation_from_size((width, height))] += 1
+
+        portrait_ratio = float(profile.get("portrait_ratio") or ((orientation_counts.get("portrait", 0) / visual_count) if visual_count else 0.0))
+        landscape_ratio = float(profile.get("landscape_ratio") or ((orientation_counts.get("landscape", 0) / visual_count) if visual_count else 0.0))
+        square_ratio = float(profile.get("square_ratio") or ((orientation_counts.get("square", 0) / visual_count) if visual_count else 0.0))
+
+        keyword_counts: Counter[str] = Counter()
+        for node in self.nodes.values():
+            signals = node.get("signals") or {}
+            for keyword in signals.get("matched_theme_keywords") or []:
+                keyword_counts[str(keyword)] += 2
+            for keyword in signals.get("matched_event_keywords") or []:
+                keyword_counts[str(keyword)] += 2
+
+        video_durations = [
+            float((asset.get("media") or {}).get("duration_seconds") or 0.0)
+            for asset in self.assets
+            if asset.get("type") == "video" and float((asset.get("media") or {}).get("duration_seconds") or 0.0) > 0.0
+        ]
+        node_type_counts: Counter[str] = Counter(str(node.get("detected_type") or "unknown") for node in self.nodes.values())
+
+        dominant_media_type = str(profile.get("dominant_media_type") or "")
+        if not dominant_media_type:
+            dominant_media_type = "mixed"
+            if visual_count == 0:
+                dominant_media_type = "unknown"
+            elif image_ratio >= 0.72:
+                dominant_media_type = "image"
+            elif video_ratio >= 0.72:
+                dominant_media_type = "video"
+
+        estimated_project_duration = self._estimate_project_duration_seconds()
+
+        return {
+            "visual_asset_count": visual_count,
+            "image_count": image_count,
+            "video_count": video_count,
+            "audio_count": audio_count,
+            "image_ratio": round(image_ratio, 3),
+            "video_ratio": round(video_ratio, 3),
+            "portrait_ratio": round(portrait_ratio, 3),
+            "landscape_ratio": round(landscape_ratio, 3),
+            "square_ratio": round(square_ratio, 3),
+            "dominant_media_type": dominant_media_type,
+            "mixed_media": bool(profile.get("mixed_media")) or (visual_count > 0 and image_count > 0 and video_count > 0),
+            "total_video_duration_seconds": round(sum(video_durations), 3),
+            "avg_video_duration_seconds": round(sum(video_durations) / len(video_durations), 3) if video_durations else 0.0,
+            "top_level_section_count": int(profile.get("top_level_section_count") or sum(1 for node in self.nodes.values() if int(node.get("depth") or 0) == 1)),
+            "chapter_node_count": int(profile.get("chapter_node_count") or node_type_counts.get("chapter", 0)),
+            "city_node_count": int(profile.get("city_node_count") or node_type_counts.get("city", 0)),
+            "date_node_count": int(profile.get("date_node_count") or node_type_counts.get("date", 0)),
+            "scenic_spot_node_count": int(profile.get("scenic_spot_node_count") or node_type_counts.get("scenic_spot", 0)),
+            "estimated_project_duration_seconds": round(estimated_project_duration, 3),
+            "top_keywords": [
+                {"keyword": keyword, "count": int(count)}
+                for keyword, count in keyword_counts.most_common(6)
+            ],
+            "keyword_counts": dict(keyword_counts),
+        }
+
+    def _estimate_project_duration_seconds(self) -> float:
+        total = 0.0
+        for asset in self.assets:
+            if not isinstance(asset, dict):
+                continue
+            asset_type = str(asset.get("type") or "")
+            if asset_type == "video":
+                duration = float((asset.get("media") or {}).get("duration_seconds") or 0.0)
+                total += min(max(duration, 0.0), 8.0) if duration > 0 else 4.0
+            elif asset_type == "image":
+                total += 3.8
+        return max(total, 0.0)
+
+    def _score_template(self, profile: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
+        template_id = str(profile.get("template_id") or "")
+        keyword_counts = context.get("keyword_counts") or {}
+        score = 5.0
+        breakdown: List[Dict[str, Any]] = []
+
+        def add(points: float, reason: str) -> None:
+            nonlocal score
+            if abs(points) < 0.001:
+                return
+            score += float(points)
+            breakdown.append({"points": round(points, 2), "reason": reason})
+
+        def add_keyword_score(weights: Dict[str, float], label: str) -> None:
+            for keyword, weight in weights.items():
+                count = int(keyword_counts.get(keyword) or 0)
+                if count > 0:
+                    add(weight * min(count, 2), f"{label}命中关键词「{keyword}」")
+
+        image_ratio = float(context.get("image_ratio") or 0.0)
+        video_ratio = float(context.get("video_ratio") or 0.0)
+        portrait_ratio = float(context.get("portrait_ratio") or 0.0)
+        square_ratio = float(context.get("square_ratio") or 0.0)
+        mixed_media = bool(context.get("mixed_media"))
+        top_level_sections = int(context.get("top_level_section_count") or 0)
+        city_count = int(context.get("city_node_count") or 0)
+        date_count = int(context.get("date_node_count") or 0)
+        scenic_count = int(context.get("scenic_spot_node_count") or 0)
+        video_count = int(context.get("video_count") or 0)
+        avg_video_duration = float(context.get("avg_video_duration_seconds") or 0.0)
+
+        if template_id == "travel_postcard":
+            geo_score = min(18.0, city_count * 5.0 + date_count * 4.0 + scenic_count * 4.0)
+            add(geo_score, "存在城市/日期/景点层级，适合旅行章节化结构")
+            if image_ratio >= 0.55:
+                add(6.0, "图片占比较高，适合明信片式旅拍呈现")
+            if top_level_sections >= 2:
+                add(3.5, "章节数量较完整，适合按旅程分段")
+            add_keyword_score(
+                {
+                    "旅行": 3.0,
+                    "旅拍": 3.0,
+                    "风景": 2.4,
+                    "古镇": 2.4,
+                    "露营": 2.2,
+                    "大海": 2.2,
+                    "湖泊": 2.0,
+                    "沙滩": 2.0,
+                    "街拍": 1.6,
+                    "探店": 1.4,
+                    "美食": 1.0,
+                },
+                "旅行模板",
+            )
+        elif template_id == "food_shop_review":
+            if mixed_media:
+                add(4.5, "图视频混合更适合探店式节奏编排")
+            if portrait_ratio >= 0.3:
+                add(4.0, "竖构图占比较高，适合近景信息型探店内容")
+            if top_level_sections <= 4:
+                add(2.5, "章节不多，适合紧凑型探店剪辑")
+            add_keyword_score(
+                {
+                    "美食": 3.2,
+                    "探店": 3.0,
+                    "咖啡": 2.6,
+                    "夜市": 2.4,
+                    "酒吧": 2.2,
+                    "小吃": 2.2,
+                    "派对": 1.4,
+                },
+                "探店模板",
+            )
+        elif template_id == "daily_vlog":
+            if mixed_media:
+                add(5.5, "图视频混合素材符合日常 Vlog 的松弛节奏")
+            if portrait_ratio >= 0.35:
+                add(4.5, "竖构图较多，贴近日常记录内容")
+            if top_level_sections <= 4:
+                add(3.0, "章节结构较轻，适合日常串联")
+            add_keyword_score(
+                {
+                    "日常": 3.0,
+                    "生活": 2.4,
+                    "记录": 2.0,
+                    "宠物": 1.8,
+                    "学习": 1.6,
+                    "办公": 1.4,
+                },
+                "Vlog 模板",
+            )
+        elif template_id == "product_showcase":
+            if video_ratio >= 0.3:
+                add(3.5, "视频素材占比不低，适合产品演示")
+            if (portrait_ratio + square_ratio) >= 0.45:
+                add(2.5, "竖图或方图较多，适合信息展示型版式")
+            if top_level_sections <= 2:
+                add(2.0, "章节较少，更适合围绕单个主题展开")
+            add_keyword_score(
+                {
+                    "产品": 3.2,
+                    "开箱": 3.2,
+                    "测评": 3.0,
+                    "展示": 2.5,
+                    "功能": 2.0,
+                    "教程": 1.8,
+                    "科技": 2.4,
+                    "办公": 1.5,
+                    "会议": 1.5,
+                },
+                "产品模板",
+            )
+        elif template_id == "photo_story":
+            if image_ratio >= 0.78:
+                add(12.0, "图片占比很高，适合图文纪实模板")
+            if video_count == 0:
+                add(4.0, "没有视频素材，图文纪实更稳定")
+            elif avg_video_duration <= 4.5:
+                add(2.5, "视频较短，更适合作为图文纪实点缀")
+            if top_level_sections >= 2:
+                add(3.5, "章节较完整，适合按段落缓慢展开")
+            add_keyword_score(
+                {
+                    "风景": 2.4,
+                    "自然": 2.2,
+                    "雪山": 2.2,
+                    "森林": 2.0,
+                    "大海": 2.0,
+                    "湖泊": 1.8,
+                    "沙滩": 1.8,
+                    "露营": 1.8,
+                },
+                "图文纪实模板",
+            )
+
+        ordered_reasons = [item["reason"] for item in sorted(breakdown, key=lambda entry: (-float(entry["points"]), entry["reason"]))[:5]]
+        return {
+            "template_id": template_id,
+            "display_name": profile.get("display_name"),
+            "category": profile.get("category"),
+            "description": profile.get("description"),
+            "score": round(score, 2),
+            "reasons": ordered_reasons,
+            "score_breakdown": breakdown,
+            "render_defaults": dict(profile.get("render_defaults") or {}),
+        }
+
+    def _flatten_sections(self, sections: List[StorySection]) -> List[StorySection]:
+        ordered: List[StorySection] = []
+
+        def visit(section: StorySection) -> None:
+            ordered.append(section)
+            for child in section.children:
+                visit(child)
+
+        for section in sections:
+            visit(section)
+        return ordered
+
+    def _build_audio_blueprint(
+        self,
+        sections: List[StorySection],
+        template_matching: Dict[str, Any],
+        mode: str = "recommend",
+    ) -> Dict[str, Any]:
+        normalized_mode = str(mode or "recommend").strip().lower()
+        if normalized_mode in {"off", "none", "disabled"}:
+            normalized_mode = "off"
+        elif normalized_mode == "auto":
+            normalized_mode = "recommend"
+        elif normalized_mode not in {"recommend", "apply"}:
+            normalized_mode = "recommend"
+
+        context = template_matching.get("context") or self._build_template_matching_context()
+        selected_template_id = str(template_matching.get("selected_template_id") or "daily_vlog")
+        profile = dict(
+            AUDIO_BLUEPRINT_TEMPLATE_PROFILES.get(selected_template_id)
+            or AUDIO_BLUEPRINT_TEMPLATE_PROFILES["default"]
+        )
+
+        candidates = select_auto_music_assets(
+            self.assets,
+            target_duration=float(context.get("total_video_duration_seconds") or 0.0),
+        )
+        candidate_entries: List[Dict[str, Any]] = []
+        for asset in candidates[:3]:
+            candidate_entries.append(
+                {
+                    "asset_id": asset.get("asset_id"),
+                    "relative_path": asset.get("relative_path"),
+                    "absolute_path": asset.get("absolute_path"),
+                    "duration_seconds": round(audio_asset_duration_seconds(asset), 3),
+                    "score": round(auto_music_score(asset), 2),
+                }
+            )
+
+        selected_candidate = candidate_entries[0] if candidate_entries else None
+        flattened_sections = self._flatten_sections(sections)
+        section_cues: List[Dict[str, Any]] = []
+        total_sections = len(flattened_sections)
+        energy_curve_style = str(profile.get("energy_curve_style") or "balanced_story")
+        estimated_duration = float(context.get("estimated_project_duration_seconds") or 0.0)
+        image_ratio = float(context.get("image_ratio") or 0.0)
+        video_ratio = float(context.get("video_ratio") or 0.0)
+        avg_video_duration = float(context.get("avg_video_duration_seconds") or 0.0)
+        longform_project = estimated_duration >= 420.0
+        chapter_restart = False
+
+        if longform_project and image_ratio >= 0.7 and total_sections >= 3:
+            profile["music_playlist_mode"] = "chapter_restart"
+            profile["music_fit_strategy"] = "intro_loop_outro"
+            profile["fade_out_seconds"] = max(float(profile.get("fade_out_seconds") or 0.0), 3.2)
+            chapter_restart = True
+        elif len(candidate_entries) > 1 and estimated_duration >= 240.0:
+            profile["music_playlist_mode"] = "auto_playlist"
+        else:
+            profile["music_playlist_mode"] = profile.get("music_playlist_mode") or ("auto_playlist" if len(candidate_entries) > 1 else "single")
+
+        if image_ratio >= 0.82:
+            profile["music_fit_strategy"] = "intro_loop_outro"
+            profile["bgm_volume"] = min(0.32, float(profile.get("bgm_volume") or 0.24) + 0.02)
+        elif video_ratio >= 0.65 and avg_video_duration >= 7.0:
+            profile["music_fit_strategy"] = "trim"
+            profile["bgm_volume"] = max(0.16, float(profile.get("bgm_volume") or 0.24) - 0.02)
+            profile["duck_bgm_volume"] = max(0.1, min(float(profile.get("duck_bgm_volume") or 0.15), 0.14))
+
+        for index, section in enumerate(flattened_sections):
+            phase = "sustain"
+            if total_sections <= 1:
+                phase = "single_arc"
+            elif index == 0:
+                phase = "intro"
+            elif index == total_sections - 1:
+                phase = "outro"
+            elif total_sections >= 3 and index == total_sections // 2:
+                phase = "peak"
+
+            energy = "medium"
+            if energy_curve_style in {"fast_discovery"}:
+                energy = {"intro": "medium", "peak": "high", "outro": "medium", "single_arc": "medium_high"}.get(phase, "high")
+            elif energy_curve_style in {"steady_story"}:
+                energy = {"intro": "low", "peak": "medium", "outro": "low", "single_arc": "low_medium"}.get(phase, "medium")
+            elif energy_curve_style in {"lifted_journey"}:
+                energy = {"intro": "low_medium", "peak": "medium_high", "outro": "low", "single_arc": "medium"}.get(phase, "medium")
+            elif energy_curve_style in {"feature_focus"}:
+                energy = {"intro": "low", "peak": "medium", "outro": "low", "single_arc": "medium"}.get(phase, "medium")
+            else:
+                energy = {"intro": "low_medium", "peak": "medium_high", "outro": "low", "single_arc": "medium"}.get(phase, "medium")
+
+            cue_reason = "保持整体叙事连贯"
+            if section.section_type in {"city", "date"}:
+                cue_reason = "章节切换适合轻微音乐起伏"
+            elif section.section_type == "scenic_spot":
+                cue_reason = "景点/主体内容适合承接主旋律"
+            if phase == "peak":
+                cue_reason = "中段重点内容适合提升能量"
+            elif phase == "outro":
+                cue_reason = "结尾段建议逐步收束氛围"
+
+            section_cues.append(
+                {
+                    "section_id": section.section_id,
+                    "title": section.title,
+                    "section_type": section.section_type,
+                    "order": index,
+                    "phase": phase,
+                    "energy": energy,
+                    "asset_count": len(section.asset_refs),
+                    "keep_source_audio": bool(profile.get("keep_source_audio", True)),
+                    "ducking_hint": "medium" if bool(profile.get("auto_ducking", True)) else "off",
+                    "reason": cue_reason,
+                }
+            )
+
+        top_keywords = [item.get("keyword") for item in (context.get("top_keywords") or []) if item.get("keyword")]
+        search_keywords = list(dict.fromkeys([selected_template_id, str(profile.get("music_profile") or "")] + top_keywords))[:8]
+
+        recommended_audio_settings = {
+            "music_mode": "auto" if selected_candidate else "off",
+            "music_path": selected_candidate.get("absolute_path") if selected_candidate else None,
+            "music_source": "library" if selected_candidate else "none",
+            "music_profile": str(profile.get("music_profile") or "lifestyle"),
+            "music_playlist_mode": str(profile.get("music_playlist_mode") or ("auto_playlist" if len(candidate_entries) > 1 else "single")),
+            "music_playlist_paths": [entry["absolute_path"] for entry in candidate_entries if entry.get("absolute_path")],
+            "music_fit_strategy": str(profile.get("music_fit_strategy") or "auto"),
+            "music_chapter_restart": bool(chapter_restart),
+            "bgm_volume": float(profile.get("bgm_volume") or 0.24),
+            "source_audio_volume": float(profile.get("source_audio_volume") or 1.0),
+            "keep_source_audio": bool(profile.get("keep_source_audio", True)),
+            "auto_ducking": bool(profile.get("auto_ducking", True)),
+            "duck_bgm_volume": float(profile.get("duck_bgm_volume") or 0.15),
+            "fade_in_seconds": float(profile.get("fade_in_seconds") or 1.2),
+            "fade_out_seconds": float(profile.get("fade_out_seconds") or 2.4),
+            "normalize_audio": bool(profile.get("normalize_audio", True)),
+            "target_lufs": float(profile.get("target_lufs") or -16.0),
+        }
+
+        return {
+            "version": 1,
+            "mode": normalized_mode,
+            "template_id": selected_template_id,
+            "music_profile": recommended_audio_settings["music_profile"],
+            "energy_curve_style": energy_curve_style,
+            "estimated_project_duration_seconds": round(estimated_duration, 3),
+            "longform_project": longform_project,
+            "search_keywords": search_keywords,
+            "selected_candidate": selected_candidate,
+            "candidate_assets": candidate_entries,
+            "section_cues": section_cues,
+            "recommended_audio_settings": recommended_audio_settings,
+            "activation_hint": "set music_blueprint mode to apply or copy recommended_audio_settings into metadata.audio",
         }
 
     def _section_from_node(self, node: Dict[str, Any]) -> Optional[StorySection]:
@@ -2024,6 +2937,7 @@ class Compiler:
         self.library = library
         self.assets = {a["asset_id"]: a for a in library.get("assets", [])}
         self.blueprint_metadata = blueprint.get("metadata", {}) or {}
+        self.audio_blueprint_metadata = self.blueprint_metadata.get("audio_blueprint") or {}
         self.default_chapter_background_mode = self.blueprint_metadata.get("chapter_background_mode", "auto_bridge")
         self.scenic_spot_title_mode = self.blueprint_metadata.get("scenic_spot_title_mode", "overlay")
         self.edit_strategy = self.blueprint_metadata.get("edit_strategy", "smart_director")
@@ -2038,6 +2952,12 @@ class Compiler:
 
     def _resolve_render_audio_settings(self) -> Optional[Dict[str, Any]]:
         audio = self.blueprint_metadata.get("audio")
+        if not isinstance(audio, dict):
+            audio_blueprint = self.audio_blueprint_metadata
+            if isinstance(audio_blueprint, dict) and str(audio_blueprint.get("mode") or "") == "apply":
+                recommended = audio_blueprint.get("recommended_audio_settings")
+                if isinstance(recommended, dict):
+                    audio = recommended
         if not isinstance(audio, dict):
             return None
 
@@ -2065,6 +2985,79 @@ class Compiler:
             resolved["music_source"] = "none"
 
         return resolved
+
+    def _compile_audio_blueprint_timeline(self) -> Dict[str, Any]:
+        if not isinstance(self.audio_blueprint_metadata, dict) or not self.audio_blueprint_metadata:
+            return {}
+
+        cue_map = {
+            str(item.get("section_id")): item
+            for item in (self.audio_blueprint_metadata.get("section_cues") or [])
+            if isinstance(item, dict) and item.get("section_id")
+        }
+        section_titles: Dict[str, str] = {}
+
+        def walk_sections(items: List[Dict[str, Any]]) -> None:
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                section_id = item.get("section_id")
+                if section_id:
+                    section_titles[str(section_id)] = str(item.get("title") or section_id)
+                walk_sections(item.get("children") or [])
+
+        walk_sections(self.blueprint.get("sections") or [])
+
+        section_ranges: Dict[str, Dict[str, Any]] = {}
+        for seg in self.segments:
+            section_id = str(seg.section_id or "")
+            if not section_id:
+                continue
+            bucket = section_ranges.setdefault(
+                section_id,
+                {
+                    "section_id": section_id,
+                    "title": section_titles.get(section_id) or section_id,
+                    "start_time": float(seg.start_time),
+                    "end_time": float(seg.end_time),
+                },
+            )
+            bucket["start_time"] = min(float(bucket["start_time"]), float(seg.start_time))
+            bucket["end_time"] = max(float(bucket["end_time"]), float(seg.end_time))
+
+        timeline_cues: List[Dict[str, Any]] = []
+        for section_id, section_range in sorted(section_ranges.items(), key=lambda item: float(item[1]["start_time"])):
+            cue = cue_map.get(section_id, {})
+            start_time = float(section_range["start_time"])
+            end_time = float(section_range["end_time"])
+            timeline_cues.append(
+                {
+                    "section_id": section_id,
+                    "title": section_range["title"],
+                    "phase": cue.get("phase") or "sustain",
+                    "energy": cue.get("energy") or "medium",
+                    "reason": cue.get("reason") or "保持段落音乐连续性",
+                    "ducking_hint": cue.get("ducking_hint") or "medium",
+                    "start_time": round(start_time, 3),
+                    "end_time": round(end_time, 3),
+                    "duration": round(max(0.0, end_time - start_time), 3),
+                }
+            )
+
+        recommended = dict(self.audio_blueprint_metadata.get("recommended_audio_settings") or {})
+        return {
+            "version": int(self.audio_blueprint_metadata.get("version") or 1),
+            "mode": self.audio_blueprint_metadata.get("mode") or "recommend",
+            "template_id": self.audio_blueprint_metadata.get("template_id"),
+            "music_profile": self.audio_blueprint_metadata.get("music_profile"),
+            "energy_curve_style": self.audio_blueprint_metadata.get("energy_curve_style"),
+            "selected_candidate": self.audio_blueprint_metadata.get("selected_candidate"),
+            "candidate_assets": self.audio_blueprint_metadata.get("candidate_assets") or [],
+            "search_keywords": self.audio_blueprint_metadata.get("search_keywords") or [],
+            "recommended_audio_settings": recommended,
+            "timeline_cues": timeline_cues,
+            "activation_hint": self.audio_blueprint_metadata.get("activation_hint"),
+        }
 
     def _compile_video_overlay_safe(self, seg: RenderSegment) -> bool:
         text = seg.overlay_text
@@ -2246,6 +3239,7 @@ class Compiler:
         )
 
         render_scheduler = self._assign_render_scheduler_hints()
+        compiled_audio_blueprint = self._compile_audio_blueprint_timeline()
 
         emit_event("phase", phase="compile", message="渲染计划完成", percent=100)
         return {
@@ -2267,6 +3261,7 @@ class Compiler:
                 "render_mode": self.blueprint_metadata.get("render_mode", "auto"),
                 "chunk_seconds": self.blueprint_metadata.get("chunk_seconds"),
                 "audio": self.audio_settings,
+                "audio_blueprint": compiled_audio_blueprint,
             },
             "render_scheduler": render_scheduler,
             "cache_policy": {
@@ -2508,6 +3503,7 @@ class Compiler:
         has_overlay: bool,
     ) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
         strategy = str(self.edit_strategy or "smart_director")
+        image_motion_profile = str(self.blueprint_metadata.get("image_motion_profile") or "auto")
         if strategy not in {
             "smart_director",
             "fast_assembly",
@@ -2557,6 +3553,21 @@ class Compiler:
                 "section_type": section_type,
             }
 
+        def template_motion(kind: str, intensity: str, reason: str) -> Dict[str, Any]:
+            if not is_image:
+                return motion("none", "none", reason)
+            if image_motion_profile == "travel_gentle" and kind in {"ken_burns", "gentle_push", "slow_push"}:
+                return motion("gentle_push", "soft", "模板偏好旅拍柔和轻推")
+            if image_motion_profile == "dynamic_punch" and kind not in {"none", "still_hold"}:
+                return motion("punch_zoom", "high", "模板偏好更有冲击力的图片节奏")
+            if image_motion_profile == "casual_story" and kind not in {"none", "still_hold"}:
+                return motion("gentle_push", "soft", "模板偏好日常记录型轻推运动")
+            if image_motion_profile == "product_focus" and kind not in {"none", "still_hold"}:
+                return motion("slow_push", "low", "模板偏好克制稳定的产品展示运动")
+            if image_motion_profile == "photo_story" and kind not in {"none", "still_hold"}:
+                return motion("subtle_ken_burns", "low", "模板偏好低干扰的图文叙事运动")
+            return motion(kind, intensity, reason)
+
         if is_boundary:
             if strategy == "beat_cut":
                 return (
@@ -2597,31 +3608,31 @@ class Compiler:
         if strategy == "fast_assembly":
             return (
                 transition("cut", 0.0, "素材快速直切，适合批量审片和极速出片"),
-                motion("none" if is_video else "still_hold", "none", "快速成片减少逐段运动处理"),
+                motion("none", "none", "快速成片保持视频原节奏") if is_video else template_motion("still_hold", "none", "快速成片减少逐段运动处理"),
                 rhythm("footage" if is_video else "visual", "fast_review", 0.62),
             )
         if strategy == "travel_soft":
             return (
                 transition("soft_crossfade", 0.45, "旅拍素材用柔和交叉淡化保持流动感"),
-                motion("none" if is_video else "gentle_push", "soft", "轻推镜头增加旅行感但不抢主体"),
+                motion("none", "none", "视频段不额外施加模板图片运动") if is_video else template_motion("gentle_push", "soft", "轻推镜头增加旅行感但不抢主体"),
                 rhythm("footage" if is_video else "visual", "medium_soft", 0.72),
             )
         if strategy == "beat_cut":
             return (
                 transition("quick_zoom" if is_image else "cut", 0.18, "节奏型剪辑用短促冲击转场"),
-                motion("micro_zoom" if is_video else "punch_zoom", "high", "增加卡点冲击和画面能量"),
+                motion("micro_zoom", "high", "增加卡点冲击和画面能量") if is_video else template_motion("punch_zoom", "high", "增加卡点冲击和画面能量"),
                 rhythm("beat_asset", "fast_punchy", 0.82),
             )
         if strategy == "documentary":
             return (
                 transition("soft_crossfade" if is_image else "cut", 0.28, "纪录叙事保持克制连贯"),
-                motion("none" if is_video else "slow_push", "low", "慢推帮助观众阅读画面信息"),
+                motion("none", "none", "视频段保持自然纪录感") if is_video else template_motion("slow_push", "low", "慢推帮助观众阅读画面信息"),
                 rhythm("story_asset", "steady_story", 0.78),
             )
         if strategy == "long_stable":
             return (
                 transition("cut" if is_video else "soft_crossfade", 0.2, "长片降低转场复杂度，保证稳定输出"),
-                motion("none" if is_video else "subtle_ken_burns", "low", "长片保留轻微变化避免疲劳"),
+                motion("none", "none", "视频段优先稳定输出") if is_video else template_motion("subtle_ken_burns", "low", "长片保留轻微变化避免疲劳"),
                 rhythm("longform_asset", "long_consistent", 0.68),
             )
 
@@ -2637,7 +3648,7 @@ class Compiler:
 
         return (
             transition(transition_type, 0.34, reason),
-            motion("none" if is_video else "ken_burns", "medium", "智能导演为静态图补充轻微镜头运动"),
+            motion("none", "none", "视频段保持素材原节奏") if is_video else template_motion("ken_burns", "medium", "智能导演为静态图补充轻微镜头运动"),
             rhythm("footage" if is_video else "visual", "auto", 0.72),
         )
 
@@ -4034,7 +5045,9 @@ class Renderer:
 
     def _prepare_music_bed(self, duration: float) -> Optional[Path]:
         duration = max(0.1, float(duration or 0.0))
-        cache_key = f"{duration:.3f}|{json.dumps({k: self.audio_settings.get(k) for k in ('music_fit_strategy', 'music_playlist_mode', 'music_playlist_paths', 'music_path', 'fade_in_seconds', 'fade_out_seconds')}, ensure_ascii=False, sort_keys=True)}"
+        audio_blueprint = self.plan.get("render_settings", {}).get("audio_blueprint") or {}
+        chapter_cues = audio_blueprint.get("timeline_cues") if isinstance(audio_blueprint, dict) else None
+        cache_key = f"{duration:.3f}|{json.dumps({'audio': {k: self.audio_settings.get(k) for k in ('music_fit_strategy', 'music_playlist_mode', 'music_playlist_paths', 'music_path', 'fade_in_seconds', 'fade_out_seconds', 'music_chapter_restart')}, 'chapter_cues': chapter_cues}, ensure_ascii=False, sort_keys=True)}"
         if cache_key in self._prepared_music_beds:
             prepared = self._prepared_music_beds[cache_key]
             if prepared is None or prepared.exists():
@@ -4044,6 +5057,22 @@ class Renderer:
         if not prepared_tracks:
             self._prepared_music_beds[cache_key] = None
             return None
+
+        playlist_mode = str(self.audio_settings.get("music_playlist_mode") or "single").lower()
+        chapter_restart_enabled = bool(self.audio_settings.get("music_chapter_restart", False)) or playlist_mode == "chapter_restart"
+        if chapter_restart_enabled and isinstance(chapter_cues, list) and chapter_cues:
+            music_bed = build_chapter_restart_music_bed(
+                prepared_tracks,
+                chapter_cues,
+                duration,
+                self.audio_cache_dir,
+                playlist_mode=playlist_mode,
+                fit_strategy=str(self.audio_settings.get("music_fit_strategy") or "auto"),
+                fade_in=float(self.audio_settings.get("fade_in_seconds", 0.0) or 0.0),
+                fade_out=float(self.audio_settings.get("fade_out_seconds", 0.0) or 0.0),
+            )
+            self._prepared_music_beds[cache_key] = music_bed
+            return music_bed
 
         music_bed = build_music_bed_for_duration(
             prepared_tracks,
@@ -4109,7 +5138,7 @@ class Renderer:
         if music_mode not in {"off", "auto", "manual"}:
             music_mode = "off"
         playlist_mode = str(audio.get("music_playlist_mode") or "single").lower()
-        if playlist_mode not in {"single", "auto_playlist", "manual_playlist"}:
+        if playlist_mode not in {"single", "auto_playlist", "manual_playlist", "chapter_restart"}:
             playlist_mode = "single"
         fit_strategy = str(audio.get("music_fit_strategy") or "auto").lower()
         if fit_strategy not in {"auto", "loop", "trim", "intro_loop_outro", "once"}:
@@ -4143,6 +5172,7 @@ class Renderer:
             "music_playlist_mode": playlist_mode,
             "music_playlist_paths": playlist_paths,
             "music_fit_strategy": fit_strategy,
+            "music_chapter_restart": bool(audio.get("music_chapter_restart", False) or playlist_mode == "chapter_restart"),
             "music_source": audio.get("music_source") or ("manual" if music_mode == "manual" else "library" if music_mode == "auto" and audio.get("music_path") else "none"),
             "bgm_volume": num("bgm_volume", 0.28, 0.0, 1.0),
             "source_audio_volume": num("source_audio_volume", 1.0, 0.0, 1.0),
@@ -4701,28 +5731,7 @@ class Renderer:
         return text_clip
 
     def _image_overlay_cache_spec(self, seg: Dict[str, Any], duration: float) -> Optional[Dict[str, Any]]:
-        text = seg.get("overlay_text")
-        if not text:
-            return None
-        subtitle = seg.get("overlay_subtitle")
-        overlay_duration = min(float(seg.get("overlay_duration") or 1.8), float(duration or 1.8))
-        style = dict(seg.get("overlay_title_style") or {})
-        motion = str(style.get("motion") or "fade_slide_up")
-        position = str(style.get("position") or "lower_left")
-        if motion not in {"fade_slide_up", "editorial_fade", "static_hold", "lower_third_slide", "cinematic_reveal", "postcard_drift"}:
-            return None
-        if position not in {"lower_left", "lower_center", "center"}:
-            return None
-        if len(str(text)) > 42 or len(str(subtitle or "")) > 64:
-            return None
-        if overlay_duration > min(3.2, float(duration or 0.0)):
-            return None
-        return {
-            "text": str(text),
-            "subtitle": str(subtitle) if subtitle else None,
-            "duration": round(overlay_duration, 3),
-            "style": style,
-        }
+        return _v56_image_overlay_cache_spec(seg, duration)
 
     def _get_proxy_source(self, source: Path, is_video: bool) -> Path:
         use_proxy = bool(
@@ -5374,7 +6383,11 @@ def command_scan(args: argparse.Namespace) -> None:
 
 
 def command_plan(args: argparse.Namespace) -> None:
-    result = Planner(read_json(args.library)).plan(strategy=args.strategy)
+    result = Planner(read_json(args.library)).plan(
+        strategy=args.strategy,
+        template_mode=getattr(args, "template", "auto"),
+        music_blueprint_mode=getattr(args, "music_blueprint", "recommend"),
+    )
     write_json(args.output, result)
     if args.output:
         emit_event("artifact", artifact="story_blueprint", path=args.output, message="故事蓝图已保存")
@@ -5949,12 +6962,23 @@ def _v56_try_write_ffmpeg_image_chunk(
             with Image.open(render_source) as img:
                 img = ImageOps.exif_transpose(img).convert("RGB")
                 img.save(fixed, quality=95)
-        prerendered = renderer._ffmpeg_prerender_image_segment(
-            render_source,
-            fixed,
-            float(seg.get("duration") or 0.1),
-            seg.get("motion_config"),
-        )
+        duration = float(seg.get("duration") or 0.1)
+        overlay_spec = renderer._image_overlay_cache_spec(seg, duration)
+        if overlay_spec:
+            prerendered = renderer._prerender_image_segment(
+                render_source,
+                fixed,
+                duration,
+                seg.get("motion_config"),
+                overlay_spec=overlay_spec,
+            )
+        else:
+            prerendered = renderer._ffmpeg_prerender_image_segment(
+                render_source,
+                fixed,
+                duration,
+                seg.get("motion_config"),
+            )
         if not prerendered or not prerendered.exists():
             return False
         rendered_segments.append(prerendered)
@@ -6725,6 +7749,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--library", required=True)
     p.add_argument("--output")
     p.add_argument("--strategy", default="city_date_spot")
+    p.add_argument("--template", default="auto", help="Template mode: auto, off, or a template id such as travel_postcard")
+    p.add_argument("--music_blueprint", default="recommend", help="Music blueprint mode: recommend, apply, or off")
     p.set_defaults(func=command_plan)
 
     p = sub.add_parser("compile", help="Compile render_plan.json from story_blueprint.json")

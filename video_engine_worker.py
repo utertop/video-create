@@ -71,6 +71,8 @@ def run_task(task: Dict[str, Any]) -> Dict[str, Any]:
                 library=str(task["library_path"]),
                 output=output_path,
                 strategy=str(task.get("strategy") or "city_date_spot"),
+                template=str(task.get("template") or "auto"),
+                music_blueprint=str(task.get("music_blueprint") or "recommend"),
             )
         )
         return {

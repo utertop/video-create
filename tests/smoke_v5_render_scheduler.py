@@ -206,6 +206,72 @@ def test_standard_visual_chunk_groups_prefer_ffmpeg_for_safe_image_units() -> No
     assert groups[0]["runtime_chunk_route_reason"] == "all_segments_ffmpeg_image_chunk_safe"
 
 
+def test_standard_visual_chunk_groups_prefer_ffmpeg_for_safe_image_overlay_units() -> None:
+    root = Path("tests/tmp_vcs_standard_visual_ffmpeg_image_overlay_chunk")
+    if root.exists():
+        shutil.rmtree(root)
+    root.mkdir(parents=True)
+
+    first = root / "first.jpg"
+    second = root / "second.jpg"
+    engine.Image.new("RGB", (960, 540), (96, 126, 176)).save(first, quality=92)
+    engine.Image.new("RGB", (960, 540), (160, 104, 84)).save(second, quality=92)
+
+    plan = {
+        "total_duration": 4.0,
+        "render_settings": {
+            "fps": 12,
+            "aspect_ratio": "16:9",
+            "edit_strategy": "fast_assembly",
+            "performance_mode": "balanced",
+            "render_mode": "standard",
+        },
+        "segments": [
+            {
+                "segment_id": "seg_img_overlay_1",
+                "type": "image",
+                "source_path": str(first),
+                "duration": 2.0,
+                "start_time": 0.0,
+                "end_time": 2.0,
+                "text": None,
+                "transition_config": {"type": "cut", "duration": 0},
+                "motion_config": {"type": "gentle_push"},
+                "overlay_text": "Tokyo Walk",
+                "overlay_subtitle": "Golden hour",
+                "overlay_duration": 1.6,
+                "overlay_title_style": {"preset": "minimal_editorial", "motion": "editorial_fade", "position": "lower_left"},
+            },
+            {
+                "segment_id": "seg_img_overlay_2",
+                "type": "image",
+                "source_path": str(second),
+                "duration": 2.0,
+                "start_time": 2.0,
+                "end_time": 4.0,
+                "text": None,
+                "transition_config": {"type": "cut", "duration": 0},
+                "motion_config": {"type": "slow_push"},
+                "overlay_text": "Neon Street",
+                "overlay_subtitle": None,
+                "overlay_duration": 1.4,
+                "overlay_title_style": {"preset": "minimal_editorial", "motion": "editorial_fade", "position": "lower_left"},
+            },
+        ],
+    }
+
+    renderer = engine.Renderer(
+        plan,
+        str(root / "output.mp4"),
+        {"fps": 12, "quality": "draft", "render_mode": "standard", "performance_mode": "balanced"},
+    )
+    groups = renderer._build_standard_visual_chunk_groups()
+
+    assert groups
+    assert groups[0]["runtime_chunk_route"] == "ffmpeg_image_chunk"
+    assert groups[0]["runtime_chunk_route_reason"] == "all_segments_ffmpeg_image_chunk_safe"
+
+
 def test_standard_visual_chunk_groups_prefer_ffmpeg_for_static_card_units() -> None:
     root = Path("tests/tmp_vcs_standard_visual_ffmpeg_card_chunk")
     if root.exists():

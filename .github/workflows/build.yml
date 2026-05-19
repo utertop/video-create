@@ -56,6 +56,12 @@ jobs:
       - name: Python V5 scan plan compile smoke test
         run: python .\tests\smoke_v5_4.py
 
+      - name: Python template matching smoke test
+        run: python .\tests\smoke_v5_template_matching.py
+
+      - name: Python audio blueprint smoke test
+        run: python .\tests\smoke_v5_audio_blueprint.py
+
       - name: Python worker protocol smoke test
         run: python .\tests\smoke_v5_worker_protocol.py
 
