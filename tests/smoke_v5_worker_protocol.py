@@ -79,6 +79,7 @@ def test_worker_protocol_flow() -> None:
     )
     assert library_path.is_file()
     assert scan["document"]["document_type"] == "media_library"
+    assert (scan["document"].get("proxy_media_manifest", {}).get("summary") or {}).get("ready", 0) >= 2
 
     blueprint_path = project_dir / "story_blueprint.json"
     plan = run_worker_once(

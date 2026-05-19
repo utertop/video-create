@@ -65,6 +65,9 @@ jobs:
       - name: Python audio visual cache smoke test
         run: python .\tests\smoke_v5_audio_visual_cache.py
 
+      - name: Python cache cleanup smoke test
+        run: python .\tests\smoke_v5_cache_cleanup.py
+
       - name: Python V5.6 long-video stability smoke test
         run: python .\tests\smoke_v5_6_long_video_stability.py
 

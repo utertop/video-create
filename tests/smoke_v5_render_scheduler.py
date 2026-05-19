@@ -194,9 +194,50 @@ def test_proxy_media_cache_is_opt_in_and_reportable() -> None:
     assert stats["fallback"] == 0
 
 
+def test_proxy_media_manifest_is_preferred_for_preview() -> None:
+    root = Path("tests/tmp_vcs_proxy_manifest")
+    if root.exists():
+        shutil.rmtree(root)
+    root.mkdir(parents=True)
+
+    source = root / "image_01.jpg"
+    engine.Image.new("RGB", (1280, 720), (92, 138, 188)).save(source, quality=92)
+    library = engine.Scanner(str(root), recursive=True).scan()
+    manifest = library.get("proxy_media_manifest") or {}
+    asset_entry = (manifest.get("assets") or {}).get(str(source.resolve()))
+    profile = ((asset_entry or {}).get("profiles") or {}).get("preview_540p") or {}
+    proxy_path = Path(str(profile.get("path") or ""))
+
+    assert profile.get("status") == "ready"
+    assert proxy_path.is_file()
+
+    plan = {"render_settings": {"fps": 12, "aspect_ratio": "16:9"}, "segments": []}
+    renderer = engine.Renderer(
+        plan,
+        str(root / "output.mp4"),
+        {
+            "preview": True,
+            "preview_height": 360,
+            "fps": 12,
+            "quality": "draft",
+            "proxy_media_manifest": manifest,
+        },
+    )
+
+    resolved = renderer._get_proxy_source(source, is_video=False)
+    stats = renderer._proxy_media_summary()
+
+    assert resolved == proxy_path
+    assert stats["eligible"] == 1
+    assert stats["manifest_hit"] == 1
+    assert stats["created"] == 0
+    assert stats["fallback"] == 0
+
+
 if __name__ == "__main__":
     test_compile_emits_render_scheduler_hints()
     test_renderer_applies_runtime_render_routes()
     test_stable_chunk_cache_key_tracks_source_file_changes()
     test_proxy_media_cache_is_opt_in_and_reportable()
+    test_proxy_media_manifest_is_preferred_for_preview()
     print("V5 render scheduler smoke test passed")

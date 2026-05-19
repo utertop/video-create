@@ -65,19 +65,31 @@ def test_low_res_preview_plan_and_render() -> None:
     assert preview["segments"][0]["duration"] == 3.0
     assert engine.get_preview_resolution("16:9", 360) == (640, 360)
 
+    library = engine.Scanner(str(root), recursive=True).scan()
+    manifest = library.get("proxy_media_manifest") or {}
+    assert (manifest.get("summary") or {}).get("ready", 0) >= 2
+
     output = root / "preview.mp4"
     engine.Renderer(
         preview,
         str(output),
-        {"preview": True, "preview_height": 360, "fps": 12, "quality": "draft"},
+        {
+            "preview": True,
+            "preview_height": 360,
+            "fps": 12,
+            "quality": "draft",
+            "proxy_media_manifest": manifest,
+        },
     ).render()
     ok, reason, duration = engine._v56_validate_video(output, min_size=512)
     assert ok, reason
     assert duration and 2.5 <= duration <= 3.5
 
     plan_path = root / "render_plan.json"
+    library_path = root / "media_library.json"
     cli_output = root / "preview_cli.mp4"
     plan_path.write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
+    library_path.write_text(json.dumps(library, ensure_ascii=False), encoding="utf-8")
     engine.command_preview_render(
         Namespace(
             plan=str(plan_path),

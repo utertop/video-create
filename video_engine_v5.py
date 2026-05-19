@@ -992,6 +992,162 @@ def write_json(path: Optional[str], data: Dict[str, Any]) -> None:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
+SCAN_PROXY_PROFILE = {
+    "name": "preview_540p",
+    "max_width": 960,
+    "max_height": 540,
+    "video_crf": 28,
+    "image_quality": 85,
+}
+
+
+def _normalize_proxy_manifest(source: Any) -> Dict[str, Dict[str, Any]]:
+    if not isinstance(source, dict):
+        return {}
+    assets = source.get("assets")
+    if not isinstance(assets, dict):
+        return {}
+    normalized: Dict[str, Dict[str, Any]] = {}
+    for key, entry in assets.items():
+        if not isinstance(entry, dict):
+            continue
+        abs_path = str(entry.get("source_path") or key or "")
+        if not abs_path:
+            continue
+        normalized[abs_path] = entry
+    return normalized
+
+
+def _load_proxy_manifest_from_library_path(library_path: Optional[str]) -> Dict[str, Dict[str, Any]]:
+    if not library_path:
+        return {}
+    path = Path(str(library_path))
+    if not path.is_file():
+        return {}
+    try:
+        library = read_json(str(path))
+    except Exception:
+        return {}
+    return _normalize_proxy_manifest(library.get("proxy_media_manifest"))
+
+
+def _guess_sibling_library_path(plan_path: Optional[str]) -> Optional[Path]:
+    if not plan_path:
+        return None
+    plan_file = Path(str(plan_path))
+    parent = plan_file.parent
+    if not parent:
+        return None
+    candidate = parent / "media_library.json"
+    return candidate if candidate.is_file() else None
+
+
+CACHE_CLEANUP_DEFAULTS_MB = {
+    "render_cache": 2048,
+    "audio_cache": 768,
+    "proxies": 1024,
+    "chunks": 4096,
+    "scan_proxies": 1024,
+    "thumbnails": 256,
+}
+
+
+def _cache_cleanup_limit_bytes(config: Dict[str, Any], bucket_name: str, default_mb: int) -> int:
+    raw_limits = config.get("cache_cleanup_limits_mb")
+    if isinstance(raw_limits, dict) and bucket_name in raw_limits:
+        raw_value = raw_limits.get(bucket_name)
+    else:
+        raw_value = config.get(f"{bucket_name}_cache_max_mb")
+    try:
+        return max(0, int(float(raw_value if raw_value is not None else default_mb) * 1024 * 1024))
+    except Exception:
+        return max(0, int(default_mb * 1024 * 1024))
+
+
+def _iter_cache_files(root: Path) -> List[Path]:
+    if not root.exists():
+        return []
+    files: List[Path] = []
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        if path.name.endswith((".tmp", ".part")) or ".rendering.tmp." in path.name:
+            continue
+        files.append(path)
+    return files
+
+
+def _cleanup_cache_bucket(root: Path, limit_bytes: int, bucket_name: str) -> Dict[str, Any]:
+    files = _iter_cache_files(root)
+    entries: List[Tuple[int, int, Path]] = []
+    bytes_before = 0
+    for path in files:
+        try:
+            stat = path.stat()
+        except Exception:
+            continue
+        size = int(stat.st_size)
+        mtime_ns = int(getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000)))
+        entries.append((mtime_ns, size, path))
+        bytes_before += size
+
+    deleted_files = 0
+    deleted_bytes = 0
+    for _mtime_ns, size, path in sorted(entries, key=lambda item: item[0]):
+        if bytes_before - deleted_bytes <= limit_bytes:
+            break
+        try:
+            path.unlink()
+            deleted_files += 1
+            deleted_bytes += size
+        except Exception:
+            continue
+
+    for directory in sorted((path for path in root.rglob("*") if path.is_dir()), key=lambda item: len(item.parts), reverse=True):
+        try:
+            directory.rmdir()
+        except Exception:
+            pass
+
+    bytes_after = max(0, bytes_before - deleted_bytes)
+    return {
+        "bucket": bucket_name,
+        "path": str(root),
+        "limit_bytes": int(limit_bytes),
+        "bytes_before": int(bytes_before),
+        "bytes_after": int(bytes_after),
+        "deleted_bytes": int(deleted_bytes),
+        "deleted_files": int(deleted_files),
+        "kept_files": max(0, len(entries) - deleted_files),
+    }
+
+
+def _cleanup_cache_buckets(
+    specs: List[Tuple[str, Path, int]],
+    config: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    config = config or {}
+    if config.get("cache_cleanup_enabled", True) is False:
+        return {"enabled": False, "buckets": {}, "deleted_files": 0, "deleted_bytes": 0}
+
+    buckets: Dict[str, Any] = {}
+    deleted_files = 0
+    deleted_bytes = 0
+    for bucket_name, root, default_mb in specs:
+        limit_bytes = _cache_cleanup_limit_bytes(config, bucket_name, default_mb)
+        summary = _cleanup_cache_bucket(root, limit_bytes, bucket_name)
+        buckets[bucket_name] = summary
+        deleted_files += int(summary.get("deleted_files") or 0)
+        deleted_bytes += int(summary.get("deleted_bytes") or 0)
+
+    return {
+        "enabled": True,
+        "buckets": buckets,
+        "deleted_files": int(deleted_files),
+        "deleted_bytes": int(deleted_bytes),
+    }
+
+
 # =========================
 # Data models
 # =========================
@@ -1115,7 +1271,21 @@ class Scanner:
         self.assets: List[Asset] = []
         self.cache_root = self.root / ".cache_video_create_v5"
         self.thumb_dir = self.cache_root / "thumbnails"
+        self.proxy_dir = self.cache_root / "proxies"
         self.thumb_dir.mkdir(parents=True, exist_ok=True)
+        self.proxy_dir.mkdir(parents=True, exist_ok=True)
+        self.proxy_manifest: Dict[str, Any] = {
+            "version": 1,
+            "profile": dict(SCAN_PROXY_PROFILE),
+            "generated_at": None,
+            "assets": {},
+            "summary": {
+                "eligible": 0,
+                "ready": 0,
+                "error": 0,
+            },
+        }
+        self.cache_cleanup_stats: Dict[str, Any] = {"enabled": True, "buckets": {}, "deleted_files": 0, "deleted_bytes": 0}
         self.skipped_count = 0
 
     def scan(self) -> Dict[str, Any]:
@@ -1126,6 +1296,8 @@ class Scanner:
         self._scan_dir(self.root, depth=0, parent_id=None, inherited={})
         self._normalize_directory_nodes()
         self._refresh_asset_classification_context()
+        self.proxy_manifest["generated_at"] = datetime.now().isoformat()
+        self.cache_cleanup_stats = self._cleanup_scan_cache_dirs()
         emit_event("phase", phase="scan", message="素材扫描完成", percent=100)
 
         return {
@@ -1138,6 +1310,8 @@ class Scanner:
             },
             "directory_nodes": [asdict(x) for x in self.nodes.values()],
             "assets": [asdict(x) for x in self.assets],
+            "proxy_media_manifest": self.proxy_manifest,
+            "cache_cleanup": self.cache_cleanup_stats,
             "summary": {
                 "total_assets": len(self.assets),
                 "image_count": sum(1 for a in self.assets if a.type == "image"),
@@ -1147,6 +1321,23 @@ class Scanner:
                 "error_count": sum(1 for a in self.assets if a.status == "error"),
             },
         }
+
+    def _cleanup_scan_cache_dirs(self) -> Dict[str, Any]:
+        summary = _cleanup_cache_buckets(
+            [
+                ("scan_proxies", self.proxy_dir, CACHE_CLEANUP_DEFAULTS_MB["scan_proxies"]),
+                ("thumbnails", self.thumb_dir, CACHE_CLEANUP_DEFAULTS_MB["thumbnails"]),
+            ],
+            {},
+        )
+        deleted_files = int(summary.get("deleted_files") or 0)
+        deleted_bytes = int(summary.get("deleted_bytes") or 0)
+        if deleted_files > 0:
+            emit_event(
+                "log",
+                message=f"Scan cache cleanup: deleted_files={deleted_files}, deleted_bytes={deleted_bytes}",
+            )
+        return summary
 
     def _scan_dir(
         self,
@@ -1424,6 +1615,10 @@ class Scanner:
             status = "error"
             emit_event("log", message=f"素材分析失败: {path.name}: {exc}")
 
+        proxy_entry = self._build_scan_proxy_entry(path, kind, media, cache_key)
+        if proxy_entry:
+            self.proxy_manifest["assets"][str(path)] = proxy_entry
+
         return Asset(
             asset_id=asset_id,
             type=kind,
@@ -1450,9 +1645,125 @@ class Scanner:
             cache={
                 "cache_key": cache_key,
                 "thumbnail_path": thumb,
+                "proxy_profiles": proxy_entry.get("profiles") if proxy_entry else {},
                 "generated_at": datetime.now().isoformat(),
             },
         )
+
+    def _build_scan_proxy_entry(
+        self,
+        path: Path,
+        kind: str,
+        media: Dict[str, Any],
+        cache_key: str,
+    ) -> Optional[Dict[str, Any]]:
+        if kind not in {"image", "video"}:
+            return None
+
+        summary = self.proxy_manifest["summary"]
+        summary["eligible"] = int(summary.get("eligible") or 0) + 1
+
+        profile = dict(SCAN_PROXY_PROFILE)
+        max_w = int(profile["max_width"])
+        max_h = int(profile["max_height"])
+        stat = path.stat()
+        rel = path.relative_to(self.root).as_posix()
+        proxy_hash = hashlib.md5(
+            f"{ENGINE_VERSION}|scan_proxy|{path.resolve()}|{stat.st_mtime_ns}|{stat.st_size}|{kind}|{max_w}x{max_h}".encode("utf-8")
+        ).hexdigest()
+        ext = ".mp4" if kind == "video" else ".jpg"
+        proxy_path = self.proxy_dir / f"proxy_{proxy_hash}{ext}"
+        source_width = int(media.get("width") or 0)
+        source_height = int(media.get("height") or 0)
+
+        try:
+            if not proxy_path.exists():
+                self._materialize_scan_proxy(path, proxy_path, kind, max_w, max_h, profile)
+            width, height = self._probe_scan_proxy_dimensions(proxy_path, kind, fallback=(source_width, source_height))
+            summary["ready"] = int(summary.get("ready") or 0) + 1
+            return {
+                "asset_id": "asset_" + safe_id(rel),
+                "source_path": str(path),
+                "kind": kind,
+                "profiles": {
+                    str(profile["name"]): {
+                        "path": str(proxy_path),
+                        "width": width,
+                        "height": height,
+                        "status": "ready",
+                        "cache_key": cache_key,
+                        "generated_at": datetime.now().isoformat(),
+                    }
+                },
+            }
+        except Exception as exc:
+            summary["error"] = int(summary.get("error") or 0) + 1
+            emit_event("log", message=f"扫描期代理素材生成失败，预览将回退到运行时代理: {path.name}: {exc}")
+            return {
+                "asset_id": "asset_" + safe_id(rel),
+                "source_path": str(path),
+                "kind": kind,
+                "profiles": {
+                    str(profile["name"]): {
+                        "path": str(proxy_path),
+                        "width": source_width or None,
+                        "height": source_height or None,
+                        "status": "error",
+                        "error": str(exc),
+                    }
+                },
+            }
+
+    def _materialize_scan_proxy(
+        self,
+        source: Path,
+        proxy_path: Path,
+        kind: str,
+        max_width: int,
+        max_height: int,
+        profile: Dict[str, Any],
+    ) -> None:
+        if kind == "video":
+            import imageio_ffmpeg
+
+            cmd = [
+                imageio_ffmpeg.get_ffmpeg_exe(),
+                "-y",
+                "-i",
+                str(source),
+                "-vf",
+                f"scale='min({max_width},iw)':'min({max_height},ih)':force_original_aspect_ratio=decrease",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                str(profile.get("video_crf") or 28),
+                "-c:a",
+                "aac",
+                "-b:a",
+                "96k",
+                str(proxy_path),
+            ]
+            subprocess.run(cmd, check=True, capture_output=True)
+            return
+
+        with Image.open(source) as img:
+            img = ImageOps.exif_transpose(img).convert("RGB")
+            img.thumbnail((max_width, max_height), Image.Resampling.LANCZOS)
+            img.save(proxy_path, quality=int(profile.get("image_quality") or 85))
+
+    def _probe_scan_proxy_dimensions(
+        self,
+        proxy_path: Path,
+        kind: str,
+        fallback: Tuple[int, int],
+    ) -> Tuple[Optional[int], Optional[int]]:
+        if kind == "image":
+            with Image.open(proxy_path) as img:
+                return int(img.width), int(img.height)
+        width, height = fallback
+        return (int(width) or None, int(height) or None)
 
     def _make_image_thumb(self, img: Image.Image, asset_id: str, cache_key: str) -> str:
         out = self.thumb_dir / f"{asset_id}_{cache_key[:8]}.jpg"
@@ -2500,6 +2811,9 @@ class Renderer:
             "created": 0,
             "fallback": 0,
             "saved_render_seconds": 0,
+            "chunk_groups": 0,
+            "chunk_hit": 0,
+            "chunk_created": 0,
         }
         self.video_segment_cache_stats: Dict[str, int] = {
             "eligible": 0,
@@ -2516,9 +2830,15 @@ class Renderer:
         self.proxy_media_stats: Dict[str, int] = {
             "eligible": 0,
             "hit": 0,
+            "manifest_hit": 0,
             "created": 0,
             "fallback": 0,
         }
+        self.cache_cleanup_stats: Dict[str, Any] = {"enabled": True, "buckets": {}, "deleted_files": 0, "deleted_bytes": 0}
+        self.proxy_media_manifest = _normalize_proxy_manifest(self.params.get("proxy_media_manifest"))
+        if not self.proxy_media_manifest:
+            guessed_library_path = _guess_sibling_library_path(self.params.get("plan_path"))
+            self.proxy_media_manifest = _load_proxy_manifest_from_library_path(str(guessed_library_path) if guessed_library_path else None)
         self.render_scheduler_summary: Dict[str, Any] = self._apply_runtime_render_scheduler()
 
     def _runtime_render_route_for_segment(self, seg: Dict[str, Any]) -> Tuple[str, str, List[str]]:
@@ -2579,6 +2899,32 @@ class Renderer:
             cache_dir = project_dir / "audio_cache"
         cache_dir.mkdir(parents=True, exist_ok=True)
         return cache_dir
+
+    def _project_cache_root(self) -> Path:
+        if self.render_cache_dir.name == "render_cache":
+            return self.render_cache_dir.parent
+        return self.output_path.parent / ".video_create_project"
+
+    def _cleanup_project_cache_dirs(self) -> Dict[str, Any]:
+        project_root = self._project_cache_root()
+        summary = _cleanup_cache_buckets(
+            [
+                ("render_cache", self.render_cache_dir, CACHE_CLEANUP_DEFAULTS_MB["render_cache"]),
+                ("audio_cache", self.audio_cache_dir, CACHE_CLEANUP_DEFAULTS_MB["audio_cache"]),
+                ("proxies", project_root / "proxies", CACHE_CLEANUP_DEFAULTS_MB["proxies"]),
+                ("chunks", project_root / "chunks", CACHE_CLEANUP_DEFAULTS_MB["chunks"]),
+            ],
+            self.params,
+        )
+        deleted_files = int(summary.get("deleted_files") or 0)
+        deleted_bytes = int(summary.get("deleted_bytes") or 0)
+        if deleted_files > 0:
+            emit_event(
+                "log",
+                message=f"Project cache cleanup: deleted_files={deleted_files}, deleted_bytes={deleted_bytes}",
+            )
+        self.cache_cleanup_stats = summary
+        return summary
 
     def _cache_path(self, kind: str, source: Path, suffix: str, extra: str = "") -> Path:
         bucket = self.render_cache_dir / kind
@@ -2952,10 +3298,148 @@ class Renderer:
                 f"hit={stats['hit']}, "
                 f"created={stats['created']}, "
                 f"fallback={stats['fallback']}, "
+                f"chunk_groups={stats['chunk_groups']}, "
+                f"chunk_hit={stats['chunk_hit']}, "
+                f"chunk_created={stats['chunk_created']}, "
                 f"saved_render_seconds={stats['saved_render_seconds']}"
             ),
         )
         emit_event("visual_base_cache", **stats)
+
+    def _should_use_chunked_visual_base(self) -> bool:
+        if self.params.get("watermark"):
+            return False
+        segments = list(self.plan.get("segments") or [])
+        if len(segments) < 2:
+            return False
+        enabled = self.params.get("visual_base_chunk_cache")
+        if enabled is None:
+            enabled = True
+        return bool(enabled)
+
+    def _is_safe_standard_visual_chunk_boundary(self, next_seg: Dict[str, Any]) -> bool:
+        transition = next_seg.get("transition_config") or {}
+        transition_type = str(transition.get("type") or next_seg.get("transition") or "none")
+        transition_duration = float(transition.get("duration") or 0.0)
+        return transition_type in {"none", "cut"} and transition_duration <= 0.05
+
+    def _standard_visual_transition_influence(self, seg: Dict[str, Any]) -> Dict[str, Any]:
+        transition = seg.get("transition_config") or {}
+        transition_type = str(transition.get("type") or seg.get("transition") or "none")
+        transition_duration = float(transition.get("duration") or 0.0)
+        if transition_type in {"none", "cut"} and transition_duration <= 0.05:
+            return {"type": transition_type, "backward": 0, "forward": 0, "safe_split": True}
+
+        transition_influence_map = {
+            "soft_crossfade": {"backward": 1, "forward": 0, "safe_split": False},
+            "quick_zoom": {"backward": 1, "forward": 0, "safe_split": False},
+            "flash_cut": {"backward": 1, "forward": 0, "safe_split": False},
+            "fade_through_dark": {"backward": 1, "forward": 1, "safe_split": False},
+            "fade_through_white": {"backward": 1, "forward": 1, "safe_split": False},
+        }
+        influence = transition_influence_map.get(
+            transition_type,
+            {"backward": 1, "forward": 1, "safe_split": False},
+        )
+        return {"type": transition_type, **influence}
+
+    def _standard_visual_chunk_route_payload(self, items: List[Dict[str, Any]]) -> Dict[str, Any]:
+        routes = [str(seg.get("runtime_render_route") or seg.get("render_route") or "moviepy_required") for seg in items]
+        route_counts: Dict[str, int] = {}
+        for route in routes:
+            route_counts[route] = route_counts.get(route, 0) + 1
+        if items and all(route == "direct_chunk_candidate" for route in routes):
+            return {
+                "runtime_chunk_route": "ffmpeg_direct_chunk",
+                "runtime_chunk_route_reason": "all_segments_direct_chunk_safe",
+                "runtime_chunk_route_tags": ["ffmpeg", "chunk", "direct", "visual_base"],
+                "runtime_chunk_route_counts": route_counts,
+            }
+        return {
+            "runtime_chunk_route": "moviepy_chunk",
+            "runtime_chunk_route_reason": "safe_cut_boundary_visual_chunk",
+            "runtime_chunk_route_tags": ["moviepy", "chunk", "timeline", "visual_base"],
+            "runtime_chunk_route_counts": route_counts,
+        }
+
+    def _build_standard_visual_transition_units(self) -> List[List[Dict[str, Any]]]:
+        segments = list(self.plan.get("segments") or [])
+        if not segments:
+            return []
+        ranges: List[Tuple[int, int]] = []
+        for idx, seg in enumerate(segments):
+            influence = self._standard_visual_transition_influence(seg)
+            if influence.get("safe_split"):
+                continue
+            start = max(0, idx - int(influence.get("backward") or 0))
+            end = min(len(segments) - 1, idx + int(influence.get("forward") or 0))
+            ranges.append((start, end))
+
+        merged_ranges: List[Tuple[int, int]] = []
+        for start, end in ranges:
+            if not merged_ranges or start > merged_ranges[-1][1] + 1:
+                merged_ranges.append((start, end))
+            else:
+                prev_start, prev_end = merged_ranges[-1]
+                merged_ranges[-1] = (prev_start, max(prev_end, end))
+
+        units: List[List[Dict[str, Any]]] = []
+        cursor = 0
+        for start, end in merged_ranges:
+            while cursor < start:
+                units.append([segments[cursor]])
+                cursor += 1
+            units.append(segments[start:end + 1])
+            cursor = end + 1
+        while cursor < len(segments):
+            units.append([segments[cursor]])
+            cursor += 1
+        return units
+
+    def _build_standard_visual_chunk_groups(self) -> List[Dict[str, Any]]:
+        units = self._build_standard_visual_transition_units()
+        if not units:
+            return []
+        max_segments = max(2, int(self.params.get("visual_base_chunk_max_segments") or 6))
+        max_seconds = max(4.0, float(self.params.get("visual_base_chunk_seconds") or 20.0))
+        groups: List[Dict[str, Any]] = []
+        current: List[Dict[str, Any]] = []
+        current_duration = 0.0
+        current_keys: List[str] = []
+        current_segment_count = 0
+
+        def flush() -> None:
+            nonlocal current, current_duration, current_keys, current_segment_count
+            if not current:
+                return
+            groups.append({
+                "index": len(groups),
+                "segments": list(current),
+                "duration": round(current_duration, 3),
+                "cache_key": _v56_stable_json_hash(current_keys),
+                **self._standard_visual_chunk_route_payload(current),
+            })
+            current = []
+            current_duration = 0.0
+            current_keys = []
+            current_segment_count = 0
+
+        for unit in units:
+            unit_duration = sum(float(seg.get("duration") or 0.0) for seg in unit)
+            unit_segment_count = len(unit)
+            if current:
+                count_exceeded = (current_segment_count + unit_segment_count) > max_segments
+                time_exceeded = (current_duration + unit_duration) > max_seconds
+                if count_exceeded or time_exceeded:
+                    flush()
+            current.extend(unit)
+            current_duration += unit_duration
+            current_segment_count += unit_segment_count
+            for seg in unit:
+                current_keys.append(_v56_segment_cache_key(seg, self.params))
+
+        flush()
+        return groups
 
     def _render_visual_timeline_clip(self) -> Tuple[Any, List[Dict[str, Any]]]:
         clips: List[Any] = []
@@ -3019,6 +3503,76 @@ class Renderer:
             if final is not None:
                 close_clip(final)
 
+    def _write_visual_base_video_from_chunks(self, output_path: Path) -> Optional[float]:
+        if not self._should_use_chunked_visual_base():
+            return None
+        groups = self._build_standard_visual_chunk_groups()
+        if len(groups) < 2:
+            return None
+
+        self.visual_base_cache_stats["chunk_groups"] = max(
+            int(self.visual_base_cache_stats.get("chunk_groups") or 0),
+            len(groups),
+        )
+        chunk_bucket = self.render_cache_dir / "visual_base_chunks"
+        chunk_bucket.mkdir(parents=True, exist_ok=True)
+        chunk_work_dir = self.render_cache_dir / "visual_base_chunk_work"
+        chunk_work_dir.mkdir(parents=True, exist_ok=True)
+
+        rendered_chunks: List[Path] = []
+        for group in groups:
+            chunk_path = chunk_bucket / f"{group['cache_key']}.mp4"
+            ok, _reason, _duration = _v56_validate_video(chunk_path, min_size=512)
+            if ok:
+                self.visual_base_cache_stats["chunk_hit"] += 1
+                rendered_chunks.append(chunk_path)
+                emit_event("log", message=f"Visual base chunk cache hit: {chunk_path.name}")
+                continue
+            _v56_write_chunk_video(
+                self,
+                group,
+                chunk_path,
+                int(self.params.get("fps") or self.plan.get("render_settings", {}).get("fps") or 30),
+                self.params,
+                ensure_audio_track=False,
+            )
+            ok, reason, _duration = _v56_validate_video(chunk_path, min_size=512)
+            if not ok:
+                raise RuntimeError(f"visual base chunk validation failed: {reason}")
+            self.visual_base_cache_stats["chunk_created"] += 1
+            rendered_chunks.append(chunk_path)
+            emit_event("log", message=f"Visual base chunk cache created: {chunk_path.name}")
+
+        tmp_output = output_path.with_suffix(".assembling.tmp.mp4")
+        try:
+            if tmp_output.exists():
+                tmp_output.unlink()
+        except Exception:
+            pass
+
+        concat_ok = _v56_concat_chunks_ffmpeg(rendered_chunks, tmp_output, chunk_work_dir)
+        if not concat_ok:
+            concat_ok = _v56_concat_chunks_ffmpeg_reencode(
+                rendered_chunks,
+                tmp_output,
+                chunk_work_dir,
+                int(self.params.get("fps") or self.plan.get("render_settings", {}).get("fps") or 30),
+                self.params,
+            )
+        if not concat_ok:
+            _v56_concat_chunks_moviepy(
+                rendered_chunks,
+                tmp_output,
+                int(self.params.get("fps") or self.plan.get("render_settings", {}).get("fps") or 30),
+                self.params,
+            )
+
+        ok, reason, duration = _v56_validate_video(tmp_output, min_size=512)
+        if not ok:
+            raise RuntimeError(f"visual base chunk concat failed: {reason}")
+        _v56_atomic_replace(tmp_output, output_path)
+        return float(duration or 0.0)
+
     def _materialize_standard_visual_base(self) -> Tuple[Path, float]:
         self.visual_base_cache_stats["eligible"] += 1
         out = self._standard_visual_cache_path()
@@ -3036,7 +3590,9 @@ class Renderer:
             pass
 
         try:
-            duration = self._write_visual_base_video(out)
+            duration = self._write_visual_base_video_from_chunks(out)
+            if duration is None:
+                duration = self._write_visual_base_video(out)
             ok, _reason, validated_duration = _v56_validate_video(out, min_size=512)
             if ok:
                 self.visual_base_cache_stats["created"] += 1
@@ -3116,6 +3672,7 @@ class Renderer:
                 "Proxy media summary: "
                 f"eligible={proxy_cache['eligible']}, "
                 f"hit={proxy_cache['hit']}, "
+                f"manifest_hit={proxy_cache['manifest_hit']}, "
                 f"created={proxy_cache['created']}, "
                 f"fallback={proxy_cache['fallback']}"
             ),
@@ -3357,9 +3914,10 @@ class Renderer:
             self._emit_card_segment_cache_summary()
             self._emit_video_segment_cache_summary()
             self._emit_proxy_media_summary()
+            self._cleanup_project_cache_dirs()
 
             try:
-                project_dir = self.render_cache_dir.parent if self.render_cache_dir.name == "render_cache" else self.output_path.parent / ".video_create_project"
+                project_dir = self._project_cache_root()
                 _v56_write_build_report(project_dir / "build_report.json", {
                     "engine_version": ENGINE_VERSION,
                     "status": "done",
@@ -3371,6 +3929,7 @@ class Renderer:
                     "card_segment_cache": self._card_segment_cache_summary(),
                     "video_segment_cache": self._video_segment_cache_summary(),
                     "proxy_media": self._proxy_media_summary(),
+                    "cache_cleanup": self.cache_cleanup_stats,
                     "render_scheduler": self.render_scheduler_summary,
                     "diagnostics": _v56_render_diagnostics(self, [], [], False),
                     "created_at": datetime.now().isoformat(),
@@ -3406,9 +3965,10 @@ class Renderer:
             self._emit_card_segment_cache_summary()
             self._emit_video_segment_cache_summary()
             self._emit_proxy_media_summary()
+            self._cleanup_project_cache_dirs()
 
             try:
-                project_dir = self.render_cache_dir.parent if self.render_cache_dir.name == "render_cache" else self.output_path.parent / ".video_create_project"
+                project_dir = self._project_cache_root()
                 _v56_write_build_report(project_dir / "build_report.json", {
                     "engine_version": ENGINE_VERSION,
                     "status": "done",
@@ -3421,6 +3981,7 @@ class Renderer:
                     "card_segment_cache": self._card_segment_cache_summary(),
                     "video_segment_cache": self._video_segment_cache_summary(),
                     "proxy_media": self._proxy_media_summary(),
+                    "cache_cleanup": self.cache_cleanup_stats,
                     "render_scheduler": self.render_scheduler_summary,
                     "diagnostics": _v56_render_diagnostics(self, [], [], False),
                     "created_at": datetime.now().isoformat(),
@@ -3854,22 +4415,34 @@ class Renderer:
         )
         if not use_proxy:
             return source
-            
+
         proxy_dir = self.render_cache_dir.parent / "proxies"
         proxy_dir.mkdir(parents=True, exist_ok=True)
-        
+
         tw, th = self.target_size
         self.proxy_media_stats["eligible"] += 1
+        manifest_entry = self.proxy_media_manifest.get(str(source.resolve())) or self.proxy_media_manifest.get(str(source))
+        if manifest_entry:
+            profiles = manifest_entry.get("profiles") or {}
+            profile = profiles.get(str(SCAN_PROXY_PROFILE["name"])) if isinstance(profiles, dict) else None
+            proxy_path_value = profile.get("path") if isinstance(profile, dict) else None
+            if proxy_path_value:
+                manifest_proxy_path = Path(str(proxy_path_value))
+                if manifest_proxy_path.is_file():
+                    self.proxy_media_stats["manifest_hit"] += 1
+                    self.proxy_media_stats["hit"] += 1
+                    return manifest_proxy_path
+
         proxy_key = f"{ENGINE_VERSION}|{source.resolve()}|{source.stat().st_mtime_ns}|{source.stat().st_size}|{tw}x{th}|video={is_video}"
         proxy_hash = hashlib.md5(proxy_key.encode()).hexdigest()
-        
+
         ext = ".mp4" if is_video else ".jpg"
         proxy_path = proxy_dir / f"proxy_{proxy_hash}{ext}"
-        
+
         if proxy_path.exists():
             self.proxy_media_stats["hit"] += 1
             return proxy_path
-            
+
         emit_event("log", message=f"正在生成极速预览代理: {source.name}")
         try:
             if is_video:
@@ -5374,6 +5947,7 @@ class V56StableRenderer:
                     "card_segment_cache": renderer._card_segment_cache_summary(),
                     "video_segment_cache": renderer._video_segment_cache_summary(),
                     "proxy_media": renderer._proxy_media_summary(),
+                    "cache_cleanup": renderer.cache_cleanup_stats,
                     "render_scheduler": renderer.render_scheduler_summary,
                     "chunk_scheduler": {
                         "strategy_version": "chunk_rules_v1",
@@ -5423,6 +5997,7 @@ class V56StableRenderer:
         renderer._emit_card_segment_cache_summary()
         renderer._emit_video_segment_cache_summary()
         renderer._emit_proxy_media_summary()
+        renderer._cleanup_project_cache_dirs()
         report = {
             "engine_version": ENGINE_VERSION,
             "status": "done",
@@ -5439,6 +6014,7 @@ class V56StableRenderer:
             "card_segment_cache": renderer._card_segment_cache_summary(),
             "video_segment_cache": renderer._video_segment_cache_summary(),
             "proxy_media": renderer._proxy_media_summary(),
+            "cache_cleanup": renderer.cache_cleanup_stats,
             "render_scheduler": renderer.render_scheduler_summary,
             "chunk_scheduler": {
                 "strategy_version": "chunk_rules_v1",
@@ -5523,6 +6099,10 @@ def build_low_res_preview_plan(
 def command_preview_render(args: argparse.Namespace) -> None:
     plan = read_json(args.plan)
     params = json.loads(args.params) if getattr(args, "params", None) else {}
+    sibling_library_path = _guess_sibling_library_path(args.plan)
+    if sibling_library_path and "proxy_media_manifest" not in params:
+        params["proxy_media_manifest"] = read_json(str(sibling_library_path)).get("proxy_media_manifest", {})
+    params["plan_path"] = str(args.plan)
     aspect_ratio = params.get("aspect_ratio") or plan.get("render_settings", {}).get("aspect_ratio") or "16:9"
     params.update({
         "aspect_ratio": aspect_ratio,
