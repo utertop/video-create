@@ -496,14 +496,42 @@ def detect_ffmpeg_hardware_encoders() -> List[str]:
         return []
 
 
+def _should_default_to_hardware_encoding(params: Dict[str, Any]) -> bool:
+    if bool(params.get("preview")):
+        return False
+    if bool(params.get("disable_default_hardware_encoding")):
+        return False
+
+    render_mode = str(params.get("render_mode") or params.get("long_video_mode") or "").lower()
+    performance_mode = str(params.get("performance_mode") or "").lower()
+    total_duration = float(params.get("total_duration") or 0.0)
+    segment_count = int(params.get("segment_count") or 0)
+
+    if render_mode in {"stable", "long", "long_stable"}:
+        return True
+    if performance_mode == "stable":
+        return True
+    if total_duration >= float(STABLE_RENDER_DEFAULTS["seconds"]):
+        return True
+    if segment_count >= int(STABLE_RENDER_DEFAULTS["segments"]):
+        return True
+    return False
+
+
 def select_ffmpeg_video_encoder(params: Dict[str, Any]) -> Tuple[str, List[str]]:
     """Choose an FFmpeg encoder.
 
-    Hardware encoding is opt-in for now. Some FFmpeg builds list an encoder even
-    when the matching driver/device is unavailable, so callers still keep a
-    libx264 fallback.
+    For low-risk acceleration, long/stable formal exports default to hardware
+    auto-detection when the caller did not explicitly request CPU encoding.
+    Some FFmpeg builds list an encoder even when the matching driver/device is
+    unavailable, so callers still keep a libx264 fallback.
     """
-    requested = str(params.get("hardware_encoder") or params.get("hardware_encoding") or "off").lower()
+    raw_requested = params.get("hardware_encoder")
+    if raw_requested is None:
+        raw_requested = params.get("hardware_encoding")
+    requested = str(raw_requested or "").lower()
+    if requested == "" and _should_default_to_hardware_encoding(params):
+        requested = "auto"
     if requested in {"", "off", "false", "none", "libx264", "cpu"}:
         return "libx264", ["-preset", "veryfast"]
 
@@ -519,11 +547,11 @@ def select_ffmpeg_video_encoder(params: Dict[str, Any]) -> Tuple[str, List[str]]
     selected = aliases.get(requested, requested)
     if selected and selected in available:
         if selected == "h264_nvenc":
-            return selected, ["-preset", "p4"]
+            return selected, ["-preset", "fast"]
         if selected == "h264_qsv":
             return selected, ["-preset", "veryfast"]
         if selected == "h264_amf":
-            return selected, ["-quality", "speed"]
+            return selected, ["-quality", "quality"]
         return selected, []
     return "libx264", ["-preset", "veryfast"]
 
@@ -1050,6 +1078,119 @@ CACHE_CLEANUP_DEFAULTS_MB = {
     "scan_proxies": 1024,
     "thumbnails": 256,
 }
+
+STABLE_RENDER_DEFAULTS = {
+    "seconds": 360.0,
+    "segments": 48,
+    "image_heavy_seconds": 240.0,
+    "image_heavy_segments": 30,
+    "image_heavy_ratio": 0.7,
+}
+
+
+def _visual_segment_mix(segments: List[Dict[str, Any]]) -> Dict[str, int]:
+    visual_segments = [seg for seg in segments if str(seg.get("type") or "") in {"image", "video"}]
+    image_count = sum(1 for seg in visual_segments if str(seg.get("type") or "") == "image")
+    video_count = sum(1 for seg in visual_segments if str(seg.get("type") or "") == "video")
+    return {
+        "visual_count": len(visual_segments),
+        "image_count": image_count,
+        "video_count": video_count,
+    }
+
+
+def _is_image_heavy_visual_mix(segments: List[Dict[str, Any]], min_visual_count: int = 12) -> bool:
+    mix = _visual_segment_mix(segments)
+    visual_count = int(mix["visual_count"])
+    if visual_count < min_visual_count:
+        return False
+    image_ratio = float(mix["image_count"]) / float(max(1, visual_count))
+    return image_ratio >= float(STABLE_RENDER_DEFAULTS["image_heavy_ratio"])
+
+
+def _should_auto_use_stable_renderer(
+    total_duration: float,
+    segments: List[Dict[str, Any]],
+    params: Dict[str, Any],
+) -> bool:
+    segment_count = len(segments)
+    stable_threshold_seconds = float(params.get("stable_threshold_seconds", STABLE_RENDER_DEFAULTS["seconds"]))
+    stable_threshold_segments = int(params.get("stable_threshold_segments", STABLE_RENDER_DEFAULTS["segments"]))
+    image_heavy_seconds = float(
+        params.get("stable_image_heavy_threshold_seconds", STABLE_RENDER_DEFAULTS["image_heavy_seconds"])
+    )
+    image_heavy_segments = int(
+        params.get("stable_image_heavy_threshold_segments", STABLE_RENDER_DEFAULTS["image_heavy_segments"])
+    )
+    if _is_image_heavy_visual_mix(segments) and (
+        total_duration >= image_heavy_seconds or segment_count >= image_heavy_segments
+    ):
+        return True
+    return total_duration >= stable_threshold_seconds or segment_count >= stable_threshold_segments
+
+
+def _v56_is_ffmpeg_image_chunk_candidate(
+    seg: Dict[str, Any],
+    params: Optional[Dict[str, Any]] = None,
+) -> bool:
+    params = params or {}
+    if bool(params.get("preview")):
+        return False
+    if str(seg.get("type") or "") != "image" or seg.get("overlay_text"):
+        return False
+    if not seg.get("source_path"):
+        return False
+    transition = seg.get("transition_config") or {}
+    transition_type = str(transition.get("type") or seg.get("transition") or "none")
+    transition_duration = float(transition.get("duration") or 0.0)
+    if transition_type not in {"none", "cut"} or transition_duration > 0.05:
+        return False
+    motion_type = str((seg.get("motion_config") or {}).get("type") or "none")
+    return motion_type in {"none", "still_hold", "gentle_push", "slow_push"}
+
+
+def _v56_resolved_card_style(seg: Dict[str, Any], params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    params = params or {}
+    stype = str(seg.get("type") or "")
+    if stype == "title":
+        style = params.get("title_style") or seg.get("title_style") or {}
+        return dict(style)
+    if stype == "end":
+        style = params.get("end_title_style") or seg.get("title_style") or {}
+        return dict(style)
+    return dict(seg.get("title_style") or {})
+
+
+def _v56_is_ffmpeg_card_chunk_candidate(
+    seg: Dict[str, Any],
+    params: Optional[Dict[str, Any]] = None,
+) -> bool:
+    params = params or {}
+    if bool(params.get("preview")):
+        return False
+    if str(seg.get("type") or "") not in {"title", "chapter", "end"}:
+        return False
+    transition = seg.get("transition_config") or {}
+    transition_type = str(transition.get("type") or seg.get("transition") or "none")
+    transition_duration = float(transition.get("duration") or 0.0)
+    if transition_type not in {"none", "cut"} or transition_duration > 0.05:
+        return False
+    motion = str(_v56_resolved_card_style(seg, params).get("motion") or "fade_slide_up")
+    return motion == "static_hold"
+
+
+def _v56_chunk_route_family(
+    seg: Dict[str, Any],
+    params: Optional[Dict[str, Any]] = None,
+) -> str:
+    route = str(seg.get("runtime_render_route") or seg.get("render_route") or "moviepy_required")
+    if route == "direct_chunk_candidate":
+        return "direct"
+    if _v56_is_ffmpeg_card_chunk_candidate(seg, params):
+        return "card"
+    if _v56_is_ffmpeg_image_chunk_candidate(seg, params):
+        return "image"
+    return "timeline"
 
 
 def _cache_cleanup_limit_bytes(config: Dict[str, Any], bucket_name: str, default_mb: int) -> int:
@@ -1998,8 +2139,18 @@ class Compiler:
             return False
         performance_mode = str(self.performance_mode or "").lower()
         render_mode = str(self.blueprint_metadata.get("render_mode", "auto") or "").lower()
-        large_project = performance_mode == "stable" or render_mode == "long_stable" or total_duration >= 600.0 or segment_count >= 80
-        medium_project = performance_mode in {"balanced", "quality"} and (total_duration >= 240.0 or segment_count >= 30)
+        image_heavy = sum(1 for item in self.segments if str(item.type or "") == "image") >= max(12, int(segment_count * STABLE_RENDER_DEFAULTS["image_heavy_ratio"]))
+        large_project = (
+            performance_mode == "stable"
+            or render_mode == "long_stable"
+            or total_duration >= float(STABLE_RENDER_DEFAULTS["seconds"])
+            or segment_count >= int(STABLE_RENDER_DEFAULTS["segments"])
+            or (image_heavy and (total_duration >= float(STABLE_RENDER_DEFAULTS["image_heavy_seconds"]) or segment_count >= int(STABLE_RENDER_DEFAULTS["image_heavy_segments"])))
+        )
+        medium_project = performance_mode in {"balanced", "quality"} and (
+            total_duration >= float(STABLE_RENDER_DEFAULTS["image_heavy_seconds"])
+            or segment_count >= int(STABLE_RENDER_DEFAULTS["image_heavy_segments"])
+        )
         return (large_project or medium_project) and float(seg.duration or 0.0) > 0.1
 
     def _assign_render_scheduler_hints(self) -> Dict[str, Any]:
@@ -2958,24 +3109,43 @@ class Renderer:
         performance_mode = str(self.params.get("performance_mode") or self.plan.get("render_settings", {}).get("performance_mode") or "").lower()
         render_mode = str(self.params.get("render_mode") or self.plan.get("render_settings", {}).get("render_mode") or "").lower()
         total_duration = float(self.plan.get("total_duration") or 0.0)
-        segment_count = len(self.plan.get("segments", []) or [])
+        segments = list(self.plan.get("segments", []) or [])
+        segment_count = len(segments)
         motion_type = str((motion_config or {}).get("type") or "none")
         if motion_type not in {"none", "still_hold", "gentle_push", "slow_push", "ken_burns", "subtle_ken_burns", "punch_zoom", "micro_zoom"}:
             return False
         large_project = (
             performance_mode == "stable"
             or render_mode == "long_stable"
-            or total_duration >= 600.0
-            or segment_count >= 80
+            or _should_auto_use_stable_renderer(total_duration, segments, self.params)
         )
         medium_project = (
             performance_mode in {"balanced", "quality"}
-            and (total_duration >= 240.0 or segment_count >= 30)
+            and (
+                total_duration >= float(STABLE_RENDER_DEFAULTS["image_heavy_seconds"])
+                or segment_count >= int(STABLE_RENDER_DEFAULTS["image_heavy_segments"])
+            )
         )
         return (
             large_project
             or medium_project
         ) and float(duration or 0.0) > 0.1
+
+    def _ffmpeg_image_motion_cache_spec(self, motion_config: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        motion_type = str((motion_config or {}).get("type") or "none")
+        if motion_type in {"none", "still_hold"}:
+            return {"type": motion_type, "amount": 0.0}
+        if motion_type == "gentle_push":
+            return {"type": motion_type, "amount": 0.018}
+        if motion_type == "slow_push":
+            return {"type": motion_type, "amount": 0.015}
+        return None
+
+    def _can_use_ffmpeg_image_chunk_segment(self, seg: Dict[str, Any]) -> bool:
+        return _v56_is_ffmpeg_image_chunk_candidate(seg, self.params)
+
+    def _can_use_ffmpeg_card_chunk_segment(self, seg: Dict[str, Any]) -> bool:
+        return _v56_is_ffmpeg_card_chunk_candidate(seg, self.params)
 
     def _build_image_visual_clip(self, fixed: Path, duration: float, motion_config: Optional[Dict[str, Any]] = None):
         fg = ImageClip(str(fixed)).set_duration(duration)
@@ -3067,6 +3237,129 @@ class Renderer:
                 gc.collect()
             except Exception:
                 pass
+
+        try:
+            if out.exists():
+                out.unlink()
+        except Exception:
+            pass
+        return None
+
+    def _ffmpeg_prerender_image_segment(
+        self,
+        source: Path,
+        fixed: Path,
+        duration: float,
+        motion_config: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Path]:
+        motion_spec = self._ffmpeg_image_motion_cache_spec(motion_config)
+        if motion_spec is None:
+            return None
+
+        fps = int(self.params.get("fps") or self.plan.get("render_settings", {}).get("fps") or 30)
+        motion_key = json.dumps(motion_spec, ensure_ascii=False, sort_keys=True)
+        out = self._cache_path(
+            "photo_segments_ffmpeg",
+            source,
+            ".mp4",
+            f"photo_seg_ffmpeg_v1|duration={round(float(duration or 0.0), 3)}|fps={fps}|motion={motion_key}",
+        )
+        if out.exists() and out.stat().st_size > 1024:
+            emit_event("log", message=f"FFmpeg image segment cache hit: {out.name}")
+            return out
+
+        bg_path = self._blur_bg(fixed)
+        segment_duration = max(float(duration or 0.1), 0.1)
+        tw, th = self.target_size
+
+        try:
+            with Image.open(fixed) as img:
+                iw, ih = img.size
+        except Exception:
+            return None
+
+        base_scale = min(float(tw) / float(max(1, iw)), float(th) / float(max(1, ih)))
+        base_w = max(2, int(round((iw * base_scale) / 2.0)) * 2)
+        base_h = max(2, int(round((ih * base_scale) / 2.0)) * 2)
+        amount = float(motion_spec.get("amount") or 0.0)
+
+        fg_filter = f"[1:v]scale={base_w}:{base_h}[fg]"
+        if amount > 0:
+            zoom_expr = f"(1+{amount:.6f}*t/{segment_duration:.6f})"
+            fg_filter = (
+                "[1:v]"
+                f"scale='max(2,trunc({base_w}*{zoom_expr}/2)*2)':"
+                f"'max(2,trunc({base_h}*{zoom_expr}/2)*2)':eval=frame"
+                "[fg]"
+            )
+        filter_complex = ";".join(
+            [
+                f"[0:v]scale={tw}:{th},setsar=1[bg]",
+                fg_filter,
+                "[bg][fg]overlay=(W-w)/2:(H-h)/2:eval=frame,format=yuv420p[outv]",
+            ]
+        )
+
+        try:
+            import imageio_ffmpeg
+
+            ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+            selected_encoder, encoder_args = select_ffmpeg_video_encoder(self.params)
+
+            def build_cmd(video_encoder: str, video_encoder_args: List[str]) -> List[str]:
+                cmd = [
+                    ffmpeg,
+                    "-y",
+                    "-loop",
+                    "1",
+                    "-framerate",
+                    str(fps),
+                    "-t",
+                    f"{segment_duration:.6f}",
+                    "-i",
+                    str(bg_path),
+                    "-loop",
+                    "1",
+                    "-framerate",
+                    str(fps),
+                    "-t",
+                    f"{segment_duration:.6f}",
+                    "-i",
+                    str(fixed),
+                    "-filter_complex",
+                    filter_complex,
+                    "-map",
+                    "[outv]",
+                    "-r",
+                    str(fps),
+                    "-an",
+                    "-c:v",
+                    video_encoder,
+                ]
+                cmd += video_encoder_args
+                if video_encoder == "libx264":
+                    cmd += ["-crf", quality_to_crf(self.params.get("python_quality") or self.params.get("quality") or "standard")]
+                else:
+                    cmd += ["-b:v", "8M"]
+                cmd += ["-pix_fmt", "yuv420p", "-movflags", "+faststart", str(out)]
+                return cmd
+
+            completed = subprocess.run(build_cmd(selected_encoder, encoder_args), capture_output=True, text=True, encoding="utf-8", errors="replace")
+            if completed.returncode != 0 and selected_encoder != "libx264":
+                emit_event("log", message=f"FFmpeg image segment {selected_encoder} fallback to libx264: {completed.stderr[-600:]}")
+                completed = subprocess.run(
+                    build_cmd("libx264", ["-preset", "veryfast"]),
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+            if completed.returncode == 0 and out.exists() and out.stat().st_size > 1024:
+                emit_event("log", message=f"FFmpeg image segment cache created: {out.name}")
+                return out
+            emit_event("log", message=f"FFmpeg image segment fallback to MoviePy: {source.name}: {completed.stderr[-600:]}")
+        except Exception as exc:
+            emit_event("log", message=f"FFmpeg image segment raised, fallback to MoviePy: {source.name}: {exc}")
 
         try:
             if out.exists():
@@ -3355,6 +3648,20 @@ class Renderer:
                 "runtime_chunk_route_tags": ["ffmpeg", "chunk", "direct", "visual_base"],
                 "runtime_chunk_route_counts": route_counts,
             }
+        if items and all(self._can_use_ffmpeg_card_chunk_segment(seg) for seg in items):
+            return {
+                "runtime_chunk_route": "ffmpeg_card_chunk",
+                "runtime_chunk_route_reason": "all_segments_ffmpeg_card_chunk_safe",
+                "runtime_chunk_route_tags": ["ffmpeg", "chunk", "card", "visual_base"],
+                "runtime_chunk_route_counts": route_counts,
+            }
+        if items and all(self._can_use_ffmpeg_image_chunk_segment(seg) for seg in items):
+            return {
+                "runtime_chunk_route": "ffmpeg_image_chunk",
+                "runtime_chunk_route_reason": "all_segments_ffmpeg_image_chunk_safe",
+                "runtime_chunk_route_tags": ["ffmpeg", "chunk", "image", "visual_base"],
+                "runtime_chunk_route_counts": route_counts,
+            }
         return {
             "runtime_chunk_route": "moviepy_chunk",
             "runtime_chunk_route_reason": "safe_cut_boundary_visual_chunk",
@@ -3407,9 +3714,10 @@ class Renderer:
         current_duration = 0.0
         current_keys: List[str] = []
         current_segment_count = 0
+        current_family: Optional[str] = None
 
         def flush() -> None:
-            nonlocal current, current_duration, current_keys, current_segment_count
+            nonlocal current, current_duration, current_keys, current_segment_count, current_family
             if not current:
                 return
             groups.append({
@@ -3423,18 +3731,28 @@ class Renderer:
             current_duration = 0.0
             current_keys = []
             current_segment_count = 0
+            current_family = None
 
         for unit in units:
             unit_duration = sum(float(seg.get("duration") or 0.0) for seg in unit)
             unit_segment_count = len(unit)
+            unit_family = "timeline"
+            if unit and all(_v56_chunk_route_family(seg, self.params) == "direct" for seg in unit):
+                unit_family = "direct"
+            elif unit and all(_v56_chunk_route_family(seg, self.params) == "card" for seg in unit):
+                unit_family = "card"
+            elif unit and all(_v56_chunk_route_family(seg, self.params) == "image" for seg in unit):
+                unit_family = "image"
             if current:
                 count_exceeded = (current_segment_count + unit_segment_count) > max_segments
                 time_exceeded = (current_duration + unit_duration) > max_seconds
-                if count_exceeded or time_exceeded:
+                family_changed = current_family != unit_family
+                if count_exceeded or time_exceeded or family_changed:
                     flush()
             current.extend(unit)
             current_duration += unit_duration
             current_segment_count += unit_segment_count
+            current_family = unit_family
             for seg in unit:
                 current_keys.append(_v56_segment_cache_key(seg, self.params))
 
@@ -5182,6 +5500,20 @@ def _v56_build_chunk_groups(
                 "runtime_chunk_route_tags": ["ffmpeg", "chunk", "direct"],
                 "runtime_chunk_route_counts": route_counts,
             }
+        if items and all(_v56_is_ffmpeg_card_chunk_candidate(seg, params) for seg in items):
+            return {
+                "runtime_chunk_route": "ffmpeg_card_chunk",
+                "runtime_chunk_route_reason": "all_segments_ffmpeg_card_chunk_safe",
+                "runtime_chunk_route_tags": ["ffmpeg", "chunk", "card"],
+                "runtime_chunk_route_counts": route_counts,
+            }
+        if items and all(_v56_is_ffmpeg_image_chunk_candidate(seg, params) for seg in items):
+            return {
+                "runtime_chunk_route": "ffmpeg_image_chunk",
+                "runtime_chunk_route_reason": "all_segments_ffmpeg_image_chunk_safe",
+                "runtime_chunk_route_tags": ["ffmpeg", "chunk", "image"],
+                "runtime_chunk_route_counts": route_counts,
+            }
         if any(route in {"moviepy_required", "image_live_compose", "photo_prerender"} for route in routes):
             reason = "contains_timeline_or_image_segments"
         elif any(route in {"video_fit", "video_motion_fit"} for route in routes):
@@ -5197,16 +5529,12 @@ def _v56_build_chunk_groups(
 
     for seg in segments:
         duration = float(seg.get("duration") or 0.0)
-        route = str(seg.get("runtime_render_route") or seg.get("render_route") or "moviepy_required")
-        is_direct = (route == "direct_chunk_candidate")
+        route_family = _v56_chunk_route_family(seg, params)
         
         if current:
-            # Check if current group is direct
-            current_routes = [str(s.get("runtime_render_route") or s.get("render_route") or "moviepy_required") for s in current]
-            current_is_direct = all(r == "direct_chunk_candidate" for r in current_routes)
-            
+            current_family = _v56_chunk_route_family(current[0], params)
             time_exceeded = (current_duration + duration > chunk_seconds)
-            route_changed = (current_is_direct != is_direct)
+            route_changed = (current_family != route_family)
             
             if time_exceeded or route_changed:
                 groups.append({
@@ -5595,6 +5923,153 @@ def _v56_try_write_ffmpeg_direct_chunk(
             pass
 
 
+def _v56_try_write_ffmpeg_image_chunk(
+    renderer: Any,
+    chunk: Dict[str, Any],
+    tmp_chunk: Path,
+    params: Dict[str, Any],
+) -> bool:
+    segments = chunk.get("segments") or []
+    if not segments:
+        return False
+    if str(chunk.get("runtime_chunk_route") or "") not in {"", "ffmpeg_image_chunk"}:
+        return False
+
+    rendered_segments: List[Path] = []
+    for seg in segments:
+        source_path = seg.get("source_path")
+        if not source_path:
+            return False
+        source = Path(str(source_path))
+        if not source.exists() or not renderer._can_use_ffmpeg_image_chunk_segment(seg):
+            return False
+        render_source = renderer._get_proxy_source(source, is_video=False)
+        fixed = renderer._cache_path("fixed_images", render_source, ".jpg", "exif_rgb_v1")
+        if not fixed.exists():
+            with Image.open(render_source) as img:
+                img = ImageOps.exif_transpose(img).convert("RGB")
+                img.save(fixed, quality=95)
+        prerendered = renderer._ffmpeg_prerender_image_segment(
+            render_source,
+            fixed,
+            float(seg.get("duration") or 0.1),
+            seg.get("motion_config"),
+        )
+        if not prerendered or not prerendered.exists():
+            return False
+        rendered_segments.append(prerendered)
+
+    concat_list = tmp_chunk.with_suffix(".concat.txt")
+    try:
+        with concat_list.open("w", encoding="utf-8", newline="\n") as f:
+            for rendered in rendered_segments:
+                escaped = rendered.resolve().as_posix().replace("'", r"'\''")
+                f.write(f"file '{escaped}'\n")
+
+        import imageio_ffmpeg
+
+        cmd = [
+            imageio_ffmpeg.get_ffmpeg_exe(),
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(concat_list),
+            "-c",
+            "copy",
+            "-movflags",
+            "+faststart",
+            str(tmp_chunk),
+        ]
+        emit_event("phase", phase="render", message=f"FFmpeg image chunk {chunk['index'] + 1}", percent=min(94, 10 + chunk["index"]))
+        completed = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if completed.returncode != 0:
+            emit_event("log", message=f"FFmpeg image chunk fallback to MoviePy: {completed.stderr[-800:]}")
+            return False
+        ok, reason, _duration = _v56_validate_video(tmp_chunk)
+        if not ok:
+            emit_event("log", message=f"FFmpeg image chunk validation fallback to MoviePy: {reason}")
+            return False
+        return True
+    except Exception as exc:
+        emit_event("log", message=f"FFmpeg image chunk raised, fallback to MoviePy: {exc}")
+        return False
+    finally:
+        try:
+            if concat_list.exists():
+                concat_list.unlink()
+        except Exception:
+            pass
+
+
+def _v56_try_write_ffmpeg_card_chunk(
+    renderer: Any,
+    chunk: Dict[str, Any],
+    tmp_chunk: Path,
+    params: Dict[str, Any],
+) -> bool:
+    segments = chunk.get("segments") or []
+    if not segments:
+        return False
+    if str(chunk.get("runtime_chunk_route") or "") not in {"", "ffmpeg_card_chunk"}:
+        return False
+
+    rendered_segments: List[Path] = []
+    for seg in segments:
+        if not renderer._can_use_ffmpeg_card_chunk_segment(seg):
+            return False
+        prerendered = renderer._prerender_card_segment(seg, float(seg.get("duration") or 0.1))
+        if not prerendered or not prerendered.exists():
+            return False
+        rendered_segments.append(prerendered)
+
+    concat_list = tmp_chunk.with_suffix(".concat.txt")
+    try:
+        with concat_list.open("w", encoding="utf-8", newline="\n") as f:
+            for rendered in rendered_segments:
+                escaped = rendered.resolve().as_posix().replace("'", r"'\''")
+                f.write(f"file '{escaped}'\n")
+
+        import imageio_ffmpeg
+
+        cmd = [
+            imageio_ffmpeg.get_ffmpeg_exe(),
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(concat_list),
+            "-c",
+            "copy",
+            "-movflags",
+            "+faststart",
+            str(tmp_chunk),
+        ]
+        emit_event("phase", phase="render", message=f"FFmpeg card chunk {chunk['index'] + 1}", percent=min(94, 10 + chunk["index"]))
+        completed = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if completed.returncode != 0:
+            emit_event("log", message=f"FFmpeg card chunk fallback to MoviePy: {completed.stderr[-800:]}")
+            return False
+        ok, reason, _duration = _v56_validate_video(tmp_chunk)
+        if not ok:
+            emit_event("log", message=f"FFmpeg card chunk validation fallback to MoviePy: {reason}")
+            return False
+        return True
+    except Exception as exc:
+        emit_event("log", message=f"FFmpeg card chunk raised, fallback to MoviePy: {exc}")
+        return False
+    finally:
+        try:
+            if concat_list.exists():
+                concat_list.unlink()
+        except Exception:
+            pass
+
+
 def _v56_ensure_silent_audio_track(video_path: Path, duration: Optional[float] = None) -> bool:
     """Ensure chunk files all expose an AAC track so FFmpeg concat keeps audio streams."""
     if not video_path.exists() or video_has_audio_stream(video_path):
@@ -5673,6 +6148,7 @@ def _v56_render_diagnostics(
     force_chunk_audio_track: bool,
 ) -> Dict[str, Any]:
     settings = getattr(renderer, "audio_settings", {}) or {}
+    selected_encoder, encoder_args = select_ffmpeg_video_encoder(getattr(renderer, "params", {}) or {})
     cached = sum(1 for item in chunk_reports if item.get("status") == "cached")
     rendered = sum(1 for item in chunk_reports if item.get("status") == "rendered")
     source_paths = []
@@ -5702,6 +6178,11 @@ def _v56_render_diagnostics(
             "target_lufs": settings.get("target_lufs"),
             "force_chunk_audio_track": bool(force_chunk_audio_track),
         },
+        "encoding": {
+            "selected_video_encoder": selected_encoder,
+            "selected_video_encoder_args": encoder_args,
+            "default_hardware_auto": _should_default_to_hardware_encoding(getattr(renderer, "params", {}) or {}),
+        },
         "proxy_media": renderer._proxy_media_summary() if hasattr(renderer, "_proxy_media_summary") else {},
     }
 
@@ -5722,6 +6203,20 @@ def _v56_write_chunk_video(
     try:
         chunk_route = str(chunk.get("runtime_chunk_route") or "")
         if chunk_route == "ffmpeg_direct_chunk" and _v56_try_write_ffmpeg_direct_chunk(renderer, chunk, tmp_chunk, params):
+            if ensure_audio_track:
+                ok, _reason, duration = _v56_validate_video(tmp_chunk)
+                if ok and not _v56_ensure_silent_audio_track(tmp_chunk, duration):
+                    raise RuntimeError("failed to ensure audio-ready stable chunk")
+            _v56_atomic_replace(tmp_chunk, chunk_path)
+            return
+        if chunk_route == "ffmpeg_card_chunk" and _v56_try_write_ffmpeg_card_chunk(renderer, chunk, tmp_chunk, params):
+            if ensure_audio_track:
+                ok, _reason, duration = _v56_validate_video(tmp_chunk)
+                if ok and not _v56_ensure_silent_audio_track(tmp_chunk, duration):
+                    raise RuntimeError("failed to ensure audio-ready stable chunk")
+            _v56_atomic_replace(tmp_chunk, chunk_path)
+            return
+        if chunk_route == "ffmpeg_image_chunk" and _v56_try_write_ffmpeg_image_chunk(renderer, chunk, tmp_chunk, params):
             if ensure_audio_track:
                 ok, _reason, duration = _v56_validate_video(tmp_chunk)
                 if ok and not _v56_ensure_silent_audio_track(tmp_chunk, duration):
@@ -5796,10 +6291,8 @@ def _v56_should_use_stable_renderer(plan: Dict[str, Any], params: Dict[str, Any]
     # "quality" means keep higher visual quality, not force the unsafe monolithic
     # MoviePy timeline. Large projects still need chunked stable rendering.
     total_duration = float(plan.get("total_duration") or 0.0)
-    segments = plan.get("segments", [])
-    threshold_seconds = float(params.get("stable_threshold_seconds", 600))
-    threshold_segments = int(params.get("stable_threshold_segments", 80))
-    return total_duration >= threshold_seconds or len(segments) >= threshold_segments
+    segments = list(plan.get("segments", []) or [])
+    return _should_auto_use_stable_renderer(total_duration, segments, params)
 
 
 class V56StableRenderer:

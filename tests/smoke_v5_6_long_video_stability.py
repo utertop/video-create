@@ -56,9 +56,16 @@ def main() -> None:
             raise AssertionError("missing chunk cache_key")
 
     short_plan = {"total_duration": 120, "segments": segments[:3]}
+    medium_plan = {"total_duration": 360, "segments": segments[:12]}
+    image_heavy_segments = [make_segment(i, 22.5) for i in range(12)]
+    image_heavy_plan = {"total_duration": 270, "segments": image_heavy_segments}
     long_plan = {"total_duration": 1800, "segments": segments}
     if mod._v56_should_use_stable_renderer(short_plan, {"render_mode": "standard"}):
         raise AssertionError("standard mode should not use stable renderer")
+    if not mod._v56_should_use_stable_renderer(medium_plan, {"render_mode": "auto"}):
+        raise AssertionError("6 minute auto plan should now use stable renderer")
+    if not mod._v56_should_use_stable_renderer(image_heavy_plan, {"render_mode": "auto"}):
+        raise AssertionError("image-heavy 4.5 minute auto plan should use stable renderer")
     if not mod._v56_should_use_stable_renderer(long_plan, {"render_mode": "auto"}):
         raise AssertionError("long auto plan should use stable renderer")
     if not mod._v56_should_use_stable_renderer(short_plan, {"render_mode": "long_stable"}):

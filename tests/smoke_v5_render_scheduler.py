@@ -132,12 +132,143 @@ def test_renderer_applies_runtime_render_routes() -> None:
     assert counts.get("video_motion_fit") == 1
 
     chunk_groups = engine._v56_build_chunk_groups(plan["segments"], 30, {"performance_mode": "balanced"})
-    assert chunk_groups[0]["runtime_chunk_route"] == "moviepy_chunk"
-    assert chunk_groups[0]["runtime_chunk_route_reason"] == "contains_timeline_or_image_segments"
+    assert [group["runtime_chunk_route"] for group in chunk_groups] == [
+        "ffmpeg_image_chunk",
+        "ffmpeg_direct_chunk",
+        "moviepy_chunk",
+    ]
+    assert chunk_groups[2]["runtime_chunk_route_reason"] == "contains_video_timeline_segments"
 
     direct_only_groups = engine._v56_build_chunk_groups([plan["segments"][1]], 30, {"performance_mode": "balanced"})
     assert direct_only_groups[0]["runtime_chunk_route"] == "ffmpeg_direct_chunk"
     assert direct_only_groups[0]["runtime_chunk_route_reason"] == "all_segments_direct_chunk_safe"
+
+    image_only_groups = engine._v56_build_chunk_groups([plan["segments"][0]], 30, {"performance_mode": "balanced"})
+    assert image_only_groups[0]["runtime_chunk_route"] == "ffmpeg_image_chunk"
+    assert image_only_groups[0]["runtime_chunk_route_reason"] == "all_segments_ffmpeg_image_chunk_safe"
+
+
+def test_standard_visual_chunk_groups_prefer_ffmpeg_for_safe_image_units() -> None:
+    root = Path("tests/tmp_vcs_standard_visual_ffmpeg_image_chunk")
+    if root.exists():
+        shutil.rmtree(root)
+    root.mkdir(parents=True)
+
+    first = root / "first.jpg"
+    second = root / "second.jpg"
+    engine.Image.new("RGB", (960, 540), (82, 116, 164)).save(first, quality=92)
+    engine.Image.new("RGB", (960, 540), (148, 92, 74)).save(second, quality=92)
+
+    plan = {
+        "total_duration": 4.0,
+        "render_settings": {
+            "fps": 12,
+            "aspect_ratio": "16:9",
+            "edit_strategy": "fast_assembly",
+            "performance_mode": "balanced",
+            "render_mode": "standard",
+        },
+        "segments": [
+            {
+                "segment_id": "seg_img_1",
+                "type": "image",
+                "source_path": str(first),
+                "duration": 2.0,
+                "start_time": 0.0,
+                "end_time": 2.0,
+                "text": None,
+                "transition_config": {"type": "cut", "duration": 0},
+                "motion_config": {"type": "gentle_push"},
+            },
+            {
+                "segment_id": "seg_img_2",
+                "type": "image",
+                "source_path": str(second),
+                "duration": 2.0,
+                "start_time": 2.0,
+                "end_time": 4.0,
+                "text": None,
+                "transition_config": {"type": "cut", "duration": 0},
+                "motion_config": {"type": "slow_push"},
+            },
+        ],
+    }
+
+    renderer = engine.Renderer(
+        plan,
+        str(root / "output.mp4"),
+        {"fps": 12, "quality": "draft", "render_mode": "standard", "performance_mode": "balanced"},
+    )
+    groups = renderer._build_standard_visual_chunk_groups()
+
+    assert groups
+    assert groups[0]["runtime_chunk_route"] == "ffmpeg_image_chunk"
+    assert groups[0]["runtime_chunk_route_reason"] == "all_segments_ffmpeg_image_chunk_safe"
+
+
+def test_standard_visual_chunk_groups_prefer_ffmpeg_for_static_card_units() -> None:
+    root = Path("tests/tmp_vcs_standard_visual_ffmpeg_card_chunk")
+    if root.exists():
+        shutil.rmtree(root)
+    root.mkdir(parents=True)
+
+    background = root / "bg.jpg"
+    engine.Image.new("RGB", (960, 540), (78, 110, 150)).save(background, quality=92)
+
+    plan = {
+        "total_duration": 2.4,
+        "render_settings": {
+            "fps": 12,
+            "aspect_ratio": "16:9",
+            "edit_strategy": "fast_assembly",
+            "performance_mode": "balanced",
+            "render_mode": "standard",
+        },
+        "segments": [
+            {
+                "segment_id": "seg_title_1",
+                "type": "title",
+                "duration": 1.2,
+                "text": "Static Title",
+                "subtitle": "Card unit",
+                "start_time": 0.0,
+                "end_time": 1.2,
+                "transition_config": {"type": "cut", "duration": 0},
+                "title_style": {"preset": "cinematic_bold", "motion": "static_hold"},
+            },
+            {
+                "segment_id": "seg_end_1",
+                "type": "end",
+                "duration": 1.2,
+                "text": "Static End",
+                "subtitle": "Card unit",
+                "start_time": 1.2,
+                "end_time": 2.4,
+                "transition_config": {"type": "cut", "duration": 0},
+                "title_style": {"preset": "cinematic_bold", "motion": "static_hold"},
+            },
+        ],
+    }
+
+    renderer = engine.Renderer(
+        plan,
+        str(root / "output.mp4"),
+        {
+            "fps": 12,
+            "quality": "draft",
+            "render_mode": "standard",
+            "performance_mode": "balanced",
+            "title_background_path": str(background),
+            "end_background_path": str(background),
+            "title_style": {"preset": "cinematic_bold", "motion": "static_hold"},
+            "end_title_style": {"preset": "cinematic_bold", "motion": "static_hold"},
+        },
+    )
+    groups = renderer._build_standard_visual_chunk_groups()
+
+    assert groups
+    assert groups[0]["runtime_chunk_route"] == "ffmpeg_card_chunk"
+    assert groups[0]["runtime_chunk_route_reason"] == "all_segments_ffmpeg_card_chunk_safe"
 
 
 def test_stable_chunk_cache_key_tracks_source_file_changes() -> None:

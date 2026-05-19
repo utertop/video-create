@@ -10,6 +10,60 @@ import imageio_ffmpeg
 import video_engine_v5 as engine
 
 
+def test_encoder_selection_prefers_hardware_for_long_stable_exports() -> None:
+    original = engine.detect_ffmpeg_hardware_encoders
+    engine.detect_ffmpeg_hardware_encoders = lambda: ["h264_nvenc", "h264_qsv"]
+    try:
+        encoder, args = engine.select_ffmpeg_video_encoder(
+            {
+                "render_mode": "long_stable",
+                "performance_mode": "stable",
+                "total_duration": 900,
+                "segment_count": 120,
+            }
+        )
+    finally:
+        engine.detect_ffmpeg_hardware_encoders = original
+
+    assert encoder == "h264_nvenc"
+    assert "-preset" in args
+
+
+def test_encoder_selection_keeps_preview_on_cpu() -> None:
+    original = engine.detect_ffmpeg_hardware_encoders
+    engine.detect_ffmpeg_hardware_encoders = lambda: ["h264_nvenc"]
+    try:
+        encoder, args = engine.select_ffmpeg_video_encoder(
+            {
+                "preview": True,
+                "render_mode": "long_stable",
+                "performance_mode": "stable",
+            }
+        )
+    finally:
+        engine.detect_ffmpeg_hardware_encoders = original
+
+    assert encoder == "libx264"
+    assert args == ["-preset", "veryfast"]
+
+
+def test_encoder_selection_respects_explicit_cpu_override() -> None:
+    original = engine.detect_ffmpeg_hardware_encoders
+    engine.detect_ffmpeg_hardware_encoders = lambda: ["h264_nvenc"]
+    try:
+        encoder, args = engine.select_ffmpeg_video_encoder(
+            {
+                "render_mode": "long_stable",
+                "hardware_encoder": "cpu",
+            }
+        )
+    finally:
+        engine.detect_ffmpeg_hardware_encoders = original
+
+    assert encoder == "libx264"
+    assert args == ["-preset", "veryfast"]
+
+
 def make_video(path: Path) -> None:
     ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
     subprocess.check_call(
@@ -101,6 +155,147 @@ def test_ffmpeg_priority_fits_simple_video_segments() -> None:
     assert ok, reason
     fitted = list((root / ".video_create_project" / "render_cache" / "fitted_videos").glob("*.mp4"))
     assert fitted, "expected FFmpeg fitted video cache"
+
+
+def test_ffmpeg_image_chunk_renders_safe_image_only_stable_chunk() -> None:
+    root = Path("tests/tmp_vcs_ffmpeg_image_chunk")
+    if root.exists():
+        shutil.rmtree(root)
+    root.mkdir(parents=True)
+
+    first = root / "first.jpg"
+    second = root / "second.jpg"
+    engine.Image.new("RGB", (960, 540), (84, 112, 166)).save(first, quality=92)
+    engine.Image.new("RGB", (960, 540), (152, 94, 70)).save(second, quality=92)
+
+    plan = {
+        "render_settings": {
+            "fps": 12,
+            "aspect_ratio": "16:9",
+            "edit_strategy": "long_stable",
+            "performance_mode": "stable",
+            "render_mode": "long_stable",
+        },
+        "total_duration": 2.0,
+        "segments": [
+            {
+                "segment_id": "seg_img_0001",
+                "type": "image",
+                "source_path": str(first),
+                "duration": 1.0,
+                "start_time": 0.0,
+                "end_time": 1.0,
+                "text": None,
+                "transition": "cut",
+                "transition_config": {"type": "cut", "duration": 0},
+                "motion_config": {"type": "gentle_push"},
+            },
+            {
+                "segment_id": "seg_img_0002",
+                "type": "image",
+                "source_path": str(second),
+                "duration": 1.0,
+                "start_time": 1.0,
+                "end_time": 2.0,
+                "text": None,
+                "transition": "cut",
+                "transition_config": {"type": "cut", "duration": 0},
+                "motion_config": {"type": "slow_push"},
+            },
+        ],
+    }
+    output = root / "output.mp4"
+    params = {"fps": 12, "quality": "draft", "render_mode": "long_stable", "performance_mode": "stable"}
+
+    groups = engine._v56_build_chunk_groups(plan["segments"], 30, params)
+    assert groups
+    assert groups[0]["runtime_chunk_route"] == "ffmpeg_image_chunk"
+
+    engine.V56StableRenderer(plan, str(output), params).render()
+    ok, reason, _duration = engine._v56_validate_video(output, min_size=512)
+    assert ok, reason
+
+    report_path = root / ".video_create_project" / "build_report.json"
+    report = engine.read_json(str(report_path))
+    route_counts = ((report.get("chunk_scheduler") or {}).get("route_counts") or {})
+    assert route_counts.get("ffmpeg_image_chunk") == 1
+
+    rendered = list((root / ".video_create_project" / "render_cache" / "photo_segments_ffmpeg").glob("*.mp4"))
+    assert rendered, "expected FFmpeg image segment cache"
+
+
+def test_ffmpeg_card_chunk_renders_safe_static_cards() -> None:
+    root = Path("tests/tmp_vcs_ffmpeg_card_chunk")
+    if root.exists():
+        shutil.rmtree(root)
+    root.mkdir(parents=True)
+
+    background = root / "background.jpg"
+    engine.Image.new("RGB", (960, 540), (74, 108, 144)).save(background, quality=92)
+
+    plan = {
+        "render_settings": {
+            "fps": 12,
+            "aspect_ratio": "16:9",
+            "edit_strategy": "long_stable",
+            "performance_mode": "stable",
+            "render_mode": "long_stable",
+        },
+        "total_duration": 2.2,
+        "segments": [
+            {
+                "segment_id": "seg_title_0001",
+                "type": "title",
+                "duration": 1.1,
+                "text": "Static Title",
+                "subtitle": "FFmpeg card chunk",
+                "start_time": 0.0,
+                "end_time": 1.1,
+                "transition": "cut",
+                "transition_config": {"type": "cut", "duration": 0},
+                "title_style": {"preset": "cinematic_bold", "motion": "static_hold"},
+            },
+            {
+                "segment_id": "seg_end_0001",
+                "type": "end",
+                "duration": 1.1,
+                "text": "Static End",
+                "subtitle": "FFmpeg card chunk",
+                "start_time": 1.1,
+                "end_time": 2.2,
+                "transition": "cut",
+                "transition_config": {"type": "cut", "duration": 0},
+                "title_style": {"preset": "cinematic_bold", "motion": "static_hold"},
+            },
+        ],
+    }
+    output = root / "output.mp4"
+    params = {
+        "fps": 12,
+        "quality": "draft",
+        "render_mode": "long_stable",
+        "performance_mode": "stable",
+        "title_background_path": str(background),
+        "end_background_path": str(background),
+        "title_style": {"preset": "cinematic_bold", "motion": "static_hold"},
+        "end_title_style": {"preset": "cinematic_bold", "motion": "static_hold"},
+    }
+
+    groups = engine._v56_build_chunk_groups(plan["segments"], 30, params)
+    assert groups
+    assert groups[0]["runtime_chunk_route"] == "ffmpeg_card_chunk"
+
+    engine.V56StableRenderer(plan, str(output), params).render()
+    ok, reason, _duration = engine._v56_validate_video(output, min_size=512)
+    assert ok, reason
+
+    report_path = root / ".video_create_project" / "build_report.json"
+    report = engine.read_json(str(report_path))
+    route_counts = ((report.get("chunk_scheduler") or {}).get("route_counts") or {})
+    assert route_counts.get("ffmpeg_card_chunk") == 1
+
+    rendered = list((root / ".video_create_project" / "render_cache" / "card_segments").glob("*.mp4"))
+    assert rendered, "expected static card segment cache"
 
 
 def test_ffmpeg_video_segment_cache_stats() -> None:
@@ -501,6 +696,9 @@ def test_ffmpeg_motion_cache_handles_simple_video_motion() -> None:
 
 
 if __name__ == "__main__":
+    test_encoder_selection_prefers_hardware_for_long_stable_exports()
+    test_encoder_selection_keeps_preview_on_cpu()
+    test_encoder_selection_respects_explicit_cpu_override()
     test_ffmpeg_priority_fits_simple_video_segments()
     test_ffmpeg_video_segment_cache_stats()
     test_ffmpeg_priority_writes_lightweight_chunk_directly()
