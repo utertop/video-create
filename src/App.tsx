@@ -72,10 +72,21 @@ import { PerformanceModeControl, PerformanceRecommendation, performanceModeLabel
 import { normalizeTitleStyle, titleTemplateLabel, TitleStyleLab } from "./components/TitleStylePreview";
 import { StudioState, useStudio } from "./store/studio";
 import { BackgroundPickerTarget, PhotoSegmentCacheStats, ProxyMediaStats, VideoEvent, VideoSegmentCacheStats } from "./types/studio";
-import { applyStructuredEvent, detectPhase, formatProgressLine, parseProgress, parseVideoEvent } from "./lib/progress";
+import {
+  applyStructuredEvent,
+  derivePhaseFromStructuredEvent,
+  deriveProgressFromLogLine,
+  deriveStructuredProgress,
+  extractActiveSegmentIndexFromText,
+  failureMessageFromStructuredEvent,
+  formatProgressLine,
+  isStructuredFailureEvent,
+  parseVideoEvent,
+} from "./lib/progress";
 import "./v5-background.css";
 
 type RenderQueueStatus = "queued" | "running" | "done" | "failed" | "cancelled";
+type ProgressTone = "idle" | "running" | "done" | "failed" | "cancelled";
 
 interface RenderQueueItem {
   id: string;
@@ -97,24 +108,38 @@ interface RenderQueueItem {
 
 const ACTIVE_RENDER_QUEUE_STATUSES = new Set<RenderQueueStatus>(["queued", "running"]);
 
-function ProgressBar({ percent, phase, isDryRun }: { percent: number; phase: string; isDryRun: boolean }) {
+function ProgressBar({
+  percent,
+  phase,
+  isDryRun,
+  status,
+  detail,
+}: {
+  percent: number;
+  phase: string;
+  isDryRun: boolean;
+  status: ProgressTone;
+  detail?: string | null;
+}) {
+  const toneClass = status === "failed" ? "failed" : status === "cancelled" ? "cancelled" : status === "done" ? "done" : isDryRun ? "dry-run" : "rendering";
   return (
-    <div className="progress-container">
+    <div className={`progress-container progress-container-${status}`}>
       <div className="progress-header">
         <div className="phase-info">
-          <div className={`phase-dot ${isDryRun ? 'dry-run' : 'rendering'}`} />
+          <div className={`phase-dot ${toneClass}`} />
           <span>{phase}</span>
         </div>
         <span className="percent-number">{percent}%</span>
       </div>
       <div className="progress-track">
         <div 
-          className="progress-fill" 
+          className={`progress-fill ${toneClass}`}
           style={{ width: `${percent}%` }}
         >
           <div className="progress-glow" />
         </div>
       </div>
+      {detail ? <div className={`progress-detail progress-detail-${status}`}>{detail}</div> : null}
     </div>
   );
 }
@@ -129,6 +154,9 @@ export function App() {
   const [isPlanningWorkflow, setIsPlanningWorkflow] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [progress, setProgress] = useState<number | null>(null);
+  const [progressTone, setProgressTone] = useState<ProgressTone>("idle");
+  const [progressDetail, setProgressDetail] = useState<string | null>(null);
+  const [activeSegmentIndex, setActiveSegmentIndex] = useState<number | null>(null);
   const [phase, setPhase] = useState("就绪");
   const [toast, setToast] = useState<string | null>(null);
   const [highlightOutput, setHighlightOutput] = useState(false);
@@ -153,6 +181,9 @@ export function App() {
     setResult(null);
     setLogs([]);
     setProgress(null);
+    setProgressTone("idle");
+    setProgressDetail(null);
+    setActiveSegmentIndex(null);
     setPhase("就绪");
     setIsPlanningWorkflow(false);
     setHighlightOutput(false);
@@ -222,7 +253,7 @@ export function App() {
           if (item.status !== "running") return item;
           return {
             ...item,
-            progress: typeof event.percent === "number" ? Math.max(0, Math.min(100, event.percent)) : item.progress,
+            progress: deriveStructuredProgress(event, item.progress) ?? item.progress,
             message: event.message || item.message,
           };
         }),
@@ -236,22 +267,48 @@ export function App() {
       const structured = parseVideoEvent(raw);
       if (structured) {
         syncRenderQueueEvent(structured);
-        applyStructuredEvent(structured, setPhase, setProgress, setLogs, setMaterials, setPhotoSegmentCache, setVideoSegmentCache, setProxyMedia);
+        const nextPhase = derivePhaseFromStructuredEvent(structured);
+        if (nextPhase) setPhase(nextPhase);
+
+        const nextSegmentIndex = extractActiveSegmentIndexFromText(structured.message || "");
+        if (nextSegmentIndex !== null) {
+          setActiveSegmentIndex(nextSegmentIndex);
+        } else if (structured.type === "result" || structured.type === "error" || structured.status === "failed" || structured.status === "cancelled") {
+          setActiveSegmentIndex(null);
+        }
+
+        setProgress((prev) => deriveStructuredProgress(structured, prev));
+
+        if (structured.type === "render_queue" && structured.status) {
+          if (structured.status === "queued" || structured.status === "running") {
+            setProgressTone("running");
+            setProgressDetail(null);
+          } else if (structured.status === "done") {
+            setProgressTone("done");
+            setProgressDetail(null);
+          } else if (structured.status === "cancelled") {
+            setProgressTone("cancelled");
+            setProgressDetail(structured.message || "Render cancelled.");
+          } else if (structured.status === "failed") {
+            setProgressTone("failed");
+            setProgressDetail(structured.message || "Render failed. Check logs for details.");
+          }
+        } else if (structured.type === "result") {
+          setProgressTone("done");
+          setProgressDetail(null);
+        } else if (isStructuredFailureEvent(structured)) {
+          setProgressTone("failed");
+          setProgressDetail(failureMessageFromStructuredEvent(structured));
+        }
+
+        applyStructuredEvent(structured, setLogs, setMaterials, setPhotoSegmentCache, setVideoSegmentCache, setProxyMedia);
         return;
       }
 
-      const prog = parseProgress(raw);
-      if (prog) setProgress(Math.round((prog.current / prog.total) * 90));
+      const nextSegmentIndex = extractActiveSegmentIndexFromText(raw);
+      if (nextSegmentIndex !== null) setActiveSegmentIndex(nextSegmentIndex);
 
-      const newPhase = detectPhase(raw);
-      if (newPhase) {
-        setPhase(newPhase);
-        if (newPhase === "合成视频") setProgress(92);
-        if (newPhase === "生成封面") setProgress(95);
-        if (newPhase === "生成报告") setProgress(98);
-        if (newPhase === "完成") setProgress(100);
-      }
-
+      setProgress((prev) => deriveProgressFromLogLine(raw, prev));
       const formattedLine = formatProgressLine(raw);
       if (!formattedLine) return;
 
@@ -380,6 +437,8 @@ export function App() {
     setIsPreparingBackgroundLibrary(true);
     setPhase("正在准备素材库...");
     setProgress(10);
+    setProgressTone("running");
+    setProgressDetail(null);
     try {
       const library = await scanV5(state.inputFolder, v5ProjectDir, state.recursive);
       state.patch({ v5Library: library });
@@ -505,6 +564,9 @@ export function App() {
       setLogs([]);
       setProgress(0);
       setPhase("V5 render queued");
+      setProgressTone("running");
+      setProgressDetail(null);
+      setActiveSegmentIndex(null);
       setIsCancelling(false);
     }
 
@@ -555,14 +617,20 @@ export function App() {
         outputDir: job.outputDir,
       });
       setProgress(100);
+      setProgressTone("done");
       setPhase("Render complete");
+      setProgressTone("done");
+      setProgressDetail(null);
+      setActiveSegmentIndex(null);
     } catch (err: any) {
       const message = String(err);
       let shouldShowFailure = true;
+      let cancelled = false;
       setRenderQueue((prev) =>
         prev.map((item) => {
           if (item.id !== job.id) return item;
           const wasCancelled = item.status === "cancelled" || message.toLowerCase().includes("cancel");
+          cancelled = wasCancelled;
           shouldShowFailure = !wasCancelled;
           return {
             ...item,
@@ -579,6 +647,10 @@ export function App() {
           commandPreview: job.commandPreview || v5CommandPreview,
         });
       }
+      setProgressTone(cancelled ? "cancelled" : "failed");
+      setProgressDetail(cancelled ? "渲染已取消。" : message);
+      setPhase(cancelled ? "已取消" : "渲染失败");
+      setActiveSegmentIndex(null);
     }
   }
 
@@ -729,6 +801,8 @@ export function App() {
       setToast("故事蓝图已生成，请开始编排您的旅行故事！");
     } catch (error) {
       console.error("V5 Workflow Error:", error);
+      setProgressTone("failed");
+      setProgressDetail(String(error));
       setPhase("智能编排失败");
       setToast(`扫描失败: ${error}`);
     } finally {
@@ -1142,7 +1216,13 @@ export function App() {
                   </button>
                   {isPlanningWorkflow && (
                     <div className="hero-planning-progress" role="status" aria-live="polite">
-                      <ProgressBar isDryRun={false} percent={progress || 0} phase={phase} />
+                      <ProgressBar
+                        isDryRun={false}
+                        percent={progress || 0}
+                        phase={phase}
+                        status="running"
+                        detail={progressDetail}
+                      />
                       <p className="hero-progress-hint">
                         素材较多时可能需要几十秒到几分钟，正在扫描素材并生成故事蓝图。
                       </p>
@@ -1156,7 +1236,16 @@ export function App() {
                     blueprint={state.v5Blueprint!} 
                     library={state.v5Library!}
                     chapterBackgroundMode={state.chapterBackgroundMode}
-                    onPickSectionBackground={(section) => ensureBackgroundLibrary({ kind: "section", sectionId: section.section_id, sectionTitle: section.title })}
+                    onPickSectionBackground={(section) =>
+                      ensureBackgroundLibrary({
+                        kind: "section",
+                        sectionId: section.section_id,
+                        sectionTitle: section.title,
+                        assetIds: (section.asset_refs || [])
+                          .filter((ref) => ref.enabled !== false)
+                          .map((ref) => ref.asset_id),
+                      })
+                    }
                     onUpdate={(bp) => state.patch({ v5Blueprint: bp })}
                   />
                   <div className="blueprint-actions">
@@ -1168,9 +1257,15 @@ export function App() {
                <div className="render-stage-container">
                   <SectionTitle icon={<FileVideo size={18} />} title="渲染执行" />
                   
-                  {(isRendering || logs.length > 0) && (
+                  {(isRendering || logs.length > 0 || progress !== null || Boolean(progressDetail)) && (
                     <div className="render-progress-area">
-                      <ProgressBar isDryRun={state.isDryRun} percent={progress || 0} phase={phase} />
+                      <ProgressBar
+                        isDryRun={state.isDryRun}
+                        percent={progress || 0}
+                        phase={phase}
+                        status={progressTone}
+                        detail={progressDetail}
+                      />
                     </div>
                   )}
 
@@ -1212,9 +1307,7 @@ export function App() {
                        </div>
                        <div className="segments-timeline">
                           {state.v5RenderPlan!.segments.map((seg: V5RenderSegment, idx: number) => {
-                            const isCurrent = isRendering && progress !== null && 
-                              (progress / 100 * state.v5RenderPlan!.total_duration >= seg.start_time) &&
-                              (progress / 100 * state.v5RenderPlan!.total_duration < seg.end_time);
+                            const isCurrent = isRendering && activeSegmentIndex !== null && activeSegmentIndex === idx;
                             
                             return (
                               <div key={seg.segment_id} className={`segment-strip ${seg.type}${isCurrent ? ' active-rendering' : ''}`}>

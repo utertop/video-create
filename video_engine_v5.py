@@ -35,6 +35,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from render_backends import (
+    BackendDecision,
+    BackendExecutionResult,
+    build_backend_report_payload as backend_report_payload,
+    coerce_backend_decision,
+    coerce_backend_execution_result,
+    resolve_render_backend as backend_selector_resolve_render_backend,
+    run_ffmpeg_stable_backend,
+    run_legacy_moviepy_backend,
+)
+
 
 # V5.3.2 early help guard
 # Keep `python video_engine_v5.py --help` available even before optional media
@@ -3935,6 +3946,12 @@ class Renderer:
         self.plan = plan
         self.output_path = Path(output_path)
         self.params = params
+        self.backend_decision = coerce_backend_decision(
+            self.params.get("_backend_decision") or _v56_resolve_render_backend_decision(self.plan, self.params)
+        )
+        self.backend_execution = coerce_backend_execution_result(
+            self.params.get("_backend_execution") or self.backend_decision
+        )
         settings = plan.get("render_settings", {})
         aspect_ratio = params.get("aspect_ratio") or settings.get("aspect_ratio") or "16:9"
         if params.get("preview_height"):
@@ -5284,6 +5301,8 @@ class Renderer:
                     "status": "done",
                     "render_mode": "v5_standard",
                     "output_path": str(self.output_path),
+                    "selected_backend": self.backend_execution.selected_backend_name,
+                    "backend": _v56_backend_report_payload(self.backend_execution),
                     "output_size_bytes": self.output_path.stat().st_size if self.output_path.exists() else None,
                     "duration_seconds": float(getattr(final, "duration", 0.0) or 0.0),
                     "photo_segment_cache": self._photo_segment_cache_summary(),
@@ -5335,6 +5354,8 @@ class Renderer:
                     "status": "done",
                     "render_mode": "v5_standard",
                     "output_path": str(self.output_path),
+                    "selected_backend": self.backend_execution.selected_backend_name,
+                    "backend": _v56_backend_report_payload(self.backend_execution),
                     "output_size_bytes": self.output_path.stat().st_size if self.output_path.exists() else None,
                     "duration_seconds": final_duration,
                     "visual_base_cache": dict(self.visual_base_cache_stats),
@@ -7354,6 +7375,9 @@ def _v56_render_diagnostics(
             source_paths.append(source_path)
     return {
         "strategy_version": "render_diagnostics_v1",
+        "backend": _v56_backend_report_payload(
+            getattr(renderer, "backend_execution", None) or getattr(renderer, "backend_decision", None)
+        ),
         "chunk_reuse": {
             "cached": cached,
             "rendered": rendered,
@@ -7498,11 +7522,33 @@ def _v56_should_use_stable_renderer(plan: Dict[str, Any], params: Dict[str, Any]
     return _should_auto_use_stable_renderer(total_duration, segments, params)
 
 
+def _v56_resolve_render_backend_decision(plan: Dict[str, Any], params: Dict[str, Any]) -> BackendDecision:
+    return backend_selector_resolve_render_backend(plan, params, _v56_should_use_stable_renderer)
+
+
+def _v56_resolve_render_backend(plan: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+    return _v56_resolve_render_backend_decision(plan, params).to_dict()
+
+
+def _v56_backend_report_payload(
+    decision: Optional[Any],
+    fallback_used: Optional[str] = None,
+    fallback_reason: Optional[str] = None,
+) -> Dict[str, Any]:
+    return backend_report_payload(decision, fallback_used=fallback_used, fallback_reason=fallback_reason)
+
+
 class V56StableRenderer:
     def __init__(self, plan: Dict[str, Any], output: str, params: Dict[str, Any], plan_path: Optional[str] = None):
         self.plan = plan
         self.output = Path(output)
         self.params = params or {}
+        self.backend_decision = coerce_backend_decision(
+            self.params.get("_backend_decision") or _v56_resolve_render_backend_decision(self.plan, self.params)
+        )
+        self.backend_execution = coerce_backend_execution_result(
+            self.params.get("_backend_execution") or self.backend_decision
+        )
         self.plan_path = Path(plan_path).resolve() if plan_path else None
 
         if self.plan_path:
@@ -7637,6 +7683,8 @@ class V56StableRenderer:
                     "failed_chunk": chunk_name,
                     "error": str(exc),
                     "output_path": str(final_output),
+                    "selected_backend": self.backend_execution.selected_backend_name,
+                    "backend": _v56_backend_report_payload(self.backend_execution),
                     "chunk_dir": str(self.chunk_dir),
                     "chunks": chunk_reports,
                     "photo_segment_cache": renderer._photo_segment_cache_summary(),
@@ -7699,6 +7747,8 @@ class V56StableRenderer:
             "status": "done",
             "render_mode": "v5.6_long_video_stable",
             "output_path": str(final_output),
+            "selected_backend": self.backend_execution.selected_backend_name,
+            "backend": _v56_backend_report_payload(self.backend_execution),
             "output_size_bytes": final_output.stat().st_size if final_output.exists() else None,
             "duration_seconds": final_duration,
             "elapsed_seconds": elapsed,
@@ -7724,24 +7774,46 @@ class V56StableRenderer:
         emit_event("phase", phase="done", message="长视频稳定渲染完成", percent=100)
 
 
+def _v56_run_render_backend(
+    decision: Any,
+    plan: Dict[str, Any],
+    output: str,
+    params: Dict[str, Any],
+    plan_path: Optional[str] = None,
+) -> BackendExecutionResult:
+    resolved_decision = coerce_backend_decision(decision)
+    initial_execution = BackendExecutionResult.from_decision(resolved_decision)
+    backend_name = resolved_decision.backend_name
+    effective_params = dict(params or {})
+    effective_params["_backend_decision"] = resolved_decision.to_dict()
+    effective_params["_backend_execution"] = initial_execution.to_dict()
+
+    if backend_name == "ffmpeg_stable_backend":
+        return run_ffmpeg_stable_backend(
+            sys.modules[__name__],
+            resolved_decision,
+            plan,
+            output,
+            effective_params,
+            plan_path=plan_path,
+        )
+
+    if backend_name == "legacy_moviepy_backend":
+        return run_legacy_moviepy_backend(
+            sys.modules[__name__],
+            resolved_decision,
+            plan,
+            output,
+            effective_params,
+        )
+
+    raise RuntimeError(f"Unknown render backend: {backend_name}")
+
+
 def render_with_v56_stability(plan_path: str, output: str, params: Dict[str, Any]) -> None:
     plan = read_json(plan_path)
-    if _v56_should_use_stable_renderer(plan, params):
-        V56StableRenderer(plan, output, params, plan_path=plan_path).render()
-    else:
-        final_output = Path(output)
-        tmp_output = final_output.with_suffix(".rendering.tmp.mp4")
-        if tmp_output.exists():
-            try:
-                tmp_output.unlink()
-            except Exception:
-                pass
-
-        Renderer(plan, str(tmp_output), params).render()
-        ok, reason, _duration = _v56_validate_video(tmp_output)
-        if not ok:
-            raise RuntimeError(f"标准渲染结果校验失败，不覆盖旧文件: {reason}")
-        _v56_atomic_replace(tmp_output, final_output)
+    decision = _v56_resolve_render_backend_decision(plan, params)
+    _v56_run_render_backend(decision, plan, output, params, plan_path=plan_path)
 
 
 def build_low_res_preview_plan(

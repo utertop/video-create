@@ -17,6 +17,7 @@ export interface VideoEvent {
   height?: number;
   duration?: number;
   thumbnail?: string;
+  thumbnail_path?: string;
   error?: string;
   chapter?: string;
   mtime?: number;
@@ -66,4 +67,4 @@ export interface ProxyMediaStats {
 export type BackgroundPickerTarget =
   | { kind: "title" }
   | { kind: "end" }
-  | { kind: "section"; sectionId: string; sectionTitle: string };
+  | { kind: "section"; sectionId: string; sectionTitle: string; assetIds?: string[] };

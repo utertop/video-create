@@ -155,6 +155,9 @@ def test_ffmpeg_priority_fits_simple_video_segments() -> None:
     assert ok, reason
     fitted = list((root / ".video_create_project" / "render_cache" / "fitted_videos").glob("*.mp4"))
     assert fitted, "expected FFmpeg fitted video cache"
+    report = engine.read_json(str(root / ".video_create_project" / "build_report.json"))
+    assert report["selected_backend"] == "legacy_moviepy_backend"
+    assert report["backend"]["selected_backend"] == "legacy_moviepy_backend"
 
 
 def test_ffmpeg_image_chunk_renders_safe_image_only_stable_chunk() -> None:
@@ -217,6 +220,8 @@ def test_ffmpeg_image_chunk_renders_safe_image_only_stable_chunk() -> None:
 
     report_path = root / ".video_create_project" / "build_report.json"
     report = engine.read_json(str(report_path))
+    assert report["selected_backend"] == "ffmpeg_stable_backend"
+    assert report["backend"]["selected_backend"] == "ffmpeg_stable_backend"
     route_counts = ((report.get("chunk_scheduler") or {}).get("route_counts") or {})
     assert route_counts.get("ffmpeg_image_chunk") == 1
 
@@ -291,6 +296,7 @@ def test_ffmpeg_card_chunk_renders_safe_static_cards() -> None:
 
     report_path = root / ".video_create_project" / "build_report.json"
     report = engine.read_json(str(report_path))
+    assert report["selected_backend"] == "ffmpeg_stable_backend"
     route_counts = ((report.get("chunk_scheduler") or {}).get("route_counts") or {})
     assert route_counts.get("ffmpeg_card_chunk") == 1
 
@@ -366,6 +372,7 @@ def test_ffmpeg_image_chunk_renders_safe_image_overlay_stable_chunk() -> None:
 
     report_path = root / ".video_create_project" / "build_report.json"
     report = engine.read_json(str(report_path))
+    assert report["selected_backend"] == "ffmpeg_stable_backend"
     route_counts = ((report.get("chunk_scheduler") or {}).get("route_counts") or {})
     assert route_counts.get("ffmpeg_image_chunk") == 1
 
@@ -443,6 +450,7 @@ def test_ffmpeg_fitted_video_chunk_renders_safe_video_motion_and_overlay() -> No
 
     report_path = root / ".video_create_project" / "build_report.json"
     report = engine.read_json(str(report_path))
+    assert report["selected_backend"] == "ffmpeg_stable_backend"
     route_counts = ((report.get("chunk_scheduler") or {}).get("route_counts") or {})
     assert route_counts.get("ffmpeg_fitted_video_chunk") == 1
 

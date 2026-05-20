@@ -155,6 +155,89 @@ def test_renderer_applies_runtime_render_routes() -> None:
     assert motion_only_groups[0]["runtime_chunk_route_reason"] == "all_segments_ffmpeg_fitted_video_safe"
 
 
+def test_render_backend_selector_prefers_stable_for_long_video_exports() -> None:
+    plan = {
+        "total_duration": 720.0,
+        "render_settings": {
+            "fps": 12,
+            "aspect_ratio": "16:9",
+            "performance_mode": "balanced",
+            "render_mode": "auto",
+        },
+        "segments": [{"segment_id": f"seg_{idx:03d}", "type": "image", "duration": 8.0} for idx in range(60)],
+    }
+
+    decision = engine._v56_resolve_render_backend(plan, {"performance_mode": "balanced", "render_mode": "auto"})
+
+    assert decision["backend_name"] == "ffmpeg_stable_backend"
+    assert decision["backend_family"] == "long_video_stable"
+    assert decision["reason"] == "stable_renderer_selected"
+    assert "legacy_moviepy_backend" in (decision.get("fallback_chain") or [])
+
+
+def test_render_backend_selector_returns_formal_decision_type() -> None:
+    plan = {
+        "total_duration": 720.0,
+        "render_settings": {
+            "fps": 12,
+            "aspect_ratio": "16:9",
+            "performance_mode": "balanced",
+            "render_mode": "auto",
+        },
+        "segments": [{"segment_id": f"seg_{idx:03d}", "type": "image", "duration": 8.0} for idx in range(60)],
+    }
+
+    decision = engine._v56_resolve_render_backend_decision(plan, {"performance_mode": "balanced", "render_mode": "auto"})
+
+    assert isinstance(decision, engine.BackendDecision)
+    assert decision.backend_name == "ffmpeg_stable_backend"
+    assert decision.backend_family == "long_video_stable"
+    assert decision.reason == "stable_renderer_selected"
+    assert decision.to_dict()["backend_name"] == "ffmpeg_stable_backend"
+
+
+def test_backend_execution_result_defaults_to_selected_backend() -> None:
+    decision = engine.BackendDecision(
+        backend_name="ffmpeg_stable_backend",
+        backend_family="long_video_stable",
+        backend_mode="final_render",
+        reason="stable_renderer_selected",
+        fallback_chain=["ffmpeg_stable_backend", "legacy_moviepy_backend"],
+        capability_flags=["stable", "chunked", "ffmpeg", "fallback_moviepy"],
+    )
+
+    execution = engine.BackendExecutionResult.from_decision(decision)
+    payload = engine._v56_backend_report_payload(execution)
+
+    assert isinstance(execution, engine.BackendExecutionResult)
+    assert execution.selected_backend_name == "ffmpeg_stable_backend"
+    assert execution.actual_backend_name == "ffmpeg_stable_backend"
+    assert execution.fallback_applied is False
+    assert payload["selected_backend"] == "ffmpeg_stable_backend"
+    assert payload["actual_backend_name"] == "ffmpeg_stable_backend"
+    assert payload["fallback_used"] is None
+    assert payload["fallback_applied"] is False
+
+
+def test_render_backend_selector_keeps_preview_on_legacy_backend() -> None:
+    plan = {
+        "total_duration": 12.0,
+        "render_settings": {
+            "fps": 12,
+            "aspect_ratio": "16:9",
+            "performance_mode": "balanced",
+            "render_mode": "auto",
+        },
+        "segments": [{"segment_id": "seg_preview", "type": "image", "duration": 2.0}],
+    }
+
+    decision = engine._v56_resolve_render_backend(plan, {"preview": True, "fps": 12})
+
+    assert decision["backend_name"] == "legacy_moviepy_backend"
+    assert decision["backend_mode"] == "preview"
+    assert decision["reason"] == "preview_render_uses_standard_renderer"
+
+
 def test_standard_visual_chunk_groups_prefer_ffmpeg_for_safe_image_units() -> None:
     root = Path("tests/tmp_vcs_standard_visual_ffmpeg_image_chunk")
     if root.exists():
@@ -531,6 +614,10 @@ def test_proxy_media_manifest_is_preferred_for_preview() -> None:
 if __name__ == "__main__":
     test_compile_emits_render_scheduler_hints()
     test_renderer_applies_runtime_render_routes()
+    test_render_backend_selector_prefers_stable_for_long_video_exports()
+    test_render_backend_selector_returns_formal_decision_type()
+    test_backend_execution_result_defaults_to_selected_backend()
+    test_render_backend_selector_keeps_preview_on_legacy_backend()
     test_stable_chunk_cache_key_tracks_source_file_changes()
     test_proxy_media_cache_is_opt_in_and_reportable()
     test_proxy_media_manifest_is_preferred_for_preview()
