@@ -2,6 +2,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Dict, Tuple
 
 import imageio_ffmpeg
 
@@ -217,6 +218,49 @@ def test_backend_execution_result_defaults_to_selected_backend() -> None:
     assert payload["actual_backend_name"] == "ffmpeg_stable_backend"
     assert payload["fallback_used"] is None
     assert payload["fallback_applied"] is False
+
+
+def test_render_diagnostics_expose_route_observability() -> None:
+    plan = {
+        "total_duration": 8.0,
+        "render_settings": {
+            "fps": 12,
+            "aspect_ratio": "16:9",
+            "performance_mode": "balanced",
+            "render_mode": "standard",
+        },
+        "segments": [
+            {
+                "segment_id": "seg_diag_img",
+                "type": "image",
+                "duration": 4.0,
+                "start_time": 0.0,
+                "end_time": 4.0,
+                "motion_config": {"type": "gentle_push"},
+            },
+            {
+                "segment_id": "seg_diag_vid",
+                "type": "video",
+                "duration": 1.0,
+                "start_time": 4.0,
+                "end_time": 5.0,
+                "transition_config": {"type": "cut", "duration": 0},
+                "motion_config": {"type": "none"},
+                "keep_audio": False,
+            },
+        ],
+    }
+    renderer = engine.Renderer(
+        plan,
+        "tests/tmp_vcs_render_diag/output.mp4",
+        {"fps": 12, "quality": "draft", "render_mode": "standard", "performance_mode": "balanced"},
+    )
+    diagnostics = engine._v56_render_diagnostics(renderer, [], [], False, {"total_render_seconds": 1.23})
+
+    assert diagnostics["strategy_version"] == "render_diagnostics_v2"
+    assert diagnostics["routing"]["segments"]["route_counts"]["image_live_compose"] == 1
+    assert diagnostics["routing"]["segments"]["route_counts"]["direct_chunk_candidate"] == 1
+    assert diagnostics["timings"]["total_render_seconds"] == 1.23
 
 
 def test_render_backend_selector_keeps_preview_on_legacy_backend() -> None:
@@ -611,14 +655,233 @@ def test_proxy_media_manifest_is_preferred_for_preview() -> None:
     assert stats["fallback"] == 0
 
 
+def test_stable_render_failure_report_preserves_resume_metadata() -> None:
+    root = Path("tests/tmp_vcs_stable_failure_recovery")
+    if root.exists():
+        shutil.rmtree(root)
+    root.mkdir(parents=True)
+
+    first = root / "first.jpg"
+    second = root / "second.jpg"
+    engine.Image.new("RGB", (960, 540), (84, 112, 166)).save(first, quality=92)
+    engine.Image.new("RGB", (960, 540), (152, 94, 70)).save(second, quality=92)
+
+    plan = {
+        "render_settings": {
+            "fps": 12,
+            "aspect_ratio": "16:9",
+            "edit_strategy": "long_stable",
+            "performance_mode": "stable",
+            "render_mode": "long_stable",
+        },
+        "total_duration": 2.0,
+        "segments": [
+            {
+                "segment_id": "seg_fail_0001",
+                "type": "image",
+                "source_path": str(first),
+                "duration": 1.0,
+                "start_time": 0.0,
+                "end_time": 1.0,
+                "text": None,
+                "transition": "cut",
+                "transition_config": {"type": "cut", "duration": 0},
+                "motion_config": {"type": "gentle_push"},
+            },
+            {
+                "segment_id": "seg_fail_0002",
+                "type": "image",
+                "source_path": str(second),
+                "duration": 1.0,
+                "start_time": 1.0,
+                "end_time": 2.0,
+                "text": None,
+                "transition": "cut",
+                "transition_config": {"type": "cut", "duration": 0},
+                "motion_config": {"type": "slow_push"},
+            },
+        ],
+    }
+    output = root / "output.mp4"
+    params = {"fps": 12, "quality": "draft", "render_mode": "long_stable", "performance_mode": "stable"}
+
+    original = engine._v56_write_chunk_video
+
+    def failing_once(renderer, chunk, chunk_path, fps, render_params, ensure_audio_track=False):
+        raise RuntimeError("forced chunk failure for observability")
+
+    engine._v56_write_chunk_video = failing_once
+    try:
+        try:
+            engine.V56StableRenderer(plan, str(output), params).render()
+            raise AssertionError("expected stable renderer to fail")
+        except RuntimeError as exc:
+            assert "forced chunk failure" in str(exc)
+    finally:
+        engine._v56_write_chunk_video = original
+
+    report = engine.read_json(str(root / ".video_create_project" / "build_report.json"))
+    manifest = engine.read_json(str(root / ".video_create_project" / "chunks" / output.stem / "chunk_manifest.json"))
+
+    assert report["status"] == "failed"
+    assert report["failed_stage"] == "chunk_render"
+    assert report["failure"]["retryable"] is True
+    assert report["recovery"]["resumable"] is True
+    assert report["recovery"]["failed_chunk"] == "chunk_000.mp4"
+    assert manifest["last_failed_chunk"] == "chunk_000.mp4"
+    assert manifest["chunks"]["chunk_000.mp4"]["failure"]["code"] == "chunk_render_failed"
+    assert manifest["chunks"]["chunk_000.mp4"]["attempt_count"] == 1
+
+
+def _stable_failure_plan(root: Path) -> Tuple[Dict, Path, Dict]:
+    first = root / "first.jpg"
+    second = root / "second.jpg"
+    engine.Image.new("RGB", (960, 540), (84, 112, 166)).save(first, quality=92)
+    engine.Image.new("RGB", (960, 540), (152, 94, 70)).save(second, quality=92)
+    plan = {
+        "render_settings": {
+            "fps": 12,
+            "aspect_ratio": "16:9",
+            "edit_strategy": "long_stable",
+            "performance_mode": "stable",
+            "render_mode": "long_stable",
+        },
+        "total_duration": 2.0,
+        "segments": [
+            {
+                "segment_id": "seg_fail_0001",
+                "type": "image",
+                "source_path": str(first),
+                "duration": 1.0,
+                "start_time": 0.0,
+                "end_time": 1.0,
+                "text": None,
+                "transition": "cut",
+                "transition_config": {"type": "cut", "duration": 0},
+                "motion_config": {"type": "gentle_push"},
+            },
+            {
+                "segment_id": "seg_fail_0002",
+                "type": "image",
+                "source_path": str(second),
+                "duration": 1.0,
+                "start_time": 1.0,
+                "end_time": 2.0,
+                "text": None,
+                "transition": "cut",
+                "transition_config": {"type": "cut", "duration": 0},
+                "motion_config": {"type": "slow_push"},
+            },
+        ],
+    }
+    output = root / "output.mp4"
+    params = {"fps": 12, "quality": "draft", "render_mode": "long_stable", "performance_mode": "stable"}
+    return plan, output, params
+
+
+def test_stable_render_concat_failure_report_is_written() -> None:
+    root = Path("tests/tmp_vcs_stable_concat_failure")
+    if root.exists():
+        shutil.rmtree(root)
+    root.mkdir(parents=True)
+    plan, output, params = _stable_failure_plan(root)
+
+    original_copy = engine._v56_concat_chunks_ffmpeg
+    original_reencode = engine._v56_concat_chunks_ffmpeg_reencode
+    original_moviepy = engine._v56_concat_chunks_moviepy
+
+    engine._v56_concat_chunks_ffmpeg = lambda *args, **kwargs: False
+    engine._v56_concat_chunks_ffmpeg_reencode = lambda *args, **kwargs: False
+
+    def fail_moviepy(*args, **kwargs):
+        raise RuntimeError("forced concat failure for recovery")
+
+    engine._v56_concat_chunks_moviepy = fail_moviepy
+    try:
+        try:
+            engine.V56StableRenderer(plan, str(output), params).render()
+            raise AssertionError("expected concat failure")
+        except RuntimeError as exc:
+            assert "forced concat failure" in str(exc)
+    finally:
+        engine._v56_concat_chunks_ffmpeg = original_copy
+        engine._v56_concat_chunks_ffmpeg_reencode = original_reencode
+        engine._v56_concat_chunks_moviepy = original_moviepy
+
+    report = engine.read_json(str(root / ".video_create_project" / "build_report.json"))
+    assert report["failed_stage"] == "concat"
+    assert report["failure"]["code"] == "concat_failed"
+    assert report["recovery"]["resumable"] is True
+
+
+def test_stable_render_audio_mix_failure_report_is_written() -> None:
+    root = Path("tests/tmp_vcs_stable_audio_failure")
+    if root.exists():
+        shutil.rmtree(root)
+    root.mkdir(parents=True)
+    plan, output, params = _stable_failure_plan(root)
+
+    original_safe_mix = engine._v56_safe_apply_final_bgm_mix
+    engine._v56_safe_apply_final_bgm_mix = lambda *args, **kwargs: (False, RuntimeError("forced audio mix failure"))
+    try:
+        try:
+            engine.V56StableRenderer(plan, str(output), params).render()
+            raise AssertionError("expected audio mix failure")
+        except RuntimeError as exc:
+            assert "forced audio mix failure" in str(exc)
+    finally:
+        engine._v56_safe_apply_final_bgm_mix = original_safe_mix
+
+    report = engine.read_json(str(root / ".video_create_project" / "build_report.json"))
+    assert report["failed_stage"] == "audio_mix"
+    assert report["failure"]["code"] == "audio_mix_failed"
+    assert report["recovery"]["resumable"] is True
+
+
+def test_stable_render_output_validate_failure_report_is_written() -> None:
+    root = Path("tests/tmp_vcs_stable_output_validate_failure")
+    if root.exists():
+        shutil.rmtree(root)
+    root.mkdir(parents=True)
+    plan, output, params = _stable_failure_plan(root)
+
+    original_validate = engine._v56_validate_video
+    original_safe_mix = engine._v56_safe_apply_final_bgm_mix
+
+    def patched_validate(path, *args, **kwargs):
+        candidate = Path(path)
+        if candidate == output.with_suffix(".rendering.tmp.mp4"):
+            return False, "forced final validation failure", 0.0
+        return original_validate(path, *args, **kwargs)
+
+    engine._v56_validate_video = patched_validate
+    engine._v56_safe_apply_final_bgm_mix = lambda *args, **kwargs: (False, None)
+    try:
+        try:
+            engine.V56StableRenderer(plan, str(output), params).render()
+            raise AssertionError("expected output validation failure")
+        except RuntimeError as exc:
+            assert "forced final validation failure" in str(exc)
+    finally:
+        engine._v56_validate_video = original_validate
+        engine._v56_safe_apply_final_bgm_mix = original_safe_mix
+
+    report = engine.read_json(str(root / ".video_create_project" / "build_report.json"))
+    assert report["failed_stage"] == "output_validate"
+    assert report["failure"]["code"] == "output_validation_failed"
+    assert report["recovery"]["resumable"] is True
+
+
 if __name__ == "__main__":
     test_compile_emits_render_scheduler_hints()
     test_renderer_applies_runtime_render_routes()
     test_render_backend_selector_prefers_stable_for_long_video_exports()
     test_render_backend_selector_returns_formal_decision_type()
     test_backend_execution_result_defaults_to_selected_backend()
+    test_render_diagnostics_expose_route_observability()
     test_render_backend_selector_keeps_preview_on_legacy_backend()
     test_stable_chunk_cache_key_tracks_source_file_changes()
     test_proxy_media_cache_is_opt_in_and_reportable()
     test_proxy_media_manifest_is_preferred_for_preview()
+    test_stable_render_failure_report_preserves_resume_metadata()
     print("V5 render scheduler smoke test passed")

@@ -33,6 +33,7 @@ from collections import Counter
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 ENGINE_ROOT = Path(__file__).resolve().parent
@@ -4024,6 +4025,8 @@ class Renderer:
             "fallback": 0,
         }
         self.cache_cleanup_stats: Dict[str, Any] = {"enabled": True, "buckets": {}, "deleted_files": 0, "deleted_bytes": 0}
+        self.last_render_timings: Dict[str, Any] = {}
+        self.last_visual_finalize_summary: Dict[str, Any] = {}
         self.proxy_media_manifest = _normalize_proxy_manifest(self.params.get("proxy_media_manifest"))
         if not self.proxy_media_manifest:
             guessed_library_path = _guess_sibling_library_path(self.params.get("plan_path"))
@@ -4970,6 +4973,7 @@ class Renderer:
 
     def _finalize_output_from_visual_base(self, visual_base_path: Path, output_path: Path, duration: float) -> float:
         mixed_output = output_path.with_suffix(".audio.tmp.mp4")
+        finalize_started = perf_counter()
         try:
             if mixed_output.exists():
                 mixed_output.unlink()
@@ -4977,6 +4981,15 @@ class Renderer:
             pass
 
         final_duration = float(duration or 0.0)
+        finalize_summary = {
+            "audio_mix_attempted": False,
+            "audio_mix_applied": False,
+            "copy_through_used": False,
+            "audio_mix_seconds": 0.0,
+            "copy_through_seconds": 0.0,
+            "total_finalize_seconds": 0.0,
+        }
+        audio_mix_started = perf_counter()
         if _v56_apply_final_bgm_mix(
             visual_base_path,
             mixed_output,
@@ -4985,19 +4998,31 @@ class Renderer:
             prepared_bgm_path=self._prepare_music_bed(final_duration) or self._prepare_music_path(),
             prepared_bgm_is_bed=True,
         ):
+            finalize_summary["audio_mix_attempted"] = True
+            finalize_summary["audio_mix_applied"] = True
+            finalize_summary["audio_mix_seconds"] = round(perf_counter() - audio_mix_started, 4)
             ok, reason, validated_duration = _v56_validate_video(mixed_output, min_size=512)
             if not ok:
                 raise RuntimeError(f"éˆâ‚¬ç¼å £î‹æ£°æˆ¦ç…¶æ£°æˆžè´©éšå æ‚—éï¿ ç™æ¾¶è¾«è§¦é”›å±¼ç¬‰ç‘•å—™æ´ŠéƒÑ„æžƒæµ ? {reason}")
             _v56_atomic_replace(mixed_output, output_path)
+            finalize_summary["total_finalize_seconds"] = round(perf_counter() - finalize_started, 4)
+            self.last_visual_finalize_summary = finalize_summary
             return float(validated_duration or final_duration)
 
+        finalize_summary["audio_mix_attempted"] = True
+        finalize_summary["audio_mix_seconds"] = round(perf_counter() - audio_mix_started, 4)
+        copy_started = perf_counter()
         ensure_parent(output_path)
         if output_path.exists():
             output_path.unlink()
         shutil.copy2(visual_base_path, output_path)
+        finalize_summary["copy_through_used"] = True
+        finalize_summary["copy_through_seconds"] = round(perf_counter() - copy_started, 4)
         ok, reason, validated_duration = _v56_validate_video(output_path, min_size=512)
         if not ok:
             raise RuntimeError(f"éˆâ‚¬ç¼å £î‹æ£°æˆžç‰Žæ¥ å±½ã‘ç’ãƒ¯ç´æ¶“å¶ˆî›«é©æ ¨æ£«é‚å›¦æ¬¢: {reason}")
+        finalize_summary["total_finalize_seconds"] = round(perf_counter() - finalize_started, 4)
+        self.last_visual_finalize_summary = finalize_summary
         return float(validated_duration or final_duration)
 
     def _video_segment_cache_summary(self) -> Dict[str, int]:
@@ -5315,7 +5340,9 @@ class Renderer:
                     "proxy_media": self._proxy_media_summary(),
                     "cache_cleanup": self.cache_cleanup_stats,
                     "render_scheduler": self.render_scheduler_summary,
-                    "diagnostics": _v56_render_diagnostics(self, [], [], False),
+                    "segment_routes": _v56_collect_segment_route_details(self.plan.get("segments", []) or []),
+                    "timings": dict(self.last_render_timings),
+                    "diagnostics": _v56_render_diagnostics(self, [], [], False, self.last_render_timings),
                     "created_at": datetime.now().isoformat(),
                 })
             except Exception as exc:
@@ -5333,13 +5360,24 @@ class Renderer:
 
     def _render_with_visual_cache(self) -> None:
         final_duration = 0.0
+        render_started = perf_counter()
+        timings: Dict[str, Any] = {}
         try:
+            visual_started = perf_counter()
             visual_base_path, visual_duration = self._materialize_standard_visual_base()
+            timings["visual_base_materialize_seconds"] = round(perf_counter() - visual_started, 4)
+
+            finalize_started = perf_counter()
             final_duration = self._finalize_output_from_visual_base(
                 visual_base_path,
                 self.output_path,
                 visual_duration,
             )
+            timings["finalize_seconds"] = round(perf_counter() - finalize_started, 4)
+            timings["total_render_seconds"] = round(perf_counter() - render_started, 4)
+            if self.last_visual_finalize_summary:
+                timings["finalize"] = dict(self.last_visual_finalize_summary)
+            self.last_render_timings = dict(timings)
 
             if self.params.get("cover"):
                 self._create_cover()
@@ -5369,7 +5407,9 @@ class Renderer:
                     "proxy_media": self._proxy_media_summary(),
                     "cache_cleanup": self.cache_cleanup_stats,
                     "render_scheduler": self.render_scheduler_summary,
-                    "diagnostics": _v56_render_diagnostics(self, [], [], False),
+                    "segment_routes": _v56_collect_segment_route_details(self.plan.get("segments", []) or []),
+                    "timings": dict(self.last_render_timings),
+                    "diagnostics": _v56_render_diagnostics(self, [], [], False, self.last_render_timings),
                     "created_at": datetime.now().isoformat(),
                 })
             except Exception as exc:
@@ -7362,23 +7402,154 @@ def _v56_stable_should_force_chunk_audio_track(renderer: Any, segments: List[Dic
     return False
 
 
+def _v56_collect_segment_route_details(segments: List[Dict[str, Any]], limit: int = 200) -> List[Dict[str, Any]]:
+    details: List[Dict[str, Any]] = []
+    for seg in segments[:limit]:
+        details.append({
+            "segment_id": seg.get("segment_id"),
+            "type": seg.get("type"),
+            "start_time": seg.get("start_time"),
+            "end_time": seg.get("end_time"),
+            "duration": seg.get("duration"),
+            "route": seg.get("runtime_render_route") or seg.get("render_route"),
+            "reason": seg.get("runtime_render_route_reason") or seg.get("render_route_reason"),
+            "tags": list(seg.get("runtime_render_route_tags") or []),
+            "has_overlay": bool(seg.get("overlay_text") or seg.get("overlay_subtitle")),
+            "transition": ((seg.get("transition_config") or {}).get("type") or seg.get("transition")),
+            "motion": ((seg.get("motion_config") or {}).get("type") or "none"),
+        })
+    return details
+
+
+def _v56_collect_chunk_route_details(
+    groups: List[Dict[str, Any]],
+    chunk_reports: List[Dict[str, Any]],
+    limit: int = 200,
+) -> List[Dict[str, Any]]:
+    report_by_name = {str(item.get("name") or ""): item for item in chunk_reports}
+    details: List[Dict[str, Any]] = []
+    for group in groups[:limit]:
+        chunk_name = f"chunk_{int(group.get('index') or 0):03d}.mp4"
+        report = report_by_name.get(chunk_name, {})
+        details.append({
+            "name": chunk_name,
+            "index": group.get("index"),
+            "cache_key": group.get("cache_key"),
+            "status": report.get("status"),
+            "duration": report.get("duration"),
+            "route": group.get("runtime_chunk_route"),
+            "reason": group.get("runtime_chunk_route_reason"),
+            "tags": list(group.get("runtime_chunk_route_tags") or []),
+            "route_counts": dict(group.get("runtime_chunk_route_counts") or {}),
+            "segment_count": len(group.get("segments") or []),
+        })
+    return details
+
+
+def _v56_route_reason_summary(items: List[Dict[str, Any]], route_key: str, reason_key: str) -> Dict[str, Any]:
+    route_counts: Dict[str, int] = {}
+    reason_counts: Dict[str, int] = {}
+    by_route: Dict[str, Dict[str, int]] = {}
+    for item in items:
+        route = str(item.get(route_key) or item.get("route") or "")
+        reason = str(item.get(reason_key) or item.get("reason") or "")
+        if route:
+            route_counts[route] = route_counts.get(route, 0) + 1
+        if reason:
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        if route and reason:
+            route_bucket = by_route.setdefault(route, {})
+            route_bucket[reason] = route_bucket.get(reason, 0) + 1
+    return {
+        "route_counts": route_counts,
+        "reason_counts": reason_counts,
+        "reasons_by_route": by_route,
+    }
+
+
+def _v56_classify_render_failure(error: Any, stage: str) -> Dict[str, Any]:
+    message = str(error or "")
+    lowered = message.lower()
+    code = f"{stage}_failed"
+    if "concat" in lowered:
+        code = "concat_failed"
+    elif "audio" in lowered or "混合" in message:
+        code = "audio_mix_failed"
+    elif "validate" in lowered or "校验" in message:
+        code = "output_validation_failed"
+    elif "moviepy" in lowered and ("not installed" in lowered or "不可用" in message):
+        code = "missing_moviepy_dependency"
+    elif "ffmpeg" in lowered:
+        code = "ffmpeg_failed"
+    elif "unknown render backend" in lowered:
+        code = "unknown_backend"
+
+    retryable = stage in {"chunk_render", "concat", "audio_mix", "finalize", "output_validate"}
+    if code in {"missing_moviepy_dependency", "unknown_backend"}:
+        retryable = False
+
+    return {
+        "stage": stage,
+        "code": code,
+        "retryable": retryable,
+        "message": message,
+    }
+
+
+def _v56_build_recovery_summary(
+    manifest: Optional[Dict[str, Any]],
+    *,
+    chunk_reports: List[Dict[str, Any]],
+    failed_chunk: Optional[str] = None,
+    failure: Optional[Dict[str, Any]] = None,
+    manifest_path: Optional[Path] = None,
+    resumed_from_manifest: bool = False,
+    reused_chunk_count: int = 0,
+) -> Dict[str, Any]:
+    manifest_chunks = ((manifest or {}).get("chunks") or {}) if isinstance(manifest, dict) else {}
+    done_chunks = sum(1 for item in manifest_chunks.values() if item.get("status") == "done")
+    failed_chunks = sum(1 for item in manifest_chunks.values() if item.get("status") == "failed")
+    return {
+        "resumable": True,
+        "resumed_from_manifest": bool(resumed_from_manifest or failed_chunks or reused_chunk_count),
+        "manifest_path": str(manifest_path) if manifest_path else None,
+        "reused_chunk_count": reused_chunk_count,
+        "completed_chunk_count": done_chunks,
+        "failed_chunk_count": failed_chunks,
+        "reported_chunk_count": len(chunk_reports),
+        "failed_chunk": failed_chunk,
+        "failure": dict(failure or {}),
+    }
+
+
+def _v56_safe_apply_final_bgm_mix(*args: Any, **kwargs: Any) -> Tuple[bool, Optional[Exception]]:
+    try:
+        return bool(_v56_apply_final_bgm_mix(*args, **kwargs)), None
+    except Exception as exc:
+        return False, exc
+
+
 def _v56_render_diagnostics(
     renderer: Any,
     groups: List[Dict[str, Any]],
     chunk_reports: List[Dict[str, Any]],
     force_chunk_audio_track: bool,
+    timings: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     settings = getattr(renderer, "audio_settings", {}) or {}
     selected_encoder, encoder_args = select_ffmpeg_video_encoder(getattr(renderer, "params", {}) or {})
     cached = sum(1 for item in chunk_reports if item.get("status") == "cached")
     rendered = sum(1 for item in chunk_reports if item.get("status") == "rendered")
+    segments = getattr(renderer, "plan", {}).get("segments", []) or []
     source_paths = []
-    for seg in getattr(renderer, "plan", {}).get("segments", []) or []:
+    for seg in segments:
         source_path = seg.get("source_path")
         if source_path:
             source_paths.append(source_path)
+    segment_route_details = _v56_collect_segment_route_details(segments)
+    chunk_route_details = _v56_collect_chunk_route_details(groups, chunk_reports)
     return {
-        "strategy_version": "render_diagnostics_v1",
+        "strategy_version": "render_diagnostics_v2",
         "backend": _v56_backend_report_payload(
             getattr(renderer, "backend_execution", None) or getattr(renderer, "backend_decision", None)
         ),
@@ -7408,6 +7579,13 @@ def _v56_render_diagnostics(
             "default_hardware_auto": _should_default_to_hardware_encoding(getattr(renderer, "params", {}) or {}),
         },
         "proxy_media": renderer._proxy_media_summary() if hasattr(renderer, "_proxy_media_summary") else {},
+        "routing": {
+            "segments": _v56_route_reason_summary(segment_route_details, "route", "reason"),
+            "chunks": _v56_route_reason_summary(chunk_route_details, "route", "reason"),
+            "segment_details": segment_route_details,
+            "chunk_details": chunk_route_details,
+        },
+        "timings": dict(timings or getattr(renderer, "last_render_timings", {}) or {}),
     }
 
 
@@ -7582,6 +7760,64 @@ class V56StableRenderer:
         with self.manifest_path.open("w", encoding="utf-8") as f:
             json.dump(manifest, f, ensure_ascii=False, indent=2)
 
+    def _write_failure_report(
+        self,
+        *,
+        renderer: Renderer,
+        manifest: Dict[str, Any],
+        groups: List[Dict[str, Any]],
+        chunk_reports: List[Dict[str, Any]],
+        chunk_route_counts: Dict[str, int],
+        timings: Dict[str, Any],
+        force_chunk_audio_track: bool,
+        final_output: Path,
+        error: Any,
+        stage: str,
+        failed_chunk: Optional[str] = None,
+        resumed_from_manifest: bool = False,
+        reused_chunk_count: int = 0,
+    ) -> None:
+        failure = _v56_classify_render_failure(error, stage)
+        report = {
+            "engine_version": ENGINE_VERSION,
+            "status": "failed",
+            "failed_chunk": failed_chunk,
+            "failed_stage": stage,
+            "error": str(error),
+            "failure": failure,
+            "output_path": str(final_output),
+            "selected_backend": self.backend_execution.selected_backend_name,
+            "backend": _v56_backend_report_payload(self.backend_execution),
+            "chunk_dir": str(self.chunk_dir),
+            "chunks": chunk_reports,
+            "photo_segment_cache": renderer._photo_segment_cache_summary(),
+            "card_segment_cache": renderer._card_segment_cache_summary(),
+            "video_segment_cache": renderer._video_segment_cache_summary(),
+            "proxy_media": renderer._proxy_media_summary(),
+            "cache_cleanup": renderer.cache_cleanup_stats,
+            "render_scheduler": renderer.render_scheduler_summary,
+            "segment_routes": _v56_collect_segment_route_details(self.plan.get("segments", []) or []),
+            "chunk_routes": _v56_collect_chunk_route_details(groups, chunk_reports),
+            "timings": dict(timings),
+            "recovery": _v56_build_recovery_summary(
+                manifest,
+                chunk_reports=chunk_reports,
+                failed_chunk=failed_chunk,
+                failure=failure,
+                manifest_path=self.manifest_path,
+                resumed_from_manifest=resumed_from_manifest,
+                reused_chunk_count=reused_chunk_count,
+            ),
+            "chunk_scheduler": {
+                "strategy_version": "chunk_rules_v1",
+                "route_counts": chunk_route_counts,
+                "total_chunks": len(groups),
+            },
+            "diagnostics": _v56_render_diagnostics(renderer, groups, chunk_reports, force_chunk_audio_track, timings),
+            "created_at": datetime.now().isoformat(),
+        }
+        _v56_write_build_report(self.report_path, report)
+
     def render(self) -> None:
         if not HAS_MOVIEPY:
             raise RuntimeError("MoviePy 不可用，无法渲染视频")
@@ -7600,6 +7836,7 @@ class V56StableRenderer:
         segments = self.plan.get("segments", [])
         force_chunk_audio_track = _v56_stable_should_force_chunk_audio_track(renderer, segments)
         groups = _v56_build_chunk_groups(segments, self.chunk_seconds, self.params)
+        timings: Dict[str, Any] = {"total_render_seconds": 0.0}
         chunk_route_counts: Dict[str, int] = {}
         for group in groups:
             route = str(group.get("runtime_chunk_route") or "moviepy_chunk")
@@ -7607,6 +7844,15 @@ class V56StableRenderer:
         manifest = self._load_manifest()
         manifest.setdefault("engine_version", ENGINE_VERSION)
         manifest.setdefault("chunks", {})
+        manifest.setdefault("render_attempts", 0)
+        manifest["render_attempts"] = int(manifest.get("render_attempts") or 0) + 1
+        manifest["last_started_at"] = datetime.now().isoformat()
+        resumed_from_manifest = any(
+            isinstance(item, dict) and item.get("status") in {"done", "failed"}
+            for item in (manifest.get("chunks") or {}).values()
+        )
+        reused_chunk_count = 0
+        self._save_manifest(manifest)
         if chunk_route_counts:
             compact = ", ".join(f"{key}={value}" for key, value in sorted(chunk_route_counts.items()))
             emit_event("log", message=f"Chunk scheduler summary: {compact}")
@@ -7620,6 +7866,7 @@ class V56StableRenderer:
 
         rendered_chunks: List[Path] = []
         chunk_reports: List[Dict[str, Any]] = []
+        chunk_render_started = perf_counter()
 
         for group in groups:
             idx = int(group["index"])
@@ -7630,6 +7877,7 @@ class V56StableRenderer:
 
             ok, reason, duration = _v56_validate_video(chunk_path)
             if existing.get("cache_key") == key and existing.get("status") == "done" and ok:
+                reused_chunk_count += 1
                 emit_event("phase", phase="render", message=f"复用已完成分段 {chunk_name}", percent=min(94, 10 + int((idx / max(len(groups), 1)) * 80)))
                 rendered_chunks.append(chunk_path)
                 chunk_reports.append({
@@ -7660,8 +7908,12 @@ class V56StableRenderer:
                     "cache_key": key,
                     "path": str(chunk_path),
                     "duration": duration,
+                    "attempt_count": int(existing.get("attempt_count") or 0) + 1,
+                    "runtime_chunk_route": group.get("runtime_chunk_route"),
+                    "runtime_chunk_route_reason": group.get("runtime_chunk_route_reason"),
                     "updated_at": datetime.now().isoformat(),
                 }
+                manifest["last_completed_chunk"] = chunk_name
                 self._save_manifest(manifest)
                 rendered_chunks.append(chunk_path)
                 chunk_reports.append({
@@ -7673,62 +7925,146 @@ class V56StableRenderer:
                     "runtime_chunk_route_reason": group.get("runtime_chunk_route_reason"),
                 })
             except Exception as exc:
+                failure = _v56_classify_render_failure(exc, "chunk_render")
                 manifest["chunks"][chunk_name] = {
                     "status": "failed",
                     "cache_key": key,
                     "path": str(chunk_path),
                     "error": str(exc),
+                    "attempt_count": int(existing.get("attempt_count") or 0) + 1,
+                    "failure": failure,
+                    "runtime_chunk_route": group.get("runtime_chunk_route"),
+                    "runtime_chunk_route_reason": group.get("runtime_chunk_route_reason"),
                     "updated_at": datetime.now().isoformat(),
                 }
+                manifest["last_failed_chunk"] = chunk_name
+                manifest["last_failure"] = failure
                 self._save_manifest(manifest)
-                _v56_write_build_report(self.report_path, {
-                    "engine_version": ENGINE_VERSION,
-                    "status": "failed",
-                    "failed_chunk": chunk_name,
-                    "error": str(exc),
-                    "output_path": str(final_output),
-                    "selected_backend": self.backend_execution.selected_backend_name,
-                    "backend": _v56_backend_report_payload(self.backend_execution),
-                    "chunk_dir": str(self.chunk_dir),
-                    "chunks": chunk_reports,
-                    "photo_segment_cache": renderer._photo_segment_cache_summary(),
-                    "card_segment_cache": renderer._card_segment_cache_summary(),
-                    "video_segment_cache": renderer._video_segment_cache_summary(),
-                    "proxy_media": renderer._proxy_media_summary(),
-                    "cache_cleanup": renderer.cache_cleanup_stats,
-                    "render_scheduler": renderer.render_scheduler_summary,
-                    "chunk_scheduler": {
-                        "strategy_version": "chunk_rules_v1",
-                        "route_counts": chunk_route_counts,
-                        "total_chunks": len(groups),
-                    },
-                    "diagnostics": _v56_render_diagnostics(renderer, groups, chunk_reports, force_chunk_audio_track),
-                    "created_at": datetime.now().isoformat(),
-                })
+                self._write_failure_report(
+                    renderer=renderer,
+                    manifest=manifest,
+                    groups=groups,
+                    chunk_reports=chunk_reports,
+                    chunk_route_counts=chunk_route_counts,
+                    timings=timings,
+                    force_chunk_audio_track=force_chunk_audio_track,
+                    final_output=final_output,
+                    error=exc,
+                    stage="chunk_render",
+                    failed_chunk=chunk_name,
+                    resumed_from_manifest=resumed_from_manifest,
+                    reused_chunk_count=reused_chunk_count,
+                )
                 raise
 
-        if not rendered_chunks:
+        if False and not rendered_chunks:
             raise RuntimeError("没有成功渲染任何分段")
 
+        if not rendered_chunks:
+            exc = RuntimeError("stable render produced no successful chunks")
+            manifest["last_failure"] = _v56_classify_render_failure(exc, "chunk_render")
+            self._save_manifest(manifest)
+            self._write_failure_report(
+                renderer=renderer,
+                manifest=manifest,
+                groups=groups,
+                chunk_reports=chunk_reports,
+                chunk_route_counts=chunk_route_counts,
+                timings=timings,
+                force_chunk_audio_track=force_chunk_audio_track,
+                final_output=final_output,
+                error=exc,
+                stage="chunk_render",
+                resumed_from_manifest=resumed_from_manifest,
+                reused_chunk_count=reused_chunk_count,
+            )
+            raise exc
+
+        timings["chunk_render_seconds"] = round(perf_counter() - chunk_render_started, 4)
+        concat_started = perf_counter()
+        concat_strategy = "ffmpeg_copy"
         concat_ok = _v56_concat_chunks_ffmpeg(rendered_chunks, tmp_output, self.project_dir)
         if not concat_ok:
+            concat_strategy = "ffmpeg_reencode"
             concat_ok = _v56_concat_chunks_ffmpeg_reencode(rendered_chunks, tmp_output, self.project_dir, self.fps, self.params)
         if not concat_ok:
-            _v56_concat_chunks_moviepy(rendered_chunks, tmp_output, self.fps, self.params)
+            concat_strategy = "moviepy_fallback"
+            try:
+                _v56_concat_chunks_moviepy(rendered_chunks, tmp_output, self.fps, self.params)
+            except Exception as exc:
+                manifest["last_failure"] = _v56_classify_render_failure(exc, "concat")
+                self._save_manifest(manifest)
+                self._write_failure_report(
+                    renderer=renderer,
+                    manifest=manifest,
+                    groups=groups,
+                    chunk_reports=chunk_reports,
+                    chunk_route_counts=chunk_route_counts,
+                    timings=timings,
+                    force_chunk_audio_track=force_chunk_audio_track,
+                    final_output=final_output,
+                    error=exc,
+                    stage="concat",
+                    resumed_from_manifest=resumed_from_manifest,
+                    reused_chunk_count=reused_chunk_count,
+                )
+                raise
+        timings["concat_seconds"] = round(perf_counter() - concat_started, 4)
+        timings["concat_strategy"] = concat_strategy
 
         ok, reason, final_duration = _v56_validate_video(tmp_output)
         if not ok:
+            exc = RuntimeError(f"final stable output validation failed: {reason}")
+            manifest["last_failure"] = _v56_classify_render_failure(exc, "output_validate")
+            self._save_manifest(manifest)
+            self._write_failure_report(
+                renderer=renderer,
+                manifest=manifest,
+                groups=groups,
+                chunk_reports=chunk_reports,
+                chunk_route_counts=chunk_route_counts,
+                timings=timings,
+                force_chunk_audio_track=force_chunk_audio_track,
+                final_output=final_output,
+                error=exc,
+                stage="output_validate",
+                resumed_from_manifest=resumed_from_manifest,
+                reused_chunk_count=reused_chunk_count,
+            )
+            raise exc
             raise RuntimeError(f"最终视频校验失败，不覆盖旧文件: {reason}")
 
         mixed_output = tmp_output.with_suffix(".audio.tmp.mp4")
-        if _v56_apply_final_bgm_mix(
+        final_mix_started = perf_counter()
+        audio_mix_applied = False
+        mix_ok, mix_error = _v56_safe_apply_final_bgm_mix(
             tmp_output,
             mixed_output,
             renderer.audio_settings,
             final_duration,
             prepared_bgm_path=renderer._prepare_music_bed(final_duration) or renderer._prepare_music_path(),
             prepared_bgm_is_bed=True,
-        ):
+        )
+        if mix_error is not None:
+            manifest["last_failure"] = _v56_classify_render_failure(mix_error, "audio_mix")
+            self._save_manifest(manifest)
+            self._write_failure_report(
+                renderer=renderer,
+                manifest=manifest,
+                groups=groups,
+                chunk_reports=chunk_reports,
+                chunk_route_counts=chunk_route_counts,
+                timings=timings,
+                force_chunk_audio_track=force_chunk_audio_track,
+                final_output=final_output,
+                error=mix_error,
+                stage="audio_mix",
+                resumed_from_manifest=resumed_from_manifest,
+                reused_chunk_count=reused_chunk_count,
+            )
+            raise mix_error
+        if mix_ok:
+            audio_mix_applied = True
             try:
                 tmp_output.unlink()
             except Exception:
@@ -7736,16 +8072,41 @@ class V56StableRenderer:
             os.replace(str(mixed_output), str(tmp_output))
             ok, reason, final_duration = _v56_validate_video(tmp_output)
             if not ok:
+                exc = RuntimeError(f"final audio mix validation failed: {reason}")
+                manifest["last_failure"] = _v56_classify_render_failure(exc, "audio_mix")
+                self._save_manifest(manifest)
+                self._write_failure_report(
+                    renderer=renderer,
+                    manifest=manifest,
+                    groups=groups,
+                    chunk_reports=chunk_reports,
+                    chunk_route_counts=chunk_route_counts,
+                    timings=timings,
+                    force_chunk_audio_track=force_chunk_audio_track,
+                    final_output=final_output,
+                    error=exc,
+                    stage="audio_mix",
+                    resumed_from_manifest=resumed_from_manifest,
+                    reused_chunk_count=reused_chunk_count,
+                )
+                raise exc
                 raise RuntimeError(f"最终视频音频混合后校验失败，不覆盖旧文件: {reason}")
 
+        timings["final_audio_mix_seconds"] = round(perf_counter() - final_mix_started, 4)
+        timings["final_audio_mix_applied"] = audio_mix_applied
         _v56_atomic_replace(tmp_output, final_output)
 
         elapsed = (datetime.now() - started_at).total_seconds()
+        timings["total_render_seconds"] = round(elapsed, 4)
+        renderer.last_render_timings = dict(timings)
         renderer._emit_photo_segment_cache_summary()
         renderer._emit_card_segment_cache_summary()
         renderer._emit_video_segment_cache_summary()
         renderer._emit_proxy_media_summary()
         renderer._cleanup_project_cache_dirs()
+        manifest["last_completed_at"] = datetime.now().isoformat()
+        manifest["last_failure"] = None
+        self._save_manifest(manifest)
         report = {
             "engine_version": ENGINE_VERSION,
             "status": "done",
@@ -7766,12 +8127,22 @@ class V56StableRenderer:
             "proxy_media": renderer._proxy_media_summary(),
             "cache_cleanup": renderer.cache_cleanup_stats,
             "render_scheduler": renderer.render_scheduler_summary,
+            "segment_routes": _v56_collect_segment_route_details(segments),
+            "chunk_routes": _v56_collect_chunk_route_details(groups, chunk_reports),
+            "timings": dict(timings),
+            "recovery": _v56_build_recovery_summary(
+                manifest,
+                chunk_reports=chunk_reports,
+                manifest_path=self.manifest_path,
+                resumed_from_manifest=resumed_from_manifest,
+                reused_chunk_count=reused_chunk_count,
+            ),
             "chunk_scheduler": {
                 "strategy_version": "chunk_rules_v1",
                 "route_counts": chunk_route_counts,
                 "total_chunks": len(groups),
             },
-            "diagnostics": _v56_render_diagnostics(renderer, groups, chunk_reports, force_chunk_audio_track),
+            "diagnostics": _v56_render_diagnostics(renderer, groups, chunk_reports, force_chunk_audio_track, timings),
             "created_at": datetime.now().isoformat(),
         }
         _v56_write_build_report(self.report_path, report)
