@@ -35,6 +35,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+ENGINE_ROOT = Path(__file__).resolve().parent
+if str(ENGINE_ROOT) not in sys.path:
+    sys.path.insert(0, str(ENGINE_ROOT))
+
 from render_backends import (
     BackendDecision,
     BackendExecutionResult,
