@@ -1360,6 +1360,125 @@ select:focus {
   font-size: 18px;
 }
 
+.startup-health-card {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  margin-bottom: 18px;
+  background:
+    radial-gradient(circle at 88% 20%, rgb(216 239 225 / 62%), transparent 24%),
+    linear-gradient(135deg, #fbfff9 0%, #eef7ef 100%);
+  border: 1px solid #cddfd2;
+  border-radius: 14px;
+}
+
+.startup-health-card.failed {
+  background:
+    radial-gradient(circle at 88% 20%, rgb(255 226 196 / 58%), transparent 24%),
+    linear-gradient(135deg, #fffdf7 0%, #fff4e4 100%);
+  border-color: #ebce91;
+}
+
+.startup-health-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.startup-health-head > div {
+  display: grid;
+  gap: 4px;
+}
+
+.startup-health-kicker {
+  color: #668075;
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.05em;
+}
+
+.startup-health-head strong {
+  color: #17362b;
+  font-size: 16px;
+}
+
+.startup-health-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  padding: 7px 10px;
+  font-size: 12px;
+  font-weight: 900;
+  border-radius: 999px;
+}
+
+.startup-health-badge.ok {
+  color: #185b43;
+  background: rgb(255 255 255 / 78%);
+  border: 1px solid #bdd7c3;
+}
+
+.startup-health-badge.failed {
+  color: #8b5811;
+  background: rgb(255 248 235 / 92%);
+  border: 1px solid #ebce91;
+}
+
+.startup-health-badge.pending {
+  color: #3d5d73;
+  background: rgb(246 251 255 / 92%);
+  border: 1px solid #c8d8e4;
+}
+
+.startup-health-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.startup-health-item {
+  display: grid;
+  gap: 6px;
+  min-height: 92px;
+  padding: 12px;
+  background: rgb(255 255 255 / 74%);
+  border: 1px solid #cfdbd2;
+  border-radius: 12px;
+}
+
+.startup-health-item.failed {
+  background: rgb(255 249 238 / 96%);
+  border-color: #ebce91;
+}
+
+.startup-health-item.pending {
+  border-color: #c8d8e4;
+}
+
+.startup-health-item-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #17362b;
+}
+
+.startup-health-item span {
+  color: #4f675b;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.startup-health-item small {
+  color: #75867d;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  word-break: break-all;
+}
+
 .result-card {
   margin-top: 14px;
   padding: 16px 18px;
@@ -2946,6 +3065,7 @@ select:focus {
   .edit-strategy-body,
   .strategy-effect-grid,
   .performance-mode-options,
+  .startup-health-grid,
   .photo-cache-insight-grid,
   .video-cache-insight-grid {
     grid-template-columns: 1fr;
@@ -2966,6 +3086,11 @@ select:focus {
   }
 
   .performance-mode-head {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .startup-health-head {
     align-items: stretch;
     flex-direction: column;
   }

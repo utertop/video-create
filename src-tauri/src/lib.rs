@@ -82,6 +82,32 @@ struct GenerateVideoResult {
     is_dry_run: bool,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StartupCheckItem {
+    id: String,
+    label: String,
+    ok: bool,
+    message: String,
+    detail: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StartupDiagnostics {
+    ok: bool,
+    summary: String,
+    checks: Vec<StartupCheckItem>,
+}
+
+#[tauri::command]
+async fn startup_self_check(app: AppHandle) -> Result<StartupDiagnostics, String> {
+    tauri::async_runtime::spawn_blocking(move || startup_self_check_blocking(&app))
+        .await
+        .map_err(|e| format!("startup self-check failed unexpectedly: {}", e))
+        ?
+}
+
 #[tauri::command]
 async fn generate_video(
     app: AppHandle,
@@ -1477,6 +1503,209 @@ fn prepare_hidden_command(cmd: &mut Command) {
     }
 }
 
+fn startup_self_check_blocking(app: &AppHandle) -> Result<StartupDiagnostics, String> {
+    let mut checks = Vec::new();
+
+    checks.push(check_engine_resource(app));
+    checks.push(check_worker_entrypoint(app));
+    checks.push(check_worker_health(app));
+    checks.push(check_named_writable_dir(app.path().app_data_dir(), "app_data", "Project data directory"));
+    checks.push(check_named_writable_dir(app.path().app_cache_dir(), "app_cache", "Cache directory"));
+
+    let ok = checks.iter().all(|check| check.ok);
+    let failed = checks.iter().filter(|check| !check.ok).count();
+    let summary = if ok {
+        "Startup self-check passed.".to_string()
+    } else {
+        format!("Startup self-check found {} issue(s).", failed)
+    };
+
+    Ok(StartupDiagnostics { ok, summary, checks })
+}
+
+fn check_engine_resource(app: &AppHandle) -> StartupCheckItem {
+    match find_v5_engine_script(app) {
+        Ok(path) => StartupCheckItem {
+            id: "engine_resource".to_string(),
+            label: "Render engine resource".to_string(),
+            ok: true,
+            message: "Engine script is available.".to_string(),
+            detail: Some(path.display().to_string()),
+        },
+        Err(message) => StartupCheckItem {
+            id: "engine_resource".to_string(),
+            label: "Render engine resource".to_string(),
+            ok: false,
+            message,
+            detail: None,
+        },
+    }
+}
+
+fn check_worker_entrypoint(app: &AppHandle) -> StartupCheckItem {
+    match find_v5_worker_entrypoint(app) {
+        Ok(launch) => {
+            let mode = match launch.kind {
+                WorkerLaunchKind::BundledExecutable => "Bundled executable",
+                WorkerLaunchKind::PythonScript => "Python fallback",
+            };
+            StartupCheckItem {
+                id: "worker_entrypoint".to_string(),
+                label: "Worker entrypoint".to_string(),
+                ok: true,
+                message: format!("Resolved worker entrypoint via {}.", mode),
+                detail: Some(launch.program.display().to_string()),
+            }
+        }
+        Err(message) => StartupCheckItem {
+            id: "worker_entrypoint".to_string(),
+            label: "Worker entrypoint".to_string(),
+            ok: false,
+            message,
+            detail: None,
+        },
+    }
+}
+
+fn check_worker_health(app: &AppHandle) -> StartupCheckItem {
+    let launch = match find_v5_worker_entrypoint(app) {
+        Ok(launch) => launch,
+        Err(message) => {
+            return StartupCheckItem {
+                id: "worker_health".to_string(),
+                label: "Worker health".to_string(),
+                ok: false,
+                message: format!("Health check skipped: {}", message),
+                detail: None,
+            };
+        }
+    };
+
+    let mut cmd = Command::new(&launch.program);
+    match launch.kind {
+        WorkerLaunchKind::BundledExecutable => prepare_hidden_command(&mut cmd),
+        WorkerLaunchKind::PythonScript => prepare_python_command(&mut cmd),
+    }
+    cmd.args(&launch.args)
+        .arg("--health")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    if let Some(working_dir) = launch.working_dir.as_ref() {
+        cmd.current_dir(working_dir);
+    }
+
+    let output = match cmd.output() {
+        Ok(output) => output,
+        Err(err) => {
+            return StartupCheckItem {
+                id: "worker_health".to_string(),
+                label: "Worker health".to_string(),
+                ok: false,
+                message: format!("Failed to launch worker health probe: {}", err),
+                detail: Some(launch.program.display().to_string()),
+            };
+        }
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() {
+            stderr
+        } else {
+            stdout
+        };
+        return StartupCheckItem {
+            id: "worker_health".to_string(),
+            label: "Worker health".to_string(),
+            ok: false,
+            message: format!("Worker health probe exited with {}.", output.status),
+            detail: if detail.is_empty() { None } else { Some(detail) },
+        };
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed = serde_json::from_str::<serde_json::Value>(stdout.trim()).ok();
+    let engine_version = parsed
+        .as_ref()
+        .and_then(|value| value.get("engine_version"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown");
+    let encoders = parsed
+        .as_ref()
+        .and_then(|value| value.get("hardware_encoders"))
+        .and_then(|value| value.as_array())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_else(String::new);
+    let detail = if encoders.is_empty() {
+        format!("engine_version={}", engine_version)
+    } else {
+        format!("engine_version={}, encoders={}", engine_version, encoders)
+    };
+
+    StartupCheckItem {
+        id: "worker_health".to_string(),
+        label: "Worker health".to_string(),
+        ok: true,
+        message: "Worker responded to health probe.".to_string(),
+        detail: Some(detail),
+    }
+}
+
+fn check_named_writable_dir<E: std::fmt::Display>(
+    path_result: Result<PathBuf, E>,
+    id: &str,
+    label: &str,
+) -> StartupCheckItem {
+    let path = match path_result {
+        Ok(path) => path,
+        Err(err) => {
+            return StartupCheckItem {
+                id: id.to_string(),
+                label: label.to_string(),
+                ok: false,
+                message: format!("Could not resolve directory: {}", err),
+                detail: None,
+            };
+        }
+    };
+
+    match ensure_directory_writable(&path) {
+        Ok(()) => StartupCheckItem {
+            id: id.to_string(),
+            label: label.to_string(),
+            ok: true,
+            message: "Directory is writable.".to_string(),
+            detail: Some(path.display().to_string()),
+        },
+        Err(err) => StartupCheckItem {
+            id: id.to_string(),
+            label: label.to_string(),
+            ok: false,
+            message: err,
+            detail: Some(path.display().to_string()),
+        },
+    }
+}
+
+fn ensure_directory_writable(path: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(path)
+        .map_err(|err| format!("Failed to create directory {}: {}", path.display(), err))?;
+    let probe_path = path.join(".startup-self-check.tmp");
+    std::fs::write(&probe_path, b"ok")
+        .map_err(|err| format!("Failed to write probe file in {}: {}", path.display(), err))?;
+    std::fs::remove_file(&probe_path)
+        .map_err(|err| format!("Failed to remove probe file in {}: {}", path.display(), err))?;
+    Ok(())
+}
+
 fn clear_job(manager: &JobManager, job_id: &str) {
     if let Ok(mut current) = manager.current.lock() {
         if current.as_ref().map(|job| job.id.as_str()) == Some(job_id) {
@@ -1506,6 +1735,7 @@ pub fn run() {
         .manage(JobManager::default())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
+            startup_self_check,
             generate_video,
             cancel_video,
             open_in_explorer,

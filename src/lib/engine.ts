@@ -397,6 +397,20 @@ export interface GenerateVideoResult {
   isDryRun?: boolean;
 }
 
+export interface StartupCheckItem {
+  id: string;
+  label: string;
+  ok: boolean;
+  message: string;
+  detail?: string | null;
+}
+
+export interface StartupDiagnostics {
+  ok: boolean;
+  summary: string;
+  checks: StartupCheckItem[];
+}
+
 export interface RenderV5Params {
   title?: string;
   title_subtitle?: string;
@@ -466,6 +480,26 @@ export async function openInExplorer(path: string): Promise<void> {
     await invoke("open_in_explorer", { path });
   } catch (error) {
     console.error("Failed to open in explorer:", error);
+  }
+}
+
+export async function startupSelfCheck(): Promise<StartupDiagnostics> {
+  try {
+    return await invoke<StartupDiagnostics>("startup_self_check");
+  } catch (error) {
+    return {
+      ok: false,
+      summary: formatInvokeError(error, "Startup self-check is unavailable."),
+      checks: [
+        {
+          id: "startup_self_check",
+          label: "Startup self-check",
+          ok: false,
+          message: formatInvokeError(error, "Tauri backend did not respond."),
+          detail: null,
+        },
+      ],
+    };
   }
 }
 

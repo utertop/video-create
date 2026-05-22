@@ -39,6 +39,7 @@ import {
   PerformanceMode,
   Quality,
   RenderEngine,
+  StartupDiagnostics,
   cancelVideo,
   openInExplorer,
   scanV5,
@@ -59,7 +60,8 @@ import {
   MusicPlaylistMode,
   V5ChapterBackgroundMode,
   RenderV5Params,
-  buildV5RenderCommandPreview
+  buildV5RenderCommandPreview,
+  startupSelfCheck,
 } from "./lib/engine";
 import { findSectionById, getAssetThumbnailPath, updateBlueprintSection, withBlueprintMetadata } from "./lib/blueprint";
 import { BackgroundAssetPicker, shortPathName } from "./components/BackgroundAssetPicker";
@@ -171,6 +173,8 @@ export function App() {
   const [backgroundPickerTarget, setBackgroundPickerTarget] = useState<BackgroundPickerTarget | null>(null);
   const [isPreparingBackgroundLibrary, setIsPreparingBackgroundLibrary] = useState(false);
   const [titleLabTarget, setTitleLabTarget] = useState<"title" | "end" | null>(null);
+  const [startupDiagnostics, setStartupDiagnostics] = useState<StartupDiagnostics | null>(null);
+  const [startupDiagnosticsLoading, setStartupDiagnosticsLoading] = useState(true);
   const logEndRef = useRef<HTMLDivElement>(null);
   const activeJobRef = useRef<string | null>(null);
   const [activeNav, setActiveNav] = useState("workspace");
@@ -203,6 +207,40 @@ export function App() {
   useEffect(() => {
     resetTask();
   }, [state.inputFolder]);
+
+  useEffect(() => {
+    let disposed = false;
+
+    setStartupDiagnosticsLoading(true);
+    void startupSelfCheck()
+      .then((diagnostics) => {
+        if (disposed) return;
+        setStartupDiagnostics(diagnostics);
+      })
+      .catch((error) => {
+        if (disposed) return;
+        setStartupDiagnostics({
+          ok: false,
+          summary: `Startup self-check failed: ${String(error)}`,
+          checks: [
+            {
+              id: "startup_self_check",
+              label: "Startup self-check",
+              ok: false,
+              message: String(error),
+              detail: null,
+            },
+          ],
+        });
+      })
+      .finally(() => {
+        if (!disposed) setStartupDiagnosticsLoading(false);
+      });
+
+    return () => {
+      disposed = true;
+    };
+  }, []);
 
   function scrollToSection(id: string) {
     setActiveNav(id);
@@ -961,6 +999,7 @@ export function App() {
       <section className="workspace" id="workspace">
         {toast && <Toast title={state.v5Stage === "BLUEPRINT" ? "蓝图生成成功" : "提示"} message={toast} onClose={() => setToast(null)} />}
         <div className="workspace-inner">
+        <StartupHealthCard diagnostics={startupDiagnostics} loading={startupDiagnosticsLoading} />
         <header className="topbar">
           <div>
             <p className="eyebrow">GUI MVP</p>
@@ -1585,6 +1624,62 @@ function shortJobId(jobId: string): string {
 function formatQueueTime(timestamp?: number): string {
   if (!timestamp) return "";
   return new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function StartupHealthCard({
+  diagnostics,
+  loading,
+}: {
+  diagnostics: StartupDiagnostics | null;
+  loading: boolean;
+}) {
+  if (!loading && !diagnostics) return null;
+
+  return (
+    <section className={`startup-health-card${diagnostics && !diagnostics.ok ? " failed" : ""}`}>
+      <div className="startup-health-head">
+        <div>
+          <span className="startup-health-kicker">STARTUP SELF-CHECK</span>
+          <strong>{loading ? "Checking desktop runtime..." : diagnostics?.summary || "Startup self-check unavailable."}</strong>
+        </div>
+        <span className={`startup-health-badge ${loading ? "pending" : diagnostics?.ok ? "ok" : "failed"}`}>
+          {loading ? (
+            <>
+              <Loader2 className="spin" size={14} /> Running
+            </>
+          ) : diagnostics?.ok ? (
+            <>
+              <CheckCircle2 size={14} /> Ready
+            </>
+          ) : (
+            <>
+              <TriangleAlert size={14} /> Attention
+            </>
+          )}
+        </span>
+      </div>
+
+      <div className="startup-health-grid">
+        {loading ? (
+          <div className="startup-health-item pending">
+            <strong>Startup self-check</strong>
+            <span>Inspecting worker, resources, and writable directories...</span>
+          </div>
+        ) : (
+          diagnostics?.checks.map((check) => (
+            <div className={`startup-health-item ${check.ok ? "ok" : "failed"}`} key={check.id}>
+              <div className="startup-health-item-head">
+                {check.ok ? <CheckCircle2 size={16} /> : <TriangleAlert size={16} />}
+                <strong>{check.label}</strong>
+              </div>
+              <span>{check.message}</span>
+              {check.detail ? <small>{check.detail}</small> : null}
+            </div>
+          ))
+        )}
+      </div>
+    </section>
+  );
 }
 
 function ResultCard({ result }: { result: GenerateVideoResult }) {
