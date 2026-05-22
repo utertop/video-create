@@ -56,6 +56,7 @@ import {
   V5Asset,
   V5AudioSettings,
   V5AudioBlueprint,
+  V5AudioBlueprintCue,
   V5TitleStyle,
   MusicFitStrategy,
   MusicPlaylistMode,
@@ -1929,6 +1930,10 @@ function resolveAudioBlueprint(state: StudioState): V5AudioBlueprint | null {
   return state.v5RenderPlan?.render_settings?.audio_blueprint || state.v5Blueprint?.metadata?.audio_blueprint || null;
 }
 
+function resolveEditableAudioBlueprint(state: StudioState): V5AudioBlueprint | null {
+  return state.v5Blueprint?.metadata?.audio_blueprint || resolveAudioBlueprint(state);
+}
+
 function normalizeStringList(values: string[] | null | undefined): string[] {
   return Array.isArray(values) ? values.map((item) => String(item || "").trim()).filter(Boolean) : [];
 }
@@ -1951,6 +1956,130 @@ function musicPlaylistModeLabel(mode: MusicPlaylistMode): string {
 function blueprintCueList(blueprint: V5AudioBlueprint | null) {
   const raw = blueprint?.timeline_cues?.length ? blueprint.timeline_cues : blueprint?.section_cues;
   return Array.isArray(raw) ? raw.filter((item) => item && (item.section_id || item.title)) : [];
+}
+
+function normalizeEditableCueList(blueprint: V5AudioBlueprint | null): V5AudioBlueprintCue[] {
+  const raw = blueprint?.section_cues?.length ? blueprint.section_cues : blueprintCueList(blueprint);
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((item) => item && item.section_id)
+    .map((item, index) => ({
+      ...item,
+      order: typeof item.order === "number" ? item.order : index,
+      phase: item.phase || "sustain",
+      energy: item.energy || "medium",
+      ducking_hint: item.ducking_hint || "medium",
+      reason: item.reason || "",
+      title: item.title || item.section_id || `section_${index + 1}`,
+    }))
+    .sort((a, b) => {
+      const orderA = typeof a.order === "number" ? a.order : Number.MAX_SAFE_INTEGER;
+      const orderB = typeof b.order === "number" ? b.order : Number.MAX_SAFE_INTEGER;
+      if (orderA !== orderB) return orderA - orderB;
+      return String(a.section_id || "").localeCompare(String(b.section_id || ""));
+    });
+}
+
+function syncTimelineCuesWithSectionEdits(
+  timelineCues: V5AudioBlueprintCue[] | null | undefined,
+  sectionCues: V5AudioBlueprintCue[],
+): V5AudioBlueprintCue[] | null | undefined {
+  if (!Array.isArray(timelineCues)) return timelineCues;
+  const overrideMap = new Map(sectionCues.map((item) => [String(item.section_id || ""), item]));
+  return timelineCues.map((item) => {
+    const override = overrideMap.get(String(item.section_id || ""));
+    if (!override) return item;
+    return {
+      ...item,
+      title: override.title || item.title,
+      phase: override.phase || item.phase,
+      energy: override.energy || item.energy,
+      ducking_hint: override.ducking_hint || item.ducking_hint,
+      reason: override.reason || item.reason,
+    };
+  });
+}
+
+function patchAudioBlueprintCue(
+  state: StudioState,
+  sectionId: string,
+  patch: Partial<Pick<V5AudioBlueprintCue, "phase" | "energy" | "ducking_hint" | "reason">>,
+): void {
+  if (!state.v5Blueprint) return;
+  const editableBlueprint = resolveEditableAudioBlueprint(state);
+  if (!editableBlueprint) return;
+
+  const nextSectionCues = normalizeEditableCueList(editableBlueprint).map((item) =>
+    item.section_id === sectionId
+      ? {
+          ...item,
+          ...patch,
+        }
+      : item,
+  );
+
+  const nextAudioBlueprint: V5AudioBlueprint = {
+    ...editableBlueprint,
+    section_cues: nextSectionCues,
+    timeline_cues: syncTimelineCuesWithSectionEdits(editableBlueprint.timeline_cues, nextSectionCues),
+  };
+
+  const nextBlueprint = withBlueprintMetadata(state.v5Blueprint, {
+    audio_blueprint: nextAudioBlueprint,
+  });
+
+  const nextPatch: Partial<StudioState> = {
+    v5Blueprint: nextBlueprint,
+  };
+
+  if (state.v5RenderPlan?.render_settings?.audio_blueprint) {
+    nextPatch.v5RenderPlan = {
+      ...state.v5RenderPlan,
+      render_settings: {
+        ...(state.v5RenderPlan.render_settings || {}),
+        audio_blueprint: {
+          ...state.v5RenderPlan.render_settings.audio_blueprint,
+          section_cues: nextSectionCues,
+          timeline_cues: syncTimelineCuesWithSectionEdits(
+            state.v5RenderPlan.render_settings.audio_blueprint.timeline_cues,
+            nextSectionCues,
+          ),
+        },
+      },
+    };
+  }
+
+  state.patch(nextPatch);
+}
+
+function restoreCompiledAudioBlueprintCues(state: StudioState): void {
+  if (!state.v5Blueprint || !state.v5RenderPlan?.render_settings?.audio_blueprint) return;
+  const compiledBlueprint = state.v5RenderPlan.render_settings.audio_blueprint;
+  const nextAudioBlueprint: V5AudioBlueprint = {
+    ...(resolveEditableAudioBlueprint(state) || compiledBlueprint),
+    section_cues: normalizeEditableCueList(compiledBlueprint),
+    timeline_cues: compiledBlueprint.timeline_cues || null,
+  };
+  state.patch({
+    v5Blueprint: withBlueprintMetadata(state.v5Blueprint, {
+      audio_blueprint: nextAudioBlueprint,
+    }),
+  });
+}
+
+function audioBlueprintCueEditsPending(state: StudioState): boolean {
+  const editable = normalizeEditableCueList(resolveEditableAudioBlueprint(state));
+  const compiled = normalizeEditableCueList(state.v5RenderPlan?.render_settings?.audio_blueprint || null);
+  if (compiled.length === 0 || editable.length !== compiled.length) return false;
+  return editable.some((item, index) => {
+    const baseline = compiled[index];
+    return (
+      item.phase !== baseline.phase ||
+      item.energy !== baseline.energy ||
+      item.ducking_hint !== baseline.ducking_hint ||
+      String(item.reason || "") !== String(baseline.reason || "")
+    );
+  });
 }
 
 function blueprintCandidatePaths(blueprint: V5AudioBlueprint | null): string[] {
@@ -2115,9 +2244,10 @@ function decorateAudioBlueprintForPersist(
 }
 
 function AudioBlueprintPanel({ state }: { state: StudioState }) {
-  const blueprint = resolveAudioBlueprint(state);
+  const blueprint = resolveEditableAudioBlueprint(state) || resolveAudioBlueprint(state);
   const recommended = blueprint?.recommended_audio_settings;
   const cues = blueprintCueList(blueprint);
+  const editableCues = normalizeEditableCueList(blueprint);
   const candidateAssets = (blueprint?.candidate_assets || []).filter((item) => item?.absolute_path || item?.relative_path);
   if (!blueprint || !recommended) return null;
 
@@ -2125,6 +2255,7 @@ function AudioBlueprintPanel({ state }: { state: StudioState }) {
   const mixApplied = audioBlueprintScopeApplied(state, blueprint, "mix");
   const timingApplied = audioBlueprintScopeApplied(state, blueprint, "timing");
   const allApplied = sourceApplied && mixApplied && timingApplied;
+  const cueEditsPending = state.v5Stage === "RENDER" && audioBlueprintCueEditsPending(state);
   const playlistMode = normalizeBlueprintPlaylistMode(recommended.music_playlist_mode, recommended.music_chapter_restart);
   const primaryLabel = shortPathName(
     String(recommended.music_path || blueprint.selected_candidate?.absolute_path || blueprint.selected_candidate?.relative_path || ""),
@@ -2178,6 +2309,14 @@ function AudioBlueprintPanel({ state }: { state: StudioState }) {
       </div>
 
       {originSummary ? <p className="audio-blueprint-origin">{originSummary}</p> : null}
+
+      {state.v5Stage === "RENDER" ? (
+        <p className={`audio-blueprint-origin${cueEditsPending ? " pending" : ""}`}>
+          {cueEditsPending
+            ? "章节微调已写入蓝图预览，重新点击“确认并进入渲染”后正式应用到新的 render plan。"
+            : "可以先微调章节配乐，再重新编译 render plan 查看正式结果。"}
+        </p>
+      ) : null}
 
       <div className="audio-blueprint-grid">
         <div className="audio-blueprint-card">
@@ -2282,6 +2421,80 @@ function AudioBlueprintPanel({ state }: { state: StudioState }) {
           </div>
         </div>
       )}
+
+      {editableCues.length > 0 ? (
+        <div className="audio-blueprint-editor">
+          <div className="audio-blueprint-editor-head">
+            <div>
+              <strong>章节级配乐微调</strong>
+              <span>按章节调整节奏、能量与 ducking，修改会写回蓝图元数据。</span>
+            </div>
+            {state.v5RenderPlan?.render_settings?.audio_blueprint ? (
+              <button type="button" onClick={() => restoreCompiledAudioBlueprintCues(state)}>
+                恢复上次编译结果
+              </button>
+            ) : null}
+          </div>
+
+          <div className="audio-blueprint-editor-list">
+            {editableCues.map((cue, index) => (
+              <div className="audio-blueprint-editor-card" key={`${cue.section_id || index}-${index}`}>
+                <div className="audio-blueprint-editor-card-head">
+                  <strong>{cue.title || cue.section_id || `章节 ${index + 1}`}</strong>
+                  <span>{cue.section_type || "section"}</span>
+                </div>
+
+                <div className="audio-blueprint-editor-grid">
+                  <label>
+                    <span>阶段</span>
+                    <select
+                      value={cue.phase || "sustain"}
+                      onChange={(event) => patchAudioBlueprintCue(state, String(cue.section_id), { phase: event.target.value })}
+                    >
+                      <option value="intro">开场</option>
+                      <option value="sustain">承接</option>
+                      <option value="peak">高潮</option>
+                      <option value="outro">收束</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>能量</span>
+                    <select
+                      value={cue.energy || "medium"}
+                      onChange={(event) => patchAudioBlueprintCue(state, String(cue.section_id), { energy: event.target.value })}
+                    >
+                      <option value="low">低</option>
+                      <option value="medium">中</option>
+                      <option value="high">高</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Ducking</span>
+                    <select
+                      value={cue.ducking_hint || "medium"}
+                      onChange={(event) => patchAudioBlueprintCue(state, String(cue.section_id), { ducking_hint: event.target.value })}
+                    >
+                      <option value="off">关闭</option>
+                      <option value="light">轻</option>
+                      <option value="medium">中</option>
+                      <option value="high">强</option>
+                    </select>
+                  </label>
+                </div>
+
+                <label className="audio-blueprint-editor-reason">
+                  <span>说明</span>
+                  <textarea
+                    rows={2}
+                    value={cue.reason || ""}
+                    onChange={(event) => patchAudioBlueprintCue(state, String(cue.section_id), { reason: event.target.value })}
+                  />
+                </label>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
     </section>
   );
 }

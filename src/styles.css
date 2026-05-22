@@ -1302,6 +1302,10 @@ label {
   line-height: 1.5;
 }
 
+.audio-blueprint-origin.pending {
+  color: #0f6d46;
+}
+
 .audio-blueprint-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1338,7 +1342,8 @@ label {
 }
 
 .audio-blueprint-shelf,
-.audio-blueprint-timeline {
+.audio-blueprint-timeline,
+.audio-blueprint-editor {
   display: grid;
   gap: 10px;
 }
@@ -1360,6 +1365,85 @@ label {
 .audio-blueprint-candidate.selected {
   border-color: #8cc8a6;
   box-shadow: 0 0 0 3px rgb(35 132 95 / 10%);
+}
+
+.audio-blueprint-editor-head,
+.audio-blueprint-editor-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.audio-blueprint-editor-head strong,
+.audio-blueprint-editor-card-head strong {
+  color: #17362b;
+  font-size: 14px;
+}
+
+.audio-blueprint-editor-head span,
+.audio-blueprint-editor-card-head span,
+.audio-blueprint-editor-reason span,
+.audio-blueprint-editor-grid label > span {
+  color: #587063;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.audio-blueprint-editor-head button {
+  min-height: 34px;
+  padding: 0 12px;
+  color: #185b43;
+  font-size: 12px;
+  font-weight: 900;
+  cursor: pointer;
+  background: rgb(255 255 255 / 88%);
+  border: 1px solid #bdd7c3;
+  border-radius: 10px;
+}
+
+.audio-blueprint-editor-list {
+  display: grid;
+  gap: 10px;
+}
+
+.audio-blueprint-editor-card {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  background: #fbfefd;
+  border: 1px solid #d8e5dc;
+  border-radius: 12px;
+}
+
+.audio-blueprint-editor-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.audio-blueprint-editor-grid label,
+.audio-blueprint-editor-reason {
+  display: grid;
+  gap: 6px;
+}
+
+.audio-blueprint-editor-grid select,
+.audio-blueprint-editor-reason textarea {
+  width: 100%;
+  padding: 9px 10px;
+  color: #17362b;
+  font-size: 12px;
+  font-weight: 700;
+  background: rgb(255 255 255 / 92%);
+  border: 1px solid #c8dbcf;
+  border-radius: 10px;
+}
+
+.audio-blueprint-editor-reason textarea {
+  min-height: 72px;
+  resize: vertical;
 }
 
 @keyframes strategyShotA {
@@ -3314,10 +3398,16 @@ select:focus {
   .audio-blueprint-head,
   .audio-blueprint-head-actions,
   .audio-blueprint-card-head,
+  .audio-blueprint-editor-head,
+  .audio-blueprint-editor-card-head,
   .render-audio-timeline-head,
   .render-audio-cue-title-row {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .audio-blueprint-editor-grid {
+    grid-template-columns: 1fr;
   }
 }
 
