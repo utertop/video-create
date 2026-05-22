@@ -26,7 +26,7 @@ if (!existsSync(tauriBinary)) {
 
 const result =
   process.platform === "win32"
-    ? spawnSync(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", `"${tauriBinary}" ${tauriArgs.join(" ")}`], {
+    ? spawnSync(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", `${tauriBinary} ${tauriArgs.join(" ")}`], {
         cwd: repoRoot,
         stdio: "inherit",
       })
