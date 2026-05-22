@@ -3077,6 +3077,9 @@ class Compiler:
             "candidate_assets": self.audio_blueprint_metadata.get("candidate_assets") or [],
             "search_keywords": self.audio_blueprint_metadata.get("search_keywords") or [],
             "recommended_audio_settings": recommended,
+            "adopted_audio_settings": self.audio_blueprint_metadata.get("adopted_audio_settings") or {},
+            "ui_adoption_state": self.audio_blueprint_metadata.get("ui_adoption_state") or {},
+            "origin_summary": self.audio_blueprint_metadata.get("origin_summary"),
             "timeline_cues": timeline_cues,
             "activation_hint": self.audio_blueprint_metadata.get("activation_hint"),
         }

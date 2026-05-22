@@ -989,6 +989,28 @@ label {
   border-radius: 999px;
 }
 
+.music-ai-status-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.music-ai-status-row span {
+  padding: 5px 8px;
+  color: #61776c;
+  font-size: 11px;
+  font-weight: 900;
+  background: rgb(255 255 255 / 68%);
+  border: 1px solid #cfddd4;
+  border-radius: 999px;
+}
+
+.music-ai-status-row span.active {
+  color: #0f6d46;
+  background: #f1fff6;
+  border-color: #8dc9a7;
+}
+
 .music-mode-buttons {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1010,6 +1032,15 @@ label {
   border-radius: 12px;
 }
 
+.music-submode-group.ai-aligned,
+.music-file-row.ai-aligned,
+.music-slider-grid.ai-aligned label,
+.music-fade-grid.ai-aligned label,
+.music-mix-options.ai-aligned .toggle {
+  border-color: #8dc9a7;
+  box-shadow: 0 0 0 3px rgb(35 132 95 / 9%);
+}
+
 .music-submode-group > span,
 .music-plan-grid strong {
   display: block;
@@ -1027,7 +1058,7 @@ label {
 
 .music-submode-buttons {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -1145,6 +1176,190 @@ label {
 
 .music-audio-note {
   margin: 0;
+}
+
+.audio-blueprint-panel {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  background: rgb(255 255 255 / 72%);
+  border: 1px solid #cfe0d4;
+  border-radius: 14px;
+}
+
+.audio-blueprint-head,
+.audio-blueprint-title,
+.audio-blueprint-head-actions,
+.audio-blueprint-card-head,
+.audio-blueprint-candidate,
+.audio-blueprint-cue-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.audio-blueprint-head,
+.audio-blueprint-card-head,
+.audio-blueprint-candidate,
+.audio-blueprint-cue-main {
+  justify-content: space-between;
+}
+
+.audio-blueprint-title {
+  color: #17362b;
+}
+
+.audio-blueprint-title > div,
+.audio-blueprint-card,
+.audio-blueprint-cue {
+  display: grid;
+  gap: 4px;
+}
+
+.audio-blueprint-title strong,
+.audio-blueprint-shelf > strong,
+.audio-blueprint-timeline > strong {
+  color: #17362b;
+  font-size: 14px;
+}
+
+.audio-blueprint-title span,
+.audio-blueprint-card p,
+.audio-blueprint-cue p,
+.audio-blueprint-candidate span,
+.audio-blueprint-cue-meta {
+  color: #587063;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.audio-blueprint-head-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.audio-blueprint-badge {
+  padding: 6px 10px;
+  color: #476558;
+  font-size: 11px;
+  font-weight: 900;
+  background: #f7fbf8;
+  border: 1px solid #cfe0d4;
+  border-radius: 999px;
+}
+
+.audio-blueprint-badge.active {
+  color: #103c2d;
+  background: #f2fff7;
+  border-color: #8ac7a5;
+}
+
+.audio-blueprint-apply-btn,
+.audio-blueprint-card button {
+  min-height: 34px;
+  padding: 0 12px;
+  color: #185b43;
+  font-size: 12px;
+  font-weight: 900;
+  cursor: pointer;
+  background: rgb(255 255 255 / 88%);
+  border: 1px solid #bdd7c3;
+  border-radius: 10px;
+}
+
+.audio-blueprint-apply-btn.active,
+.audio-blueprint-card button:disabled {
+  color: #7f9489;
+  cursor: default;
+  background: #f6faf7;
+  border-color: #d4e1d8;
+}
+
+.audio-blueprint-chip-row,
+.audio-blueprint-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.audio-blueprint-chip-row span,
+.audio-blueprint-stats span {
+  padding: 5px 8px;
+  color: #476558;
+  font-size: 11px;
+  font-weight: 900;
+  background: #f7fbf8;
+  border: 1px solid #d6e4db;
+  border-radius: 999px;
+}
+
+.audio-blueprint-origin {
+  margin: -2px 0 0;
+  color: #4e645a;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.audio-blueprint-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.audio-blueprint-card {
+  padding: 12px;
+  background: #fbfefd;
+  border: 1px solid #d8e5dc;
+  border-radius: 12px;
+}
+
+.audio-blueprint-card-head strong,
+.audio-blueprint-candidate strong,
+.audio-blueprint-cue-title {
+  color: #17362b;
+  font-size: 13px;
+}
+
+.audio-blueprint-card-head span {
+  color: #7a8e84;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.audio-blueprint-card-head span.applied {
+  color: #0f6d46;
+}
+
+.audio-blueprint-card p,
+.audio-blueprint-cue p {
+  margin: 0;
+}
+
+.audio-blueprint-shelf,
+.audio-blueprint-timeline {
+  display: grid;
+  gap: 10px;
+}
+
+.audio-blueprint-candidate-list,
+.audio-blueprint-cue-list {
+  display: grid;
+  gap: 8px;
+}
+
+.audio-blueprint-candidate,
+.audio-blueprint-cue {
+  padding: 10px 12px;
+  background: #fbfefd;
+  border: 1px solid #d8e5dc;
+  border-radius: 12px;
+}
+
+.audio-blueprint-candidate.selected {
+  border-color: #8cc8a6;
+  box-shadow: 0 0 0 3px rgb(35 132 95 / 10%);
 }
 
 @keyframes strategyShotA {
@@ -3066,6 +3281,7 @@ select:focus {
   .strategy-effect-grid,
   .performance-mode-options,
   .startup-health-grid,
+  .audio-blueprint-grid,
   .photo-cache-insight-grid,
   .video-cache-insight-grid {
     grid-template-columns: 1fr;
@@ -3091,6 +3307,15 @@ select:focus {
   }
 
   .startup-health-head {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .audio-blueprint-head,
+  .audio-blueprint-head-actions,
+  .audio-blueprint-card-head,
+  .render-audio-timeline-head,
+  .render-audio-cue-title-row {
     align-items: stretch;
     flex-direction: column;
   }
@@ -3142,6 +3367,7 @@ select:focus {
 
 .plan-summary {
   display: flex;
+  flex-wrap: wrap;
   gap: 24px;
   margin-bottom: 1.25rem;
   font-size: 0.85rem;
@@ -3186,11 +3412,21 @@ select:focus {
   background: rgba(255,255,255,0.07);
 }
 
+.segment-strip[role="button"] {
+  cursor: pointer;
+}
+
 .segment-strip.title { border-left: 3px solid #10b981; background: rgba(16,185,129,0.08); }
 .segment-strip.chapter { border-left: 3px solid #3b82f6; background: rgba(59,130,246,0.08); }
 .segment-strip.video { border-left: 3px solid #f59e0b; }
 .segment-strip.image { border-left: 3px solid #6366f1; }
 .segment-strip.end { border-left: 3px solid #ec4899; }
+
+.segment-strip.linked-audio-section {
+  border-color: rgb(110 231 183 / 48%);
+  box-shadow: 0 0 0 2px rgb(52 211 153 / 14%);
+  background: rgba(52,211,153,0.12);
+}
 
 .seg-label {
   font-size: 0.65rem;
@@ -3211,6 +3447,145 @@ select:focus {
   font-family: "Cascadia Mono", Consolas, monospace;
  color: #4ade80;
  opacity: 0.8;
+}
+
+.render-audio-timeline-card {
+  margin-bottom: 1.5rem;
+  padding: 1rem 1.1rem;
+  background: linear-gradient(180deg, #12231c 0%, #0b1712 100%);
+  border: 1px solid #22392e;
+  border-radius: 12px;
+  color: #ddede4;
+  box-shadow: inset 0 1px 10px rgb(0 0 0 / 28%);
+}
+
+.render-audio-timeline-head,
+.render-audio-cue-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.render-audio-timeline-head {
+  margin-bottom: 10px;
+}
+
+.render-audio-timeline-head strong {
+  display: block;
+  color: #eefcf4;
+  font-size: 0.98rem;
+}
+
+.render-audio-timeline-head span {
+  display: block;
+  margin-top: 2px;
+  color: #90aa9d;
+  font-size: 0.78rem;
+}
+
+.render-audio-timeline-badge {
+  flex: 0 0 auto;
+  padding: 6px 10px;
+  color: #9ef0bf !important;
+  font-size: 0.75rem !important;
+  font-weight: 900;
+  background: rgb(20 65 44 / 56%);
+  border: 1px solid #2d6047;
+  border-radius: 999px;
+}
+
+.render-audio-timeline-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.render-audio-timeline-summary span,
+.render-audio-cue-meta span,
+.render-audio-cue-live {
+  padding: 4px 8px;
+  color: #a6c1b4;
+  font-size: 0.72rem;
+  font-weight: 800;
+  background: rgb(255 255 255 / 4%);
+  border: 1px solid rgb(120 150 132 / 28%);
+  border-radius: 999px;
+}
+
+.render-audio-timeline-list {
+  display: grid;
+  gap: 10px;
+}
+
+.render-audio-cue {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  background: rgb(255 255 255 / 3%);
+  border: 1px solid rgb(255 255 255 / 6%);
+  border-radius: 10px;
+}
+
+.render-audio-cue.active {
+  border-color: #4ade80;
+  box-shadow: 0 0 0 3px rgb(74 222 128 / 12%);
+}
+
+.render-audio-cue.selected {
+  border-color: #86efac;
+  box-shadow: 0 0 0 3px rgb(134 239 172 / 14%);
+  background: rgb(26 54 42 / 72%);
+}
+
+.render-audio-cue-title-row strong {
+  color: #f0fdf4;
+  font-size: 0.88rem;
+}
+
+.render-audio-cue-title-row span {
+  color: #9bc5ac;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 0.73rem;
+}
+
+.render-audio-cue-rail {
+  overflow: hidden;
+  position: relative;
+  height: 10px;
+  background: #13281f;
+  border: 1px solid #21382d;
+  border-radius: 999px;
+}
+
+.render-audio-cue-bar {
+  position: absolute;
+  top: 1px;
+  bottom: 1px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #34d399 0%, #a7f3d0 100%);
+  box-shadow: 0 0 14px rgb(52 211 153 / 28%);
+}
+
+.render-audio-cue-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.render-audio-cue p {
+  margin: 0;
+  color: #90aa9d;
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.render-audio-cue-live {
+  justify-self: start;
+  color: #d3ffe2;
+  background: rgb(24 90 58 / 58%);
+  border-color: #2f7b56;
 }
 
 
@@ -3655,6 +4030,14 @@ select:focus {
 
 @media (max-width: 980px) {
   .render-queue-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .music-submode-buttons,
+  .music-plan-grid,
+  .music-slider-grid,
+  .music-fade-grid,
+  .music-mix-options {
     grid-template-columns: 1fr;
   }
 }

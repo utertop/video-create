@@ -9,7 +9,7 @@ export type RenderEngine = "auto" | "ffmpeg_concat" | "moviepy_crossfade";
 export type PerformanceMode = "stable" | "balanced" | "quality";
 export type MusicMode = "off" | "auto" | "manual";
 export type MusicFitStrategy = "auto" | "loop" | "trim" | "intro_loop_outro" | "once";
-export type MusicPlaylistMode = "single" | "auto_playlist" | "manual_playlist";
+export type MusicPlaylistMode = "single" | "auto_playlist" | "manual_playlist" | "chapter_restart";
 export type EditStrategy =
   | "smart_director"
   | "fast_assembly"
@@ -177,6 +177,7 @@ export interface V5StoryBlueprint {
     /** Chunk size in seconds for V5.6 long-video stable renderer. */
     chunk_seconds?: number | null;
     audio?: V5AudioSettings | null;
+    audio_blueprint?: V5AudioBlueprint | null;
     scenic_spot_title_mode?: V5SectionTitleMode;
     title_style?: V5TitleStyle | null;
     end_title_style?: V5TitleStyle | null;
@@ -332,6 +333,7 @@ export interface V5RenderSettings {
   render_mode?: string | null;
   chunk_seconds?: number | null;
   audio?: V5AudioSettings | null;
+  audio_blueprint?: V5AudioBlueprint | null;
   cover?: boolean;
 }
 
@@ -340,9 +342,11 @@ export interface V5AudioSettings {
   music_mode: MusicMode;
   music_path?: string | null;
   music_source?: "none" | "library" | "manual" | string;
+  music_profile?: string | null;
   music_fit_strategy?: MusicFitStrategy | string;
   music_playlist_mode?: MusicPlaylistMode | string;
   music_playlist_paths?: string[] | null;
+  music_chapter_restart?: boolean;
   estimated_video_duration?: number | null;
   bgm_volume: number;
   source_audio_volume: number;
@@ -352,6 +356,59 @@ export interface V5AudioSettings {
   fade_out_seconds: number;
   normalize_audio?: boolean;
   target_lufs?: number;
+}
+
+export interface V5AudioBlueprintCandidateAsset {
+  asset_id?: string | null;
+  relative_path?: string | null;
+  absolute_path?: string | null;
+  duration_seconds?: number | null;
+  score?: number | null;
+}
+
+export interface V5AudioBlueprintCue {
+  section_id?: string | null;
+  title?: string | null;
+  section_type?: string | null;
+  order?: number | null;
+  phase?: string | null;
+  energy?: string | null;
+  asset_count?: number | null;
+  estimated_duration_seconds?: number | null;
+  ducking_hint?: string | null;
+  reason?: string | null;
+  start_time?: number | null;
+  end_time?: number | null;
+  duration?: number | null;
+}
+
+export interface V5AudioBlueprintAdoptionState {
+  source?: boolean;
+  mix?: boolean;
+  timing?: boolean;
+  all?: boolean;
+  applied_scopes?: string[] | null;
+  updated_at?: string | null;
+}
+
+export interface V5AudioBlueprint {
+  version?: number;
+  mode?: string | null;
+  template_id?: string | null;
+  music_profile?: string | null;
+  energy_curve_style?: string | null;
+  estimated_project_duration_seconds?: number | null;
+  longform_project?: boolean;
+  selected_candidate?: V5AudioBlueprintCandidateAsset | null;
+  candidate_assets?: V5AudioBlueprintCandidateAsset[] | null;
+  search_keywords?: string[] | null;
+  section_cues?: V5AudioBlueprintCue[] | null;
+  timeline_cues?: V5AudioBlueprintCue[] | null;
+  recommended_audio_settings?: Partial<V5AudioSettings> | null;
+  adopted_audio_settings?: Partial<V5AudioSettings> | null;
+  ui_adoption_state?: V5AudioBlueprintAdoptionState | null;
+  origin_summary?: string | null;
+  activation_hint?: string | null;
 }
 
 export interface V5CachePolicy {
