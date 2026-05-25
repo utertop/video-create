@@ -22,7 +22,7 @@ def _reset_dir(path: Path) -> None:
 
 
 def test_scan_outputs_content_profile() -> None:
-    root = Path("d:/Automatic/video_create/tests/mock_template_scan_project")
+    root = Path(__file__).resolve().parent / "tmp_vcs_template_scan_project"
     _reset_dir(root)
     _make_image(root / "旅行相册" / "img1.jpg", size=(1600, 900))
     _make_image(root / "旅行相册" / "img2.jpg", size=(900, 1600))

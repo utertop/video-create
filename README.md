@@ -2,7 +2,7 @@
 
 Video Create Studio 是一个基于 `Tauri + React + Python V5` 的视频生成桌面应用。
 
-当前版本：`V5.6.0`  
+当前版本：`V5.6.2`  
 当前 V5 Schema：`5.5`
 
 ## 主流程
@@ -80,6 +80,11 @@ npm run build:desktop
 npm run build:desktop:msi
 ```
 
+发布前请同时查看：
+
+- `CHANGELOG.md`
+- `docs/INSTALLER_TEST_CHECKLIST.md`
+
 说明：
 
 - `npm run build:desktop` 会按平台自动选更稳的默认 bundler
@@ -100,6 +105,20 @@ npm run build:desktop:msi
 所以这版代码的合理“下一步”是先把 `Windows/macOS` 桌面分发做稳，再单独规划 iOS 架构。
 
 ## 常用检查命令
+
+成熟产品基线检查：
+
+```powershell
+npm run check
+```
+
+完整冒烟测试：
+
+```powershell
+npm run check:full
+```
+
+手动拆分检查：
 
 ```powershell
 npm run build

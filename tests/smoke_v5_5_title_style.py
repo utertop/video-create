@@ -3,10 +3,17 @@ import json
 import shutil
 import sys
 from pathlib import Path
+from typing import Tuple
+
+from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import video_engine_v5 as engine
+
+def make_image(path: Path, color: Tuple[int, int, int]) -> None:
+    image = Image.new("RGB", (960, 540), color)
+    image.save(path, quality=90)
 
 def setup_mock_project(root: Path):
     if root.exists():
@@ -15,22 +22,22 @@ def setup_mock_project(root: Path):
     
     # Create folders with different keywords to test auto-recommendation
     (root / "我的猫咪").mkdir()
-    (root / "我的猫咪" / "pic1.jpg").touch()
+    make_image(root / "我的猫咪" / "pic1.jpg", (220, 160, 180))
     
     (root / "雪山徒步").mkdir()
-    (root / "雪山徒步" / "pic2.jpg").touch()
+    make_image(root / "雪山徒步" / "pic2.jpg", (180, 210, 230))
     
     (root / "极限滑雪").mkdir()
-    (root / "极限滑雪" / "pic3.jpg").touch()
+    make_image(root / "极限滑雪" / "pic3.jpg", (240, 245, 250))
     
     (root / "古镇美食").mkdir()
-    (root / "古镇美食" / "pic4.jpg").touch()
+    make_image(root / "古镇美食" / "pic4.jpg", (180, 120, 80))
     
     (root / "普通章节").mkdir()
-    (root / "普通章节" / "pic5.jpg").touch()
+    make_image(root / "普通章节" / "pic5.jpg", (120, 160, 200))
 
 def test_v5_5_pipeline():
-    test_root = Path("d:/Automatic/video_create/tests/mock_v5_5_project")
+    test_root = Path(__file__).resolve().parent / "tmp_vcs_5_5_title_style"
     setup_mock_project(test_root)
     
     print("--- Phase 1: Scan ---")
@@ -42,7 +49,7 @@ def test_v5_5_pipeline():
     
     expected = {
         "我的猫咪": "playful_pop",
-        "雪山徒步": "nature_documentary",
+        "雪山徒步": "documentary_lower_third",
         "极限滑雪": "impact_flash",
         "古镇美食": "travel_postcard",
         "普通章节": "cinematic_bold"
@@ -84,3 +91,4 @@ if __name__ == "__main__":
         print(f"Test FAILED: {e}")
         import traceback
         traceback.print_exc()
+        raise

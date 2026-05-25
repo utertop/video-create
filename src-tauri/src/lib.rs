@@ -109,6 +109,20 @@ async fn startup_self_check(app: AppHandle) -> Result<StartupDiagnostics, String
 }
 
 #[tauri::command]
+async fn preflight_render_v5(
+    input_folder: String,
+    output_dir: String,
+    plan_path: String,
+    output_path: String,
+) -> Result<StartupDiagnostics, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        preflight_render_v5_blocking(input_folder, output_dir, plan_path, output_path)
+    })
+    .await
+    .map_err(|e| format!("render preflight failed unexpectedly: {}", e))?
+}
+
+#[tauri::command]
 async fn generate_video(
     app: AppHandle,
     manager: State<'_, JobManager>,
@@ -1523,6 +1537,40 @@ fn startup_self_check_blocking(app: &AppHandle) -> Result<StartupDiagnostics, St
     Ok(StartupDiagnostics { ok, summary, checks })
 }
 
+fn preflight_render_v5_blocking(
+    input_folder: String,
+    output_dir: String,
+    plan_path: String,
+    output_path: String,
+) -> Result<StartupDiagnostics, String> {
+    let input_folder = PathBuf::from(input_folder);
+    let output_dir = PathBuf::from(output_dir);
+    let plan_path = PathBuf::from(plan_path);
+    let output_path = PathBuf::from(output_path);
+
+    let mut checks = vec![
+        check_existing_dir(&input_folder, "input_folder", "素材目录"),
+        check_writable_dir(&output_dir, "output_dir", "输出目录"),
+        check_existing_file(&plan_path, "render_plan", "渲染计划"),
+        check_output_target(&output_path),
+    ];
+
+    if plan_path.is_file() {
+        checks.push(check_render_plan_sources(&plan_path));
+        checks.push(check_render_plan_scale(&plan_path));
+    }
+
+    let ok = checks.iter().all(|check| check.ok);
+    let failed = checks.iter().filter(|check| !check.ok).count();
+    let summary = if ok {
+        "渲染前预检通过，可以开始最终渲染。".to_string()
+    } else {
+        format!("渲染前预检发现 {} 个问题，请处理后再渲染。", failed)
+    };
+
+    Ok(StartupDiagnostics { ok, summary, checks })
+}
+
 fn check_engine_resource(app: &AppHandle) -> StartupCheckItem {
     match find_v5_engine_script(app) {
         Ok(path) => StartupCheckItem {
@@ -1539,6 +1587,204 @@ fn check_engine_resource(app: &AppHandle) -> StartupCheckItem {
             message,
             detail: None,
         },
+    }
+}
+
+fn check_existing_dir(path: &Path, id: &str, label: &str) -> StartupCheckItem {
+    if path.is_dir() {
+        StartupCheckItem {
+            id: id.to_string(),
+            label: label.to_string(),
+            ok: true,
+            message: "目录存在且可访问。".to_string(),
+            detail: Some(path.display().to_string()),
+        }
+    } else {
+        StartupCheckItem {
+            id: id.to_string(),
+            label: label.to_string(),
+            ok: false,
+            message: "目录不存在或不可访问。".to_string(),
+            detail: Some(path.display().to_string()),
+        }
+    }
+}
+
+fn check_existing_file(path: &Path, id: &str, label: &str) -> StartupCheckItem {
+    if path.is_file() {
+        StartupCheckItem {
+            id: id.to_string(),
+            label: label.to_string(),
+            ok: true,
+            message: "文件存在且可读取。".to_string(),
+            detail: Some(path.display().to_string()),
+        }
+    } else {
+        StartupCheckItem {
+            id: id.to_string(),
+            label: label.to_string(),
+            ok: false,
+            message: "文件不存在，请先完成故事蓝图确认并生成 render_plan.json。".to_string(),
+            detail: Some(path.display().to_string()),
+        }
+    }
+}
+
+fn check_writable_dir(path: &Path, id: &str, label: &str) -> StartupCheckItem {
+    match ensure_directory_writable(path) {
+        Ok(()) => StartupCheckItem {
+            id: id.to_string(),
+            label: label.to_string(),
+            ok: true,
+            message: "目录可写。".to_string(),
+            detail: Some(path.display().to_string()),
+        },
+        Err(err) => StartupCheckItem {
+            id: id.to_string(),
+            label: label.to_string(),
+            ok: false,
+            message: err,
+            detail: Some(path.display().to_string()),
+        },
+    }
+}
+
+fn check_output_target(output_path: &Path) -> StartupCheckItem {
+    let parent = output_path.parent().unwrap_or_else(|| Path::new("."));
+    match ensure_directory_writable(parent) {
+        Ok(()) => {
+            let exists_note = if output_path.exists() {
+                "输出文件已存在，渲染时会覆盖同名文件。"
+            } else {
+                "输出文件路径可用。"
+            };
+            StartupCheckItem {
+                id: "output_file".to_string(),
+                label: "输出文件".to_string(),
+                ok: true,
+                message: exists_note.to_string(),
+                detail: Some(output_path.display().to_string()),
+            }
+        }
+        Err(err) => StartupCheckItem {
+            id: "output_file".to_string(),
+            label: "输出文件".to_string(),
+            ok: false,
+            message: format!("输出文件所在目录不可写: {}", err),
+            detail: Some(output_path.display().to_string()),
+        },
+    }
+}
+
+fn check_render_plan_sources(plan_path: &Path) -> StartupCheckItem {
+    let content = match std::fs::read_to_string(plan_path) {
+        Ok(content) => content,
+        Err(err) => {
+            return StartupCheckItem {
+                id: "media_sources".to_string(),
+                label: "素材可读性".to_string(),
+                ok: false,
+                message: format!("无法读取渲染计划: {}", err),
+                detail: Some(plan_path.display().to_string()),
+            };
+        }
+    };
+    let value: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(value) => value,
+        Err(err) => {
+            return StartupCheckItem {
+                id: "media_sources".to_string(),
+                label: "素材可读性".to_string(),
+                ok: false,
+                message: format!("渲染计划 JSON 无法解析: {}", err),
+                detail: Some(plan_path.display().to_string()),
+            };
+        }
+    };
+
+    let mut total_sources = 0usize;
+    let mut missing = Vec::new();
+    if let Some(segments) = value.get("segments").and_then(|v| v.as_array()) {
+        for segment in segments {
+            let Some(source) = segment.get("source_path").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            if source.trim().is_empty() {
+                continue;
+            }
+            total_sources += 1;
+            let source_path = PathBuf::from(source);
+            if !source_path.is_file() {
+                missing.push(source_path.display().to_string());
+            }
+        }
+    }
+
+    if missing.is_empty() {
+        StartupCheckItem {
+            id: "media_sources".to_string(),
+            label: "素材可读性".to_string(),
+            ok: true,
+            message: format!("渲染计划中的 {} 个素材引用可访问。", total_sources),
+            detail: None,
+        }
+    } else {
+        StartupCheckItem {
+            id: "media_sources".to_string(),
+            label: "素材可读性".to_string(),
+            ok: false,
+            message: format!("有 {} 个素材文件缺失或不可读取。", missing.len()),
+            detail: Some(missing.into_iter().take(5).collect::<Vec<_>>().join("\n")),
+        }
+    }
+}
+
+fn check_render_plan_scale(plan_path: &Path) -> StartupCheckItem {
+    let content = match std::fs::read_to_string(plan_path) {
+        Ok(content) => content,
+        Err(err) => {
+            return StartupCheckItem {
+                id: "render_scale".to_string(),
+                label: "渲染规模".to_string(),
+                ok: false,
+                message: format!("无法读取渲染计划: {}", err),
+                detail: Some(plan_path.display().to_string()),
+            };
+        }
+    };
+    let value: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(value) => value,
+        Err(err) => {
+            return StartupCheckItem {
+                id: "render_scale".to_string(),
+                label: "渲染规模".to_string(),
+                ok: false,
+                message: format!("渲染计划 JSON 无法解析: {}", err),
+                detail: Some(plan_path.display().to_string()),
+            };
+        }
+    };
+    let segment_count = value
+        .get("segments")
+        .and_then(|v| v.as_array())
+        .map(|segments| segments.len())
+        .unwrap_or(0);
+    let total_duration = value
+        .get("total_duration")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    let message = if total_duration >= 1800.0 || segment_count >= 300 {
+        "检测到长视频或大量片段，建议使用稳定优先性能档位。"
+    } else {
+        "当前渲染规模正常。"
+    };
+
+    StartupCheckItem {
+        id: "render_scale".to_string(),
+        label: "渲染规模".to_string(),
+        ok: true,
+        message: message.to_string(),
+        detail: Some(format!("{} 个片段，预计 {:.1} 秒", segment_count, total_duration)),
     }
 }
 
@@ -1736,6 +1982,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             startup_self_check,
+            preflight_render_v5,
             generate_video,
             cancel_video,
             open_in_explorer,

@@ -57,7 +57,7 @@ from render_backends import (
 # dependencies such as numpy/moviepy/pillow are installed. Real scan/render work
 # still validates dependencies when the command continues past this point.
 def _print_early_help_without_optional_deps() -> None:
-    print("""Video Create Studio V5.6.0 Engine
+    print("""Video Create Studio V5.6.2 Engine
 
 usage:
   python video_engine_v5.py scan    --input_folder <folder> --output <media_library.json> [--recursive]
@@ -4832,11 +4832,11 @@ class Renderer:
         if not clips:
             raise RuntimeError("No valid clips generated")
 
-        emit_event("phase", phase="render", message="å§ï½…æ¹ªéšå Ÿåžšéˆâ‚¬ç¼å Ÿæ¤‚é—‚å¯¸åšŽ", percent=91)
+        emit_event("phase", phase="render", message="正在合成最终视频画面", percent=91)
         final = self._compose_timeline(clips, rendered_segments)
 
         if self.params.get("watermark"):
-            emit_event("phase", phase="render", message="å§ï½…æ¹ªå¨£è¯²å§žå§˜æ‘åµƒ", percent=92)
+            emit_event("phase", phase="render", message="正在添加水印", percent=92)
             final = self._add_watermark(final, str(self.params.get("watermark")))
 
         return final, rendered_segments

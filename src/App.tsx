@@ -63,6 +63,7 @@ import {
   V5ChapterBackgroundMode,
   RenderV5Params,
   buildV5RenderCommandPreview,
+  preflightRenderV5,
   startupSelfCheck,
 } from "./lib/engine";
 import { findSectionById, getAssetThumbnailPath, updateBlueprintSection, withBlueprintMetadata } from "./lib/blueprint";
@@ -111,6 +112,16 @@ interface RenderQueueItem {
 }
 
 const ACTIVE_RENDER_QUEUE_STATUSES = new Set<RenderQueueStatus>(["queued", "running"]);
+const RECENT_PROJECTS_KEY = "video-create-studio.recent-projects.v1";
+
+interface RecentProject {
+  id: string;
+  inputFolder: string;
+  outputFolder: string | null;
+  title: string;
+  outputName: string;
+  updatedAt: number;
+}
 
 function ProgressBar({
   percent,
@@ -178,6 +189,9 @@ export function App() {
   const [titleLabTarget, setTitleLabTarget] = useState<"title" | "end" | null>(null);
   const [startupDiagnostics, setStartupDiagnostics] = useState<StartupDiagnostics | null>(null);
   const [startupDiagnosticsLoading, setStartupDiagnosticsLoading] = useState(true);
+  const [preflightDiagnostics, setPreflightDiagnostics] = useState<StartupDiagnostics | null>(null);
+  const [preflightLoading, setPreflightLoading] = useState(false);
+  const [recentProjects, setRecentProjects] = useState<RecentProject[]>(() => loadRecentProjects());
   const logEndRef = useRef<HTMLDivElement>(null);
   const segmentsTimelineRef = useRef<HTMLDivElement>(null);
   const activeJobRef = useRef<string | null>(null);
@@ -206,6 +220,7 @@ export function App() {
     setShowGalleryOverlay(false);
     setRenderPreviewPath(null);
     setBackgroundPickerTarget(null);
+    setPreflightDiagnostics(null);
     state.patch({ isDryRun: false });
   };
 
@@ -264,6 +279,89 @@ export function App() {
   function scrollToSection(id: string) {
     setActiveNav(id);
     document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  function rememberCurrentProject() {
+    if (!state.inputFolder) return;
+    const project: RecentProject = {
+      id: state.inputFolder,
+      inputFolder: state.inputFolder,
+      outputFolder: state.outputFolder,
+      title: state.title,
+      outputName: state.outputName,
+      updatedAt: Date.now(),
+    };
+    setRecentProjects((current) => {
+      const next = [project, ...current.filter((item) => item.id !== project.id)].slice(0, 5);
+      saveRecentProjects(next);
+      return next;
+    });
+  }
+
+  function restoreRecentProject(project: RecentProject) {
+    state.patch({
+      inputFolder: project.inputFolder,
+      outputFolder: project.outputFolder,
+      title: project.title,
+      outputName: project.outputName,
+      v5Stage: "INPUT",
+      v5Library: null,
+      v5Blueprint: null,
+      v5RenderPlan: null,
+      titleBackgroundPath: null,
+      endBackgroundPath: null,
+    });
+    setToast(`已恢复最近项目：${shortPathName(project.inputFolder)}`);
+  }
+
+  async function runRenderPreflight(): Promise<boolean> {
+    if (!state.inputFolder || !state.outputFolder || !v5PlanPath || !v5OutputPath) {
+      const message = "请先选择素材目录、输出目录，并确认故事蓝图生成 render_plan.json。";
+      setResult({ ok: false, message, commandPreview: v5CommandPreview });
+      setToast(message);
+      return false;
+    }
+
+    setPreflightLoading(true);
+    setPreflightDiagnostics(null);
+    setPhase("正在进行渲染前预检...");
+    setProgressTone("running");
+    setProgressDetail("正在检查素材、输出目录、渲染计划和可写权限。");
+
+    try {
+      const diagnostics = await preflightRenderV5({
+        inputFolder: state.inputFolder,
+        outputDir: state.outputFolder,
+        planPath: v5PlanPath,
+        outputPath: v5OutputPath,
+      });
+      setPreflightDiagnostics(diagnostics);
+
+      if (!diagnostics.ok) {
+        const message = friendlyDiagnosticsMessage(diagnostics);
+        setResult({ ok: false, message, commandPreview: v5CommandPreview });
+        setToast(message);
+        setProgressTone("failed");
+        setProgressDetail(message);
+        setPhase("渲染前预检失败");
+        return false;
+      }
+
+      setLogs((prev) => [...prev, diagnostics.summary].slice(-100));
+      setProgressDetail("预检通过，正在加入渲染队列。");
+      rememberCurrentProject();
+      return true;
+    } catch (error) {
+      const message = friendlyErrorMessage(error);
+      setResult({ ok: false, message, commandPreview: v5CommandPreview });
+      setToast(message);
+      setProgressTone("failed");
+      setProgressDetail(message);
+      setPhase("渲染前预检失败");
+      return false;
+    } finally {
+      setPreflightLoading(false);
+    }
   }
 
   function syncRenderQueueEvent(event: VideoEvent) {
@@ -606,13 +704,16 @@ export function App() {
     }
   }
 
-  function enqueueV5RenderJob() {
+  async function enqueueV5RenderJob() {
     if (!v5PlanPath || !v5OutputPath) {
-      const message = "V5 render plan or output path is missing. Please compile the V5 plan first.";
+      const message = "V5 渲染计划或输出路径缺失。请先确认故事蓝图并生成 render_plan.json。";
       setResult({ ok: false, message, commandPreview: v5CommandPreview });
       setToast(message);
       return;
     }
+
+    const preflightOk = await runRenderPreflight();
+    if (!preflightOk) return;
 
     const hasLiveJobs = renderQueue.some((item) => ACTIVE_RENDER_QUEUE_STATUSES.has(item.status));
     if (!hasLiveJobs) {
@@ -620,7 +721,7 @@ export function App() {
       setResult(null);
       setLogs([]);
       setProgress(0);
-      setPhase("V5 render queued");
+      setPhase("V5 渲染已排队");
       setProgressTone("running");
       setProgressDetail(null);
       setActiveSegmentIndex(null);
@@ -645,7 +746,7 @@ export function App() {
     };
 
     setRenderQueue((prev) => [...prev, job]);
-    setLogs((prev) => [...prev, `Render queued: ${job.label} (${shortJobId(job.id)})`].slice(-100));
+    setLogs((prev) => [...prev, `渲染任务已排队: ${job.label} (${shortJobId(job.id)})`].slice(-100));
     void runRenderQueueJob(job);
   }
 
@@ -668,19 +769,20 @@ export function App() {
       );
       setResult({
         ok: true,
-        message: `V5 render completed: ${job.outputPath}`,
+        message: `V5 视频渲染完成：${job.outputPath}`,
         commandPreview: job.commandPreview || v5CommandPreview,
         outputPath: job.outputPath,
         outputDir: job.outputDir,
       });
+      rememberCurrentProject();
       setProgress(100);
       setProgressTone("done");
-      setPhase("Render complete");
+      setPhase("渲染完成");
       setProgressTone("done");
       setProgressDetail(null);
       setActiveSegmentIndex(null);
     } catch (err: any) {
-      const message = String(err);
+      const message = friendlyErrorMessage(err);
       let shouldShowFailure = true;
       let cancelled = false;
       setRenderQueue((prev) =>
@@ -692,7 +794,7 @@ export function App() {
           return {
             ...item,
             status: wasCancelled ? "cancelled" : "failed",
-            message: wasCancelled ? "Render cancelled" : message,
+            message: wasCancelled ? "渲染已取消" : message,
             finishedAt: item.finishedAt || Date.now(),
           };
         }),
@@ -700,7 +802,7 @@ export function App() {
       if (shouldShowFailure) {
         setResult({
           ok: false,
-          message: `V5 render failed: ${message}`,
+          message,
           commandPreview: job.commandPreview || v5CommandPreview,
         });
       }
@@ -726,7 +828,7 @@ export function App() {
 
     // V5 渲染路径
     if (state.v5Stage === "RENDER" && !dryRun) {
-      enqueueV5RenderJob();
+      await enqueueV5RenderJob();
       return;
       setToast(null);
       setIsRendering(true);
@@ -807,9 +909,10 @@ export function App() {
         outputPath: previewPath,
       });
     } catch (err: any) {
+      const message = friendlyErrorMessage(err);
       setResult({
         ok: false,
-        message: `低清预览生成失败: ${err}`,
+        message: `低清预览生成失败：${message}`,
         commandPreview: v5CommandPreview,
       });
     } finally {
@@ -852,16 +955,18 @@ export function App() {
         },
       };
       state.patch({ v5Blueprint: blueprintWithGuiText, v5Stage: "BLUEPRINT" });
+      rememberCurrentProject();
       
       setPhase("蓝图就绪");
       setProgress(100);
       setToast("故事蓝图已生成，请开始编排您的旅行故事！");
     } catch (error) {
       console.error("V5 Workflow Error:", error);
+      const message = friendlyErrorMessage(error);
       setProgressTone("failed");
-      setProgressDetail(String(error));
+      setProgressDetail(message);
       setPhase("智能编排失败");
-      setToast(`扫描失败: ${error}`);
+      setToast(`智能编排失败：${message}`);
     } finally {
       setIsPlanningWorkflow(false);
     }
@@ -901,11 +1006,12 @@ export function App() {
       
       // 3. 进入渲染阶段
       state.patch({ v5Blueprint: blueprintForCompile, v5RenderPlan: plan, v5Stage: "RENDER" });
+      rememberCurrentProject();
       setPhase("渲染计划就绪");
       setProgress(100);
     } catch (error) {
       console.error("Confirm Blueprint Error:", error);
-      setToast(`确认失败: ${error}`);
+      setToast(`确认失败：${friendlyErrorMessage(error)}`);
     }
   }
 
@@ -1020,6 +1126,16 @@ export function App() {
         {toast && <Toast title={state.v5Stage === "BLUEPRINT" ? "蓝图生成成功" : "提示"} message={toast} onClose={() => setToast(null)} />}
         <div className="workspace-inner">
         <StartupHealthCard diagnostics={startupDiagnostics} loading={startupDiagnosticsLoading} />
+        <RecentProjectsCard projects={recentProjects} onRestore={restoreRecentProject} />
+        {(preflightLoading || preflightDiagnostics) && (
+          <DiagnosticsCard
+            title="渲染前预检"
+            kicker="RENDER PREFLIGHT"
+            diagnostics={preflightDiagnostics}
+            loading={preflightLoading}
+            loadingText="正在检查素材、输出目录和渲染计划..."
+          />
+        )}
         <header className="topbar">
           <div>
             <p className="eyebrow">GUI MVP</p>
@@ -1677,6 +1793,65 @@ function formatQueueTime(timestamp?: number): string {
   return new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+function formatRecentProjectTime(timestamp: number): string {
+  const date = new Date(timestamp);
+  const now = Date.now();
+  if (now - timestamp < 24 * 60 * 60 * 1000) {
+    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }
+  return date.toLocaleDateString();
+}
+
+function loadRecentProjects(): RecentProject[] {
+  try {
+    const raw = window.localStorage.getItem(RECENT_PROJECTS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((item): item is RecentProject => typeof item?.inputFolder === "string")
+      .slice(0, 5);
+  } catch {
+    return [];
+  }
+}
+
+function saveRecentProjects(projects: RecentProject[]) {
+  try {
+    window.localStorage.setItem(RECENT_PROJECTS_KEY, JSON.stringify(projects.slice(0, 5)));
+  } catch {
+    // Local storage can be unavailable in browser previews; the desktop app will still work.
+  }
+}
+
+function friendlyDiagnosticsMessage(diagnostics: StartupDiagnostics): string {
+  const failed = diagnostics.checks.filter((check) => !check.ok);
+  if (failed.length === 0) return diagnostics.summary;
+  const details = failed.map((check) => `${check.label}: ${check.message}`).join("\n");
+  return `${diagnostics.summary}\n${details}`;
+}
+
+function friendlyErrorMessage(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error ?? "");
+  const lower = raw.toLowerCase();
+  if (lower.includes("permission") || raw.includes("拒绝访问") || raw.includes("access is denied")) {
+    return `权限不足：请确认素材目录和输出目录可读写，必要时换到桌面或文档目录后重试。\n${raw}`;
+  }
+  if (lower.includes("no such file") || raw.includes("系统找不到") || raw.includes("找不到")) {
+    return `文件缺失：请确认素材没有被移动或删除，并重新扫描生成渲染计划。\n${raw}`;
+  }
+  if (lower.includes("moviepy") || lower.includes("ffmpeg") || lower.includes("pyinstaller")) {
+    return `渲染依赖异常：请先运行 npm run check，确认 Python worker、MoviePy 和 FFmpeg 可用。\n${raw}`;
+  }
+  if (lower.includes("json") || lower.includes("render_plan")) {
+    return `渲染计划异常：请重新确认故事蓝图，生成新的 render_plan.json 后再试。\n${raw}`;
+  }
+  if (lower.includes("cancel")) {
+    return "渲染已取消。";
+  }
+  return raw || "发生未知错误，请查看日志。";
+}
+
 function StartupHealthCard({
   diagnostics,
   loading,
@@ -1684,27 +1859,51 @@ function StartupHealthCard({
   diagnostics: StartupDiagnostics | null;
   loading: boolean;
 }) {
+  return (
+    <DiagnosticsCard
+      title="桌面运行环境"
+      kicker="STARTUP SELF-CHECK"
+      diagnostics={diagnostics}
+      loading={loading}
+      loadingText="正在检查 worker、资源文件和可写目录..."
+    />
+  );
+}
+
+function DiagnosticsCard({
+  title,
+  kicker,
+  diagnostics,
+  loading,
+  loadingText,
+}: {
+  title: string;
+  kicker: string;
+  diagnostics: StartupDiagnostics | null;
+  loading: boolean;
+  loadingText: string;
+}) {
   if (!loading && !diagnostics) return null;
 
   return (
     <section className={`startup-health-card${diagnostics && !diagnostics.ok ? " failed" : ""}`}>
       <div className="startup-health-head">
         <div>
-          <span className="startup-health-kicker">STARTUP SELF-CHECK</span>
-          <strong>{loading ? "Checking desktop runtime..." : diagnostics?.summary || "Startup self-check unavailable."}</strong>
+          <span className="startup-health-kicker">{kicker}</span>
+          <strong>{loading ? title : diagnostics?.summary || `${title}不可用。`}</strong>
         </div>
         <span className={`startup-health-badge ${loading ? "pending" : diagnostics?.ok ? "ok" : "failed"}`}>
           {loading ? (
             <>
-              <Loader2 className="spin" size={14} /> Running
+              <Loader2 className="spin" size={14} /> 检查中
             </>
           ) : diagnostics?.ok ? (
             <>
-              <CheckCircle2 size={14} /> Ready
+              <CheckCircle2 size={14} /> 通过
             </>
           ) : (
             <>
-              <TriangleAlert size={14} /> Attention
+              <TriangleAlert size={14} /> 需处理
             </>
           )}
         </span>
@@ -1713,8 +1912,8 @@ function StartupHealthCard({
       <div className="startup-health-grid">
         {loading ? (
           <div className="startup-health-item pending">
-            <strong>Startup self-check</strong>
-            <span>Inspecting worker, resources, and writable directories...</span>
+            <strong>{title}</strong>
+            <span>{loadingText}</span>
           </div>
         ) : (
           diagnostics?.checks.map((check) => (
@@ -1728,6 +1927,39 @@ function StartupHealthCard({
             </div>
           ))
         )}
+      </div>
+    </section>
+  );
+}
+
+function RecentProjectsCard({
+  projects,
+  onRestore,
+}: {
+  projects: RecentProject[];
+  onRestore: (project: RecentProject) => void;
+}) {
+  if (projects.length === 0) return null;
+
+  return (
+    <section className="recent-projects-card">
+      <div className="recent-projects-head">
+        <div>
+          <span className="startup-health-kicker">RECENT PROJECTS</span>
+          <strong>最近项目</strong>
+        </div>
+        <History size={18} />
+      </div>
+      <div className="recent-projects-list">
+        {projects.map((project) => (
+          <button key={project.id} type="button" onClick={() => onRestore(project)}>
+            <span>
+              <strong>{project.title || shortPathName(project.inputFolder)}</strong>
+              <small>{shortPathName(project.inputFolder)} → {project.outputFolder ? shortPathName(project.outputFolder) : "未选择输出目录"}</small>
+            </span>
+            <em>{formatRecentProjectTime(project.updatedAt)}</em>
+          </button>
+        ))}
       </div>
     </section>
   );

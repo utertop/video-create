@@ -560,6 +560,41 @@ export async function startupSelfCheck(): Promise<StartupDiagnostics> {
   }
 }
 
+export async function preflightRenderV5({
+  inputFolder,
+  outputDir,
+  planPath,
+  outputPath,
+}: {
+  inputFolder: string;
+  outputDir: string;
+  planPath: string;
+  outputPath: string;
+}): Promise<StartupDiagnostics> {
+  try {
+    return await invoke<StartupDiagnostics>("preflight_render_v5", {
+      inputFolder,
+      outputDir,
+      planPath,
+      outputPath,
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      summary: formatInvokeError(error, "渲染前预检不可用。"),
+      checks: [
+        {
+          id: "preflight_render_v5",
+          label: "渲染前预检",
+          ok: false,
+          message: formatInvokeError(error, "Tauri 后端未响应。"),
+          detail: null,
+        },
+      ],
+    };
+  }
+}
+
 // =========================
 // V5 engine calls
 // =========================
