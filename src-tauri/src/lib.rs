@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Write};
@@ -50,6 +50,8 @@ struct WorkerLaunchSpec {
     kind: WorkerLaunchKind,
 }
 
+const CURRENT_V5_SCHEMA_VERSION: &str = "5.5";
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GenerateVideoPayload {
@@ -74,6 +76,7 @@ struct GenerateVideoPayload {
 #[serde(rename_all = "camelCase")]
 struct GenerateVideoResult {
     ok: bool,
+    code: Option<String>,
     message: String,
     command_preview: String,
     output_path: Option<String>,
@@ -88,6 +91,7 @@ struct StartupCheckItem {
     id: String,
     label: String,
     ok: bool,
+    code: Option<String>,
     message: String,
     detail: Option<String>,
 }
@@ -96,15 +100,27 @@ struct StartupCheckItem {
 #[serde(rename_all = "camelCase")]
 struct StartupDiagnostics {
     ok: bool,
+    code: Option<String>,
     summary: String,
     checks: Vec<StartupCheckItem>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectDocumentsLoadResult {
+    project_dir: String,
+    migrated: bool,
+    migration_notes: Vec<String>,
+    library: Option<Value>,
+    blueprint: Option<Value>,
+    render_plan: Option<Value>,
 }
 
 #[tauri::command]
 async fn startup_self_check(app: AppHandle) -> Result<StartupDiagnostics, String> {
     tauri::async_runtime::spawn_blocking(move || startup_self_check_blocking(&app))
         .await
-        .map_err(|e| format!("startup self-check failed unexpectedly: {}", e))
+        .map_err(|e| coded_error("E_STARTUP_INTERNAL", format!("startup self-check failed unexpectedly: {}", e)))
         ?
 }
 
@@ -119,7 +135,74 @@ async fn preflight_render_v5(
         preflight_render_v5_blocking(input_folder, output_dir, plan_path, output_path)
     })
     .await
-    .map_err(|e| format!("render preflight failed unexpectedly: {}", e))?
+    .map_err(|e| coded_error("E_PREFLIGHT_INTERNAL", format!("render preflight failed unexpectedly: {}", e)))?
+}
+
+#[tauri::command]
+async fn save_session_snapshot(app: AppHandle, snapshot_json: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = session_snapshot_path(&app)?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("无法创建会话快照目录 {}: {}", parent.display(), e))?;
+        }
+        std::fs::write(&path, snapshot_json)
+            .map_err(|e| format!("无法保存会话快照 {}: {}", path.display(), e))
+    })
+    .await
+    .map_err(|e| format!("保存会话快照后台任务异常: {}", e))?
+}
+
+#[tauri::command]
+async fn load_session_snapshot(app: AppHandle) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = session_snapshot_path(&app)?;
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let content = std::fs::read_to_string(&path)
+            .map_err(|e| format!("无法读取会话快照 {}: {}", path.display(), e))?;
+        Ok(Some(content))
+    })
+    .await
+    .map_err(|e| format!("读取会话快照后台任务异常: {}", e))?
+}
+
+#[tauri::command]
+async fn clear_session_snapshot(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = session_snapshot_path(&app)?;
+        if path.exists() {
+            std::fs::remove_file(&path)
+                .map_err(|e| format!("无法删除会话快照 {}: {}", path.display(), e))?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("清理会话快照后台任务异常: {}", e))?
+}
+
+#[tauri::command]
+async fn export_diagnostic_bundle(output_path: String, payload_json: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = PathBuf::from(&output_path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("无法创建诊断包目录 {}: {}", parent.display(), e))?;
+        }
+        std::fs::write(&path, payload_json)
+            .map_err(|e| format!("无法写入诊断包 {}: {}", path.display(), e))?;
+        Ok(path.display().to_string())
+    })
+    .await
+    .map_err(|e| coded_error("E_DIAGNOSTIC_EXPORT_INTERNAL", format!("导出诊断包后台任务异常: {}", e)))?
+}
+
+#[tauri::command]
+async fn load_project_documents_v5(project_dir: String) -> Result<ProjectDocumentsLoadResult, String> {
+    tauri::async_runtime::spawn_blocking(move || load_project_documents_v5_blocking(project_dir))
+        .await
+        .map_err(|e| coded_error("E_PROJECT_LOAD_INTERNAL", format!("加载项目文档后台任务异常: {}", e)))?
 }
 
 #[tauri::command]
@@ -138,6 +221,7 @@ async fn generate_video(
         Ok(result) => Ok(result),
         Err(e) => Ok(GenerateVideoResult {
             ok: false,
+            code: Some("E_V3_TASK_INTERNAL".to_string()),
             message: format!("后台生成任务异常结束: {}", e),
             command_preview: String::new(),
             output_path: None,
@@ -162,6 +246,7 @@ fn generate_video_blocking(
         Err(message) => {
             return GenerateVideoResult {
                 ok: false,
+                code: Some("E_ENGINE_SCRIPT_MISSING".to_string()),
                 command_preview: build_command_preview(&payload, None, None),
                 message,
                 output_path: None,
@@ -181,6 +266,7 @@ fn generate_video_blocking(
     if !payload.dry_run && payload.output_dir.is_empty() {
         return GenerateVideoResult {
             ok: false,
+            code: Some("E_OUTPUT_DIR_REQUIRED".to_string()),
             command_preview: build_command_preview(&payload, Some(&script_path), None),
             message: "请选择输出目录。".to_string(),
             output_path: None,
@@ -204,6 +290,7 @@ fn generate_video_blocking(
     if let Err(message) = check_python_environment() {
         return GenerateVideoResult {
             ok: false,
+            code: Some("E_PYTHON_ENV_INVALID".to_string()),
             message,
             command_preview,
             output_path: None,
@@ -216,6 +303,7 @@ fn generate_video_blocking(
     if manager.current.lock().map(|job| job.is_some()).unwrap_or(true) {
         return GenerateVideoResult {
             ok: false,
+            code: Some("E_TASK_ALREADY_RUNNING".to_string()),
             message: "已有视频正在生成，请先等待完成或停止当前任务。".to_string(),
             command_preview,
             output_path: None,
@@ -293,6 +381,7 @@ fn generate_video_blocking(
                     kill_process_tree(pid);
                     return GenerateVideoResult {
                         ok: false,
+                        code: Some("E_TASK_ALREADY_RUNNING".to_string()),
                         message: "已有视频正在生成，请先等待完成或停止当前任务。".to_string(),
                         command_preview,
                         output_path: None,
@@ -317,6 +406,7 @@ fn generate_video_blocking(
                     clear_job(&manager, &job_id);
                     return GenerateVideoResult {
                         ok: false,
+                        code: Some("E_PROCESS_WAIT_FAILED".to_string()),
                         message: format!("等待 Python 进程结束时失败: {}", e),
                         command_preview,
                         output_path: None,
@@ -333,6 +423,7 @@ fn generate_video_blocking(
             if was_cancelled {
                 GenerateVideoResult {
                     ok: false,
+                    code: Some("E_TASK_CANCELLED".to_string()),
                     message: "已停止当前视频生成任务。".to_string(),
                     command_preview,
                     output_path: None,
@@ -343,6 +434,7 @@ fn generate_video_blocking(
             } else if status.success() && payload.dry_run {
                 GenerateVideoResult {
                     ok: true,
+                    code: None,
                     message: "素材预检完成，素材状态良好。".to_string(),
                     command_preview,
                     output_path: None,
@@ -357,6 +449,7 @@ fn generate_video_blocking(
             } else if status.success() && output_file.is_file() {
                 GenerateVideoResult {
                     ok: true,
+                    code: None,
                     message: format!("视频生成成功：{}", output_file.display()),
                     command_preview,
                     output_path: Some(output_file.display().to_string()),
@@ -367,6 +460,7 @@ fn generate_video_blocking(
             } else if status.success() {
                 GenerateVideoResult {
                     ok: false,
+                    code: Some("E_OUTPUT_FILE_MISSING".to_string()),
                     message: format!("脚本已结束，但没有找到总视频文件：{}", output_file.display()),
                     command_preview,
                     output_path: Some(output_file.display().to_string()),
@@ -377,6 +471,7 @@ fn generate_video_blocking(
             } else {
                 GenerateVideoResult {
                     ok: false,
+                    code: Some("E_V3_PROCESS_FAILED".to_string()),
                     message: format!("执行失败，退出状态: {}", status),
                     command_preview,
                     output_path: None,
@@ -388,6 +483,7 @@ fn generate_video_blocking(
         }
         Err(e) => GenerateVideoResult {
             ok: false,
+            code: Some("E_PROCESS_SPAWN_FAILED".to_string()),
             message: format!("无法启动 Python 进程: {}", e),
             command_preview,
             output_path: None,
@@ -406,6 +502,7 @@ fn cancel_video(manager: State<'_, JobManager>, job_id: String) -> GenerateVideo
             job.cancelled.store(true, Ordering::SeqCst);
             return GenerateVideoResult {
                 ok: true,
+                code: Some("E_TASK_CANCELLED".to_string()),
                 message: "Queued V5 render task cancelled.".to_string(),
                 command_preview: String::new(),
                 output_path: None,
@@ -425,6 +522,7 @@ fn cancel_video(manager: State<'_, JobManager>, job_id: String) -> GenerateVideo
     let Some(job) = job else {
         return GenerateVideoResult {
             ok: false,
+            code: Some("E_NO_ACTIVE_TASK".to_string()),
             message: "当前没有正在生成的视频任务。".to_string(),
             command_preview: String::new(),
             output_path: None,
@@ -437,6 +535,7 @@ fn cancel_video(manager: State<'_, JobManager>, job_id: String) -> GenerateVideo
     if job.id != job_id {
         return GenerateVideoResult {
             ok: false,
+            code: Some("E_TASK_ID_MISMATCH".to_string()),
             message: "当前任务已经变化，请稍后再试。".to_string(),
             command_preview: String::new(),
             output_path: None,
@@ -454,6 +553,7 @@ fn cancel_video(manager: State<'_, JobManager>, job_id: String) -> GenerateVideo
 
     GenerateVideoResult {
         ok: true,
+        code: Some("E_TASK_CANCELLED".to_string()),
         message: "正在停止当前视频生成任务。".to_string(),
         command_preview: String::new(),
         output_path: None,
@@ -516,7 +616,7 @@ async fn scan_v5(
     tauri::async_runtime::spawn_blocking(move || {
         let workspace = project_workspace(&input_folder, project_dir)?;
         std::fs::create_dir_all(&workspace)
-            .map_err(|e| format!("无法创建 V5 项目目录 {}: {}", workspace.display(), e))?;
+            .map_err(|e| coded_error("E_PROJECT_DIR_CREATE_FAILED", format!("无法创建 V5 项目目录 {}: {}", workspace.display(), e)))?;
         let output_path = workspace.join("media_library.json");
         run_v5_worker_json_task(
             &app,
@@ -534,7 +634,7 @@ async fn scan_v5(
         )
     })
     .await
-    .map_err(|e| format!("V5 scan 后台任务异常: {}", e))?
+    .map_err(|e| coded_error("E_SCAN_INTERNAL", format!("V5 scan 后台任务异常: {}", e)))?
 }
 
 #[tauri::command]
@@ -570,7 +670,7 @@ async fn plan_v5(
         )
     })
     .await
-    .map_err(|e| format!("V5 plan 后台任务异常: {}", e))?
+    .map_err(|e| coded_error("E_PLAN_INTERNAL", format!("V5 plan 后台任务异常: {}", e)))?
 }
 
 #[tauri::command]
@@ -579,12 +679,12 @@ async fn save_blueprint_v5(path: String, content: String) -> Result<(), String> 
         let target = PathBuf::from(path);
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)
-                .map_err(|e| format!("无法创建蓝图目录: {}", e))?;
+                .map_err(|e| coded_error("E_BLUEPRINT_DIR_CREATE_FAILED", format!("无法创建蓝图目录: {}", e)))?;
         }
-        std::fs::write(&target, content).map_err(|e| format!("无法保存蓝图: {}", e))
+        std::fs::write(&target, content).map_err(|e| coded_error("E_BLUEPRINT_SAVE_FAILED", format!("无法保存蓝图: {}", e)))
     })
     .await
-    .map_err(|e| format!("保存蓝图后台任务异常: {}", e))?
+    .map_err(|e| coded_error("E_BLUEPRINT_SAVE_INTERNAL", format!("保存蓝图后台任务异常: {}", e)))?
 }
 
 #[tauri::command]
@@ -622,7 +722,7 @@ async fn compile_v5(
         )
     })
     .await
-    .map_err(|e| format!("V5 compile 后台任务异常: {}", e))?
+    .map_err(|e| coded_error("E_COMPILE_INTERNAL", format!("V5 compile 后台任务异常: {}", e)))?
 }
 
 #[tauri::command]
@@ -639,7 +739,7 @@ async fn render_v5(
         render_v5_with_worker_blocking(app, manager, plan_path, output_path, params_json, job_id)
     })
     .await
-    .map_err(|e| format!("V5 render 后台任务异常: {}", e))?
+    .map_err(|e| coded_error("E_RENDER_INTERNAL", format!("V5 render 后台任务异常: {}", e)))?
 }
 
 #[tauri::command]
@@ -661,7 +761,7 @@ async fn preview_title_v5(
         });
         output_dir.push("title_previews");
         std::fs::create_dir_all(&output_dir)
-            .map_err(|e| format!("无法创建标题预览缓存目录 {}: {}", output_dir.display(), e))?;
+            .map_err(|e| coded_error("E_TITLE_PREVIEW_CACHE_FAILED", format!("无法创建标题预览缓存目录 {}: {}", output_dir.display(), e)))?;
 
         let aspect_ratio = aspect_ratio.unwrap_or_else(|| "16:9".to_string());
         let background = background.unwrap_or_else(|| "travel".to_string());
@@ -693,7 +793,7 @@ async fn preview_title_v5(
         )
     })
     .await
-    .map_err(|e| format!("V5 title preview 后台任务异常: {}", e))?
+    .map_err(|e| coded_error("E_TITLE_PREVIEW_INTERNAL", format!("V5 title preview 后台任务异常: {}", e)))?
 }
 
 #[tauri::command]
@@ -716,10 +816,10 @@ async fn preview_render_v5(
         });
         output_dir.push("render_previews");
         std::fs::create_dir_all(&output_dir)
-            .map_err(|e| format!("failed to create render preview cache {}: {}", output_dir.display(), e))?;
+            .map_err(|e| coded_error("E_PREVIEW_CACHE_FAILED", format!("failed to create render preview cache {}: {}", output_dir.display(), e)))?;
 
         let plan_meta = std::fs::metadata(&plan_path)
-            .map_err(|e| format!("cannot read render plan metadata {}: {}", plan_path, e))?;
+            .map_err(|e| coded_error("E_RENDER_PLAN_METADATA_FAILED", format!("cannot read render plan metadata {}: {}", plan_path, e)))?;
         let modified_key = plan_meta
             .modified()
             .ok()
@@ -760,7 +860,7 @@ async fn preview_render_v5(
         )
     })
     .await
-    .map_err(|e| format!("V5 render preview task failed: {}", e))?
+    .map_err(|e| coded_error("E_PREVIEW_RENDER_INTERNAL", format!("V5 render preview task failed: {}", e)))?
 }
 
 fn render_v5_with_worker_blocking(
@@ -1534,7 +1634,12 @@ fn startup_self_check_blocking(app: &AppHandle) -> Result<StartupDiagnostics, St
         format!("Startup self-check found {} issue(s).", failed)
     };
 
-    Ok(StartupDiagnostics { ok, summary, checks })
+    Ok(StartupDiagnostics {
+        ok,
+        code: if ok { None } else { Some("E_STARTUP_CHECK_FAILED".to_string()) },
+        summary,
+        checks,
+    })
 }
 
 fn preflight_render_v5_blocking(
@@ -1568,7 +1673,12 @@ fn preflight_render_v5_blocking(
         format!("渲染前预检发现 {} 个问题，请处理后再渲染。", failed)
     };
 
-    Ok(StartupDiagnostics { ok, summary, checks })
+    Ok(StartupDiagnostics {
+        ok,
+        code: if ok { None } else { Some("E_PREFLIGHT_CHECK_FAILED".to_string()) },
+        summary,
+        checks,
+    })
 }
 
 fn check_engine_resource(app: &AppHandle) -> StartupCheckItem {
@@ -1577,6 +1687,7 @@ fn check_engine_resource(app: &AppHandle) -> StartupCheckItem {
             id: "engine_resource".to_string(),
             label: "Render engine resource".to_string(),
             ok: true,
+            code: None,
             message: "Engine script is available.".to_string(),
             detail: Some(path.display().to_string()),
         },
@@ -1584,6 +1695,7 @@ fn check_engine_resource(app: &AppHandle) -> StartupCheckItem {
             id: "engine_resource".to_string(),
             label: "Render engine resource".to_string(),
             ok: false,
+            code: Some("E_ENGINE_RESOURCE_MISSING".to_string()),
             message,
             detail: None,
         },
@@ -1596,6 +1708,7 @@ fn check_existing_dir(path: &Path, id: &str, label: &str) -> StartupCheckItem {
             id: id.to_string(),
             label: label.to_string(),
             ok: true,
+            code: None,
             message: "目录存在且可访问。".to_string(),
             detail: Some(path.display().to_string()),
         }
@@ -1604,6 +1717,7 @@ fn check_existing_dir(path: &Path, id: &str, label: &str) -> StartupCheckItem {
             id: id.to_string(),
             label: label.to_string(),
             ok: false,
+            code: Some("E_DIRECTORY_MISSING".to_string()),
             message: "目录不存在或不可访问。".to_string(),
             detail: Some(path.display().to_string()),
         }
@@ -1616,6 +1730,7 @@ fn check_existing_file(path: &Path, id: &str, label: &str) -> StartupCheckItem {
             id: id.to_string(),
             label: label.to_string(),
             ok: true,
+            code: None,
             message: "文件存在且可读取。".to_string(),
             detail: Some(path.display().to_string()),
         }
@@ -1624,6 +1739,7 @@ fn check_existing_file(path: &Path, id: &str, label: &str) -> StartupCheckItem {
             id: id.to_string(),
             label: label.to_string(),
             ok: false,
+            code: Some("E_FILE_MISSING".to_string()),
             message: "文件不存在，请先完成故事蓝图确认并生成 render_plan.json。".to_string(),
             detail: Some(path.display().to_string()),
         }
@@ -1636,6 +1752,7 @@ fn check_writable_dir(path: &Path, id: &str, label: &str) -> StartupCheckItem {
             id: id.to_string(),
             label: label.to_string(),
             ok: true,
+            code: None,
             message: "目录可写。".to_string(),
             detail: Some(path.display().to_string()),
         },
@@ -1643,6 +1760,7 @@ fn check_writable_dir(path: &Path, id: &str, label: &str) -> StartupCheckItem {
             id: id.to_string(),
             label: label.to_string(),
             ok: false,
+            code: Some("E_DIRECTORY_NOT_WRITABLE".to_string()),
             message: err,
             detail: Some(path.display().to_string()),
         },
@@ -1662,6 +1780,7 @@ fn check_output_target(output_path: &Path) -> StartupCheckItem {
                 id: "output_file".to_string(),
                 label: "输出文件".to_string(),
                 ok: true,
+                code: None,
                 message: exists_note.to_string(),
                 detail: Some(output_path.display().to_string()),
             }
@@ -1670,6 +1789,7 @@ fn check_output_target(output_path: &Path) -> StartupCheckItem {
             id: "output_file".to_string(),
             label: "输出文件".to_string(),
             ok: false,
+            code: Some("E_OUTPUT_NOT_WRITABLE".to_string()),
             message: format!("输出文件所在目录不可写: {}", err),
             detail: Some(output_path.display().to_string()),
         },
@@ -1684,6 +1804,7 @@ fn check_render_plan_sources(plan_path: &Path) -> StartupCheckItem {
                 id: "media_sources".to_string(),
                 label: "素材可读性".to_string(),
                 ok: false,
+                code: Some("E_RENDER_PLAN_READ_FAILED".to_string()),
                 message: format!("无法读取渲染计划: {}", err),
                 detail: Some(plan_path.display().to_string()),
             };
@@ -1696,6 +1817,7 @@ fn check_render_plan_sources(plan_path: &Path) -> StartupCheckItem {
                 id: "media_sources".to_string(),
                 label: "素材可读性".to_string(),
                 ok: false,
+                code: Some("E_RENDER_PLAN_INVALID_JSON".to_string()),
                 message: format!("渲染计划 JSON 无法解析: {}", err),
                 detail: Some(plan_path.display().to_string()),
             };
@@ -1725,6 +1847,7 @@ fn check_render_plan_sources(plan_path: &Path) -> StartupCheckItem {
             id: "media_sources".to_string(),
             label: "素材可读性".to_string(),
             ok: true,
+            code: None,
             message: format!("渲染计划中的 {} 个素材引用可访问。", total_sources),
             detail: None,
         }
@@ -1733,6 +1856,7 @@ fn check_render_plan_sources(plan_path: &Path) -> StartupCheckItem {
             id: "media_sources".to_string(),
             label: "素材可读性".to_string(),
             ok: false,
+            code: Some("E_MEDIA_SOURCE_MISSING".to_string()),
             message: format!("有 {} 个素材文件缺失或不可读取。", missing.len()),
             detail: Some(missing.into_iter().take(5).collect::<Vec<_>>().join("\n")),
         }
@@ -1747,6 +1871,7 @@ fn check_render_plan_scale(plan_path: &Path) -> StartupCheckItem {
                 id: "render_scale".to_string(),
                 label: "渲染规模".to_string(),
                 ok: false,
+                code: Some("E_RENDER_PLAN_READ_FAILED".to_string()),
                 message: format!("无法读取渲染计划: {}", err),
                 detail: Some(plan_path.display().to_string()),
             };
@@ -1759,6 +1884,7 @@ fn check_render_plan_scale(plan_path: &Path) -> StartupCheckItem {
                 id: "render_scale".to_string(),
                 label: "渲染规模".to_string(),
                 ok: false,
+                code: Some("E_RENDER_PLAN_INVALID_JSON".to_string()),
                 message: format!("渲染计划 JSON 无法解析: {}", err),
                 detail: Some(plan_path.display().to_string()),
             };
@@ -1783,6 +1909,11 @@ fn check_render_plan_scale(plan_path: &Path) -> StartupCheckItem {
         id: "render_scale".to_string(),
         label: "渲染规模".to_string(),
         ok: true,
+        code: if total_duration >= 1800.0 || segment_count >= 300 {
+            Some("W_LARGE_RENDER_PLAN".to_string())
+        } else {
+            None
+        },
         message: message.to_string(),
         detail: Some(format!("{} 个片段，预计 {:.1} 秒", segment_count, total_duration)),
     }
@@ -1799,6 +1930,7 @@ fn check_worker_entrypoint(app: &AppHandle) -> StartupCheckItem {
                 id: "worker_entrypoint".to_string(),
                 label: "Worker entrypoint".to_string(),
                 ok: true,
+                code: None,
                 message: format!("Resolved worker entrypoint via {}.", mode),
                 detail: Some(launch.program.display().to_string()),
             }
@@ -1807,6 +1939,7 @@ fn check_worker_entrypoint(app: &AppHandle) -> StartupCheckItem {
             id: "worker_entrypoint".to_string(),
             label: "Worker entrypoint".to_string(),
             ok: false,
+            code: Some("E_WORKER_ENTRYPOINT_MISSING".to_string()),
             message,
             detail: None,
         },
@@ -1821,6 +1954,7 @@ fn check_worker_health(app: &AppHandle) -> StartupCheckItem {
                 id: "worker_health".to_string(),
                 label: "Worker health".to_string(),
                 ok: false,
+                code: Some("E_WORKER_ENTRYPOINT_MISSING".to_string()),
                 message: format!("Health check skipped: {}", message),
                 detail: None,
             };
@@ -1848,6 +1982,7 @@ fn check_worker_health(app: &AppHandle) -> StartupCheckItem {
                 id: "worker_health".to_string(),
                 label: "Worker health".to_string(),
                 ok: false,
+                code: Some("E_WORKER_HEALTH_LAUNCH_FAILED".to_string()),
                 message: format!("Failed to launch worker health probe: {}", err),
                 detail: Some(launch.program.display().to_string()),
             };
@@ -1866,6 +2001,7 @@ fn check_worker_health(app: &AppHandle) -> StartupCheckItem {
             id: "worker_health".to_string(),
             label: "Worker health".to_string(),
             ok: false,
+            code: Some("E_WORKER_HEALTH_FAILED".to_string()),
             message: format!("Worker health probe exited with {}.", output.status),
             detail: if detail.is_empty() { None } else { Some(detail) },
         };
@@ -1900,6 +2036,7 @@ fn check_worker_health(app: &AppHandle) -> StartupCheckItem {
         id: "worker_health".to_string(),
         label: "Worker health".to_string(),
         ok: true,
+        code: None,
         message: "Worker responded to health probe.".to_string(),
         detail: Some(detail),
     }
@@ -1917,6 +2054,7 @@ fn check_named_writable_dir<E: std::fmt::Display>(
                 id: id.to_string(),
                 label: label.to_string(),
                 ok: false,
+                code: Some("E_DIRECTORY_RESOLVE_FAILED".to_string()),
                 message: format!("Could not resolve directory: {}", err),
                 detail: None,
             };
@@ -1928,6 +2066,7 @@ fn check_named_writable_dir<E: std::fmt::Display>(
             id: id.to_string(),
             label: label.to_string(),
             ok: true,
+            code: None,
             message: "Directory is writable.".to_string(),
             detail: Some(path.display().to_string()),
         },
@@ -1935,6 +2074,7 @@ fn check_named_writable_dir<E: std::fmt::Display>(
             id: id.to_string(),
             label: label.to_string(),
             ok: false,
+            code: Some("E_DIRECTORY_NOT_WRITABLE".to_string()),
             message: err,
             detail: Some(path.display().to_string()),
         },
@@ -1950,6 +2090,284 @@ fn ensure_directory_writable(path: &Path) -> Result<(), String> {
     std::fs::remove_file(&probe_path)
         .map_err(|err| format!("Failed to remove probe file in {}: {}", path.display(), err))?;
     Ok(())
+}
+
+fn coded_error(code: impl AsRef<str>, message: impl Into<String>) -> String {
+    format!("[{}] {}", code.as_ref(), message.into())
+}
+
+fn session_snapshot_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("无法解析应用数据目录: {}", e))?;
+    Ok(app_data_dir.join("session_snapshot.json"))
+}
+
+fn load_project_documents_v5_blocking(project_dir: String) -> Result<ProjectDocumentsLoadResult, String> {
+    let root = PathBuf::from(&project_dir);
+    if !root.is_dir() {
+        return Err(coded_error(
+            "E_PROJECT_DIR_MISSING",
+            format!("项目目录不存在或不可访问: {}", root.display()),
+        ));
+    }
+
+    let mut migration_notes = Vec::new();
+    let mut migrated = false;
+
+    let library = load_and_migrate_project_doc(&root.join("media_library.json"), "media_library", &mut migrated, &mut migration_notes)?;
+    let blueprint = load_and_migrate_project_doc(&root.join("story_blueprint.json"), "story_blueprint", &mut migrated, &mut migration_notes)?;
+    let render_plan = load_and_migrate_project_doc(&root.join("render_plan.json"), "render_plan", &mut migrated, &mut migration_notes)?;
+
+    Ok(ProjectDocumentsLoadResult {
+        project_dir,
+        migrated,
+        migration_notes,
+        library,
+        blueprint,
+        render_plan,
+    })
+}
+
+fn load_and_migrate_project_doc(
+    path: &Path,
+    expected_type: &str,
+    migrated_any: &mut bool,
+    notes: &mut Vec<String>,
+) -> Result<Option<Value>, String> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| coded_error("E_PROJECT_DOC_READ_FAILED", format!("无法读取项目文档 {}: {}", path.display(), e)))?;
+    let parsed: Value = serde_json::from_str(&raw)
+        .map_err(|e| coded_error("E_PROJECT_DOC_INVALID_JSON", format!("项目文档 JSON 无法解析 {}: {}", path.display(), e)))?;
+    let (migrated, migrated_value, migration_notes) = migrate_v5_document(parsed, expected_type)?;
+
+    if migrated {
+        *migrated_any = true;
+        let formatted = serde_json::to_string_pretty(&migrated_value).map_err(|e| {
+            coded_error(
+                "E_PROJECT_DOC_REWRITE_FAILED",
+                format!("无法序列化迁移后的项目文档 {}: {}", path.display(), e),
+            )
+        })?;
+        std::fs::write(path, formatted).map_err(|e| {
+            coded_error(
+                "E_PROJECT_DOC_REWRITE_FAILED",
+                format!("无法写回迁移后的项目文档 {}: {}", path.display(), e),
+            )
+        })?;
+    }
+
+    notes.extend(
+        migration_notes
+            .into_iter()
+            .map(|note| format!("{}: {}", path.file_name().and_then(|v| v.to_str()).unwrap_or(expected_type), note)),
+    );
+
+    Ok(Some(migrated_value))
+}
+
+fn migrate_v5_document(mut value: Value, expected_type: &str) -> Result<(bool, Value, Vec<String>), String> {
+    let obj = value.as_object_mut().ok_or_else(|| {
+        coded_error(
+            "E_PROJECT_DOC_INVALID_SHAPE",
+            format!("项目文档不是有效对象，期望 document_type={}", expected_type),
+        )
+    })?;
+
+    let actual_type = obj
+        .get("document_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    if actual_type != expected_type {
+        return Err(coded_error(
+            "E_PROJECT_DOC_TYPE_MISMATCH",
+            format!("项目文档类型不匹配：期望 {}，实际 {}", expected_type, actual_type),
+        ));
+    }
+
+    let mut migrated = false;
+    let mut notes = Vec::new();
+    let version_before = obj
+        .get("schema_version")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    match expected_type {
+        "media_library" => migrate_media_library_doc(obj, &mut migrated, &mut notes),
+        "story_blueprint" => migrate_story_blueprint_doc(obj, &mut migrated, &mut notes),
+        "render_plan" => migrate_render_plan_doc(obj, &mut migrated, &mut notes),
+        _ => {}
+    }
+
+    if obj
+        .get("schema_version")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        != CURRENT_V5_SCHEMA_VERSION
+    {
+        obj.insert(
+            "schema_version".to_string(),
+            Value::String(CURRENT_V5_SCHEMA_VERSION.to_string()),
+        );
+        migrated = true;
+        notes.push(format!(
+            "schema_version {} -> {}",
+            version_before, CURRENT_V5_SCHEMA_VERSION
+        ));
+    }
+
+    Ok((migrated, value, notes))
+}
+
+fn migrate_media_library_doc(
+    obj: &mut serde_json::Map<String, Value>,
+    migrated: &mut bool,
+    notes: &mut Vec<String>,
+) {
+    ensure_object_child(obj, "project", migrated, notes, "补全 project");
+    if let Some(project) = obj.get_mut("project").and_then(|v| v.as_object_mut()) {
+        if !project.contains_key("project_title") {
+            project.insert("project_title".to_string(), Value::Null);
+            *migrated = true;
+            notes.push("补全 project.project_title".to_string());
+        }
+    }
+
+    ensure_array_child(obj, "directory_nodes", migrated, notes, "补全 directory_nodes");
+    ensure_array_child(obj, "assets", migrated, notes, "补全 assets");
+    ensure_object_child(obj, "summary", migrated, notes, "补全 summary");
+
+    if let Some(assets) = obj.get_mut("assets").and_then(|v| v.as_array_mut()) {
+        for asset in assets {
+            let Some(asset_obj) = asset.as_object_mut() else { continue };
+            sync_alias_field(asset_obj, "thumbnail_path", "thumbnail", migrated, notes, "补全图片缩略图字段");
+            sync_alias_field(asset_obj, "thumbnail", "thumbnail_path", migrated, notes, "补全兼容 thumbnail 字段");
+            if !asset_obj.contains_key("status") {
+                asset_obj.insert("status".to_string(), Value::String("ready".to_string()));
+                *migrated = true;
+            }
+        }
+    }
+}
+
+fn migrate_story_blueprint_doc(
+    obj: &mut serde_json::Map<String, Value>,
+    migrated: &mut bool,
+    notes: &mut Vec<String>,
+) {
+    if !obj.contains_key("subtitle") {
+        obj.insert("subtitle".to_string(), Value::String(String::new()));
+        *migrated = true;
+        notes.push("补全 subtitle".to_string());
+    }
+    ensure_array_child(obj, "sections", migrated, notes, "补全 sections");
+    ensure_object_child(obj, "metadata", migrated, notes, "补全 metadata");
+    if let Some(metadata) = obj.get_mut("metadata").and_then(|v| v.as_object_mut()) {
+        if !metadata.contains_key("chapter_background_mode") {
+            metadata.insert(
+                "chapter_background_mode".to_string(),
+                Value::String("auto_bridge".to_string()),
+            );
+            *migrated = true;
+            notes.push("补全 metadata.chapter_background_mode".to_string());
+        }
+    }
+    if let Some(sections) = obj.get_mut("sections").and_then(|v| v.as_array_mut()) {
+        for section in sections {
+            migrate_story_section(section, migrated);
+        }
+    }
+}
+
+fn migrate_story_section(value: &mut Value, migrated: &mut bool) {
+    let Some(section) = value.as_object_mut() else { return };
+    if !section.contains_key("children") {
+        section.insert("children".to_string(), Value::Array(Vec::new()));
+        *migrated = true;
+    }
+    if !section.contains_key("asset_refs") {
+        section.insert("asset_refs".to_string(), Value::Array(Vec::new()));
+        *migrated = true;
+    }
+    if let Some(children) = section.get_mut("children").and_then(|v| v.as_array_mut()) {
+        for child in children {
+            migrate_story_section(child, migrated);
+        }
+    }
+}
+
+fn migrate_render_plan_doc(
+    obj: &mut serde_json::Map<String, Value>,
+    migrated: &mut bool,
+    notes: &mut Vec<String>,
+) {
+    ensure_array_child(obj, "segments", migrated, notes, "补全 segments");
+    if !obj.contains_key("output_path") {
+        obj.insert("output_path".to_string(), Value::String(String::new()));
+        *migrated = true;
+        notes.push("补全 output_path".to_string());
+    }
+    if let Some(segments) = obj.get_mut("segments").and_then(|v| v.as_array_mut()) {
+        for segment in segments {
+            let Some(seg) = segment.as_object_mut() else { continue };
+            if !seg.contains_key("render_route_tags") {
+                seg.insert("render_route_tags".to_string(), Value::Array(Vec::new()));
+                *migrated = true;
+            }
+        }
+    }
+}
+
+fn ensure_object_child(
+    obj: &mut serde_json::Map<String, Value>,
+    key: &str,
+    migrated: &mut bool,
+    notes: &mut Vec<String>,
+    note: &str,
+) {
+    if !obj.get(key).map(|v| v.is_object()).unwrap_or(false) {
+        obj.insert(key.to_string(), Value::Object(Default::default()));
+        *migrated = true;
+        notes.push(note.to_string());
+    }
+}
+
+fn ensure_array_child(
+    obj: &mut serde_json::Map<String, Value>,
+    key: &str,
+    migrated: &mut bool,
+    notes: &mut Vec<String>,
+    note: &str,
+) {
+    if !obj.get(key).map(|v| v.is_array()).unwrap_or(false) {
+        obj.insert(key.to_string(), Value::Array(Vec::new()));
+        *migrated = true;
+        notes.push(note.to_string());
+    }
+}
+
+fn sync_alias_field(
+    obj: &mut serde_json::Map<String, Value>,
+    primary: &str,
+    alias: &str,
+    migrated: &mut bool,
+    notes: &mut Vec<String>,
+    note: &str,
+) {
+    if !obj.contains_key(primary) {
+        if let Some(value) = obj.get(alias).cloned() {
+            obj.insert(primary.to_string(), value);
+            *migrated = true;
+            notes.push(note.to_string());
+        }
+    }
 }
 
 fn clear_job(manager: &JobManager, job_id: &str) {
@@ -1976,6 +2394,97 @@ fn kill_process_tree(pid: u32) {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migrate_media_library_adds_compat_fields() {
+        let input = json!({
+            "schema_version": "5.4",
+            "document_type": "media_library",
+            "project": {
+                "source_root": "D:/demo",
+                "scan_time": "2026-01-01T00:00:00Z"
+            },
+            "assets": [
+                {
+                    "asset_id": "a1",
+                    "type": "image",
+                    "relative_path": "a.jpg",
+                    "absolute_path": "D:/demo/a.jpg",
+                    "thumbnail": "thumb.jpg",
+                    "file": {
+                        "name": "a.jpg",
+                        "extension": ".jpg",
+                        "size_bytes": 12,
+                        "modified_time": "2026-01-01T00:00:00Z"
+                    },
+                    "media": {
+                        "width": 100,
+                        "height": 100,
+                        "orientation": "square",
+                        "shooting_date": null
+                    },
+                    "classification": {
+                        "directory_node_id": "n1",
+                        "city": null,
+                        "scenic_spot": null
+                    }
+                }
+            ]
+        });
+
+        let (migrated, value, notes) = migrate_v5_document(input, "media_library").expect("migration should succeed");
+        assert!(migrated);
+        assert!(!notes.is_empty());
+        assert_eq!(value["schema_version"], CURRENT_V5_SCHEMA_VERSION);
+        assert_eq!(value["project"]["project_title"], Value::Null);
+        assert_eq!(value["assets"][0]["thumbnail_path"], "thumb.jpg");
+        assert_eq!(value["assets"][0]["status"], "ready");
+    }
+
+    #[test]
+    fn migrate_story_blueprint_adds_children_and_metadata_defaults() {
+        let input = json!({
+            "schema_version": "5.3",
+            "document_type": "story_blueprint",
+            "title": "Demo",
+            "strategy": "smart_director",
+            "sections": [
+                {
+                    "section_id": "s1",
+                    "section_type": "chapter",
+                    "title": "Chapter 1",
+                    "subtitle": null,
+                    "enabled": true,
+                    "source_node_id": null
+                }
+            ]
+        });
+
+        let (migrated, value, _) = migrate_v5_document(input, "story_blueprint").expect("migration should succeed");
+        assert!(migrated);
+        assert_eq!(value["schema_version"], CURRENT_V5_SCHEMA_VERSION);
+        assert_eq!(value["subtitle"], "");
+        assert_eq!(value["metadata"]["chapter_background_mode"], "auto_bridge");
+        assert!(value["sections"][0]["children"].is_array());
+        assert!(value["sections"][0]["asset_refs"].is_array());
+    }
+
+    #[test]
+    fn migrate_render_plan_type_mismatch_returns_error_code() {
+        let input = json!({
+            "schema_version": "5.4",
+            "document_type": "story_blueprint",
+            "title": "Wrong"
+        });
+
+        let error = migrate_v5_document(input, "render_plan").expect_err("type mismatch should fail");
+        assert!(error.contains("[E_PROJECT_DOC_TYPE_MISMATCH]"));
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
         .manage(JobManager::default())
@@ -1983,6 +2492,11 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             startup_self_check,
             preflight_render_v5,
+            save_session_snapshot,
+            load_session_snapshot,
+            clear_session_snapshot,
+            export_diagnostic_bundle,
+            load_project_documents_v5,
             generate_video,
             cancel_video,
             open_in_explorer,

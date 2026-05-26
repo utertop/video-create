@@ -1685,6 +1685,14 @@ select:focus {
   gap: 12px;
 }
 
+.startup-health-badge-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .startup-health-head > div {
   display: grid;
   gap: 4px;
@@ -1770,12 +1778,173 @@ select:focus {
   line-height: 1.45;
 }
 
+.error-code-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 10px;
+  color: #3b4f69;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 11px;
+  font-weight: 800;
+  background: rgb(255 255 255 / 86%);
+  border: 1px solid #c9d6e7;
+  border-radius: 999px;
+}
+
+.error-code-inline {
+  color: #647181;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 11px;
+  font-weight: 800;
+}
+
 .startup-health-item small {
   color: #75867d;
   font-family: "Cascadia Mono", Consolas, monospace;
   font-size: 11px;
   line-height: 1.45;
   word-break: break-all;
+}
+
+.session-recovery-card {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  margin-bottom: 18px;
+  background:
+    radial-gradient(circle at 90% 18%, rgb(221 231 255 / 66%), transparent 24%),
+    linear-gradient(135deg, #fbfcff 0%, #eef4ff 100%);
+  border: 1px solid #cad6ec;
+  border-radius: 14px;
+}
+
+.session-recovery-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.session-recovery-head > div {
+  display: grid;
+  gap: 4px;
+}
+
+.session-recovery-head strong {
+  color: #17362b;
+  font-size: 16px;
+}
+
+.session-recovery-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  padding: 7px 10px;
+  color: #31506e;
+  font-size: 12px;
+  font-weight: 900;
+  background: rgb(255 255 255 / 82%);
+  border: 1px solid #cad6ec;
+  border-radius: 999px;
+}
+
+.session-recovery-body {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.session-recovery-summary {
+  display: grid;
+  gap: 6px;
+}
+
+.session-recovery-summary strong {
+  color: #18362d;
+  font-size: 15px;
+}
+
+.session-recovery-summary span {
+  color: #50685d;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.session-recovery-summary small {
+  color: #6f7f79;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.session-recovery-actions {
+  display: flex;
+  gap: 10px;
+  flex: 0 0 auto;
+}
+
+.project-migration-card {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  margin-bottom: 18px;
+  background:
+    radial-gradient(circle at 90% 18%, rgb(255 238 196 / 66%), transparent 24%),
+    linear-gradient(135deg, #fffdf7 0%, #fff8ea 100%);
+  border: 1px solid #ead39a;
+  border-radius: 14px;
+}
+
+.project-migration-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.project-migration-head > div {
+  display: grid;
+  gap: 4px;
+}
+
+.project-migration-head strong {
+  color: #17362b;
+  font-size: 16px;
+}
+
+.project-migration-badge {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  padding: 7px 10px;
+  color: #7c5a1d;
+  font-size: 12px;
+  font-weight: 900;
+  background: rgb(255 255 255 / 84%);
+  border: 1px solid #ead39a;
+  border-radius: 999px;
+}
+
+.project-migration-body {
+  display: grid;
+  gap: 10px;
+}
+
+.project-migration-body p {
+  margin: 0;
+  color: #635232;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.project-migration-body ul {
+  margin: 0;
+  padding-left: 18px;
+  color: #5e4d2e;
+  font-size: 13px;
+  line-height: 1.6;
 }
 
 .recent-projects-card {
@@ -1888,8 +2057,20 @@ select:focus {
   word-break: break-all;
 }
 
+.result-code-row {
+  margin-top: 10px;
+}
+
 .result-card-actions {
   margin-top: 12px;
+}
+
+.result-action-note {
+  margin-top: 10px;
+  color: #6f4e16;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.5;
 }
 
 .result-open-btn {
@@ -3465,6 +3646,14 @@ select:focus {
   }
 
   .startup-health-head {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .session-recovery-head,
+  .session-recovery-body,
+  .session-recovery-actions,
+  .project-migration-head {
     align-items: stretch;
     flex-direction: column;
   }

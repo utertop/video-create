@@ -446,6 +446,7 @@ export interface GenerateVideoPayload {
 
 export interface GenerateVideoResult {
   ok: boolean;
+  code?: string | null;
   message: string;
   commandPreview: string;
   outputPath?: string;
@@ -458,14 +459,51 @@ export interface StartupCheckItem {
   id: string;
   label: string;
   ok: boolean;
+  code?: string | null;
   message: string;
   detail?: string | null;
 }
 
 export interface StartupDiagnostics {
   ok: boolean;
+  code?: string | null;
   summary: string;
   checks: StartupCheckItem[];
+}
+
+export interface AppErrorInfo {
+  code?: string | null;
+  message: string;
+  userMessage?: string | null;
+  actionSuggestion?: string | null;
+  detail?: string | null;
+  raw?: string;
+}
+
+export interface AppErrorResolution {
+  code?: string | null;
+  technicalMessage: string;
+  userMessage: string;
+  actionSuggestion?: string | null;
+}
+
+export interface SessionSnapshotPayload {
+  savedAt: string;
+  data: Record<string, unknown>;
+}
+
+export interface DiagnosticBundlePayload {
+  generatedAt: string;
+  data: Record<string, unknown>;
+}
+
+export interface ProjectDocumentsLoadResult {
+  projectDir: string;
+  migrated: boolean;
+  migrationNotes: string[];
+  library: V5MediaLibrary | null;
+  blueprint: V5StoryBlueprint | null;
+  renderPlan: V5RenderPlan | null;
 }
 
 export interface RenderV5Params {
@@ -593,6 +631,52 @@ export async function preflightRenderV5({
       ],
     };
   }
+}
+
+export async function saveSessionSnapshot(snapshot: SessionSnapshotPayload): Promise<void> {
+  await invoke("save_session_snapshot", { snapshotJson: JSON.stringify(snapshot) });
+}
+
+export async function loadSessionSnapshot(): Promise<SessionSnapshotPayload | null> {
+  const raw = await invoke<string | null>("load_session_snapshot");
+  if (!raw) return null;
+  const parsed = JSON.parse(raw) as SessionSnapshotPayload;
+  if (!parsed || typeof parsed !== "object" || typeof parsed.savedAt !== "string" || !parsed.data || typeof parsed.data !== "object") {
+    throw new Error("会话快照格式无效。");
+  }
+  return parsed;
+}
+
+export async function clearSessionSnapshot(): Promise<void> {
+  await invoke("clear_session_snapshot");
+}
+
+export async function exportDiagnosticBundle(outputPath: string, payload: DiagnosticBundlePayload): Promise<string> {
+  return await invoke<string>("export_diagnostic_bundle", {
+    outputPath,
+    payloadJson: JSON.stringify(payload, null, 2),
+  });
+}
+
+export async function loadProjectDocumentsV5(projectDir: string): Promise<ProjectDocumentsLoadResult> {
+  const payload = await invoke<{
+    projectDir: string;
+    migrated: boolean;
+    migrationNotes?: string[] | null;
+    library?: unknown;
+    blueprint?: unknown;
+    renderPlan?: unknown;
+    render_plan?: unknown;
+  }>("load_project_documents_v5", { projectDir });
+
+  return {
+    projectDir: payload.projectDir,
+    migrated: Boolean(payload.migrated),
+    migrationNotes: Array.isArray(payload.migrationNotes) ? payload.migrationNotes.filter((item): item is string => typeof item === "string") : [],
+    library: payload.library ? parseV5Value<V5MediaLibrary>(payload.library, "media_library") : null,
+    blueprint: payload.blueprint ? parseV5Value<V5StoryBlueprint>(payload.blueprint, "story_blueprint") : null,
+    renderPlan: (payload.renderPlan || payload.render_plan) ? parseV5Value<V5RenderPlan>(payload.renderPlan || payload.render_plan, "render_plan") : null,
+  };
 }
 
 // =========================
@@ -776,11 +860,20 @@ function parseV5Json<T extends { document_type?: V5DocumentType; schema_version?
     throw new Error(`V5 JSON 解析失败：${formatUnknownError(error)}`);
   }
 
-  if (!parsed || typeof parsed !== "object") {
+  return parseV5Value<T>(parsed, expectedType);
+}
+
+function parseV5Value<T extends { document_type?: V5DocumentType; schema_version?: string }>(
+  parsed: unknown,
+  expectedType: V5DocumentType,
+): T {
+  const migrated = migrateV5Document(parsed, expectedType);
+
+  if (!migrated || typeof migrated !== "object") {
     throw new Error(`V5 返回结果不是有效对象，期望 document_type=${expectedType}`);
   }
 
-  const doc = parsed as { document_type?: unknown; schema_version?: unknown };
+  const doc = migrated as { document_type?: unknown; schema_version?: unknown };
   if (doc.document_type !== expectedType) {
     throw new Error(`V5 返回 document_type 不匹配：期望 ${expectedType}，实际 ${String(doc.document_type)}`);
   }
@@ -789,11 +882,193 @@ function parseV5Json<T extends { document_type?: V5DocumentType; schema_version?
     throw new Error(`V5 返回结果缺少 schema_version，document_type=${expectedType}`);
   }
 
-  return parsed as T;
+  return migrated as T;
+}
+
+function migrateV5Document(parsed: unknown, expectedType: V5DocumentType): unknown {
+  if (!parsed || typeof parsed !== "object") return parsed;
+  const doc = structuredClone(parsed) as Record<string, unknown>;
+  if (doc.document_type !== expectedType) return parsed;
+
+  if (expectedType === "media_library") {
+    if (!doc.project || typeof doc.project !== "object") doc.project = {};
+    const project = doc.project as Record<string, unknown>;
+    if (!("project_title" in project)) project.project_title = null;
+    if (!Array.isArray(doc.directory_nodes)) doc.directory_nodes = [];
+    if (!Array.isArray(doc.assets)) doc.assets = [];
+    if (!doc.summary || typeof doc.summary !== "object") doc.summary = {};
+    for (const asset of doc.assets as Record<string, unknown>[]) {
+      if (!asset || typeof asset !== "object") continue;
+      if (asset.thumbnail_path == null && asset.thumbnail != null) asset.thumbnail_path = asset.thumbnail;
+      if (asset.thumbnail == null && asset.thumbnail_path != null) asset.thumbnail = asset.thumbnail_path;
+      if (asset.status == null) asset.status = "ready";
+    }
+  } else if (expectedType === "story_blueprint") {
+    if (typeof doc.subtitle !== "string") doc.subtitle = String(doc.subtitle || "");
+    if (!Array.isArray(doc.sections)) doc.sections = [];
+    if (!doc.metadata || typeof doc.metadata !== "object") doc.metadata = {};
+    const metadata = doc.metadata as Record<string, unknown>;
+    if (metadata.chapter_background_mode == null) metadata.chapter_background_mode = "auto_bridge";
+    migrateStorySections(doc.sections as Record<string, unknown>[]);
+  } else if (expectedType === "render_plan") {
+    if (!Array.isArray(doc.segments)) doc.segments = [];
+    if (typeof doc.output_path !== "string") doc.output_path = "";
+    for (const segment of doc.segments as Record<string, unknown>[]) {
+      if (!segment || typeof segment !== "object") continue;
+      if (!Array.isArray(segment.render_route_tags)) segment.render_route_tags = [];
+    }
+  }
+
+  doc.schema_version = V5_SCHEMA_VERSION;
+  return doc;
+}
+
+function migrateStorySections(sections: Record<string, unknown>[]) {
+  for (const section of sections) {
+    if (!section || typeof section !== "object") continue;
+    if (!Array.isArray(section.asset_refs)) section.asset_refs = [];
+    if (!Array.isArray(section.children)) section.children = [];
+    migrateStorySections(section.children as Record<string, unknown>[]);
+  }
+}
+
+export function parseAppError(error: unknown): AppErrorInfo {
+  const raw = formatUnknownError(error);
+  const match = raw.match(/^\[([A-Z0-9_]+)\]\s*(.*)$/s);
+  if (match) {
+    const guidance = errorGuidanceForCode(match[1]);
+    return {
+      code: match[1],
+      message: match[2] || match[1],
+      userMessage: guidance?.userMessage || null,
+      actionSuggestion: guidance?.actionSuggestion || null,
+      raw,
+    };
+  }
+  return {
+    code: null,
+    message: raw || "未知错误",
+    userMessage: null,
+    actionSuggestion: null,
+    raw,
+  };
+}
+
+export function resolveAppError(error: unknown): AppErrorResolution {
+  const parsed = parseAppError(error);
+  const guidance = parsed.code ? errorGuidanceForCode(parsed.code) : null;
+  const fallback = fallbackErrorResolution(parsed.message);
+  return {
+    code: parsed.code || null,
+    technicalMessage: parsed.message,
+    userMessage: guidance?.userMessage || fallback.userMessage,
+    actionSuggestion: guidance?.actionSuggestion || fallback.actionSuggestion || null,
+  };
+}
+
+function errorGuidanceForCode(code: string): { userMessage: string; actionSuggestion?: string } | null {
+  const map: Record<string, { userMessage: string; actionSuggestion?: string }> = {
+    E_OUTPUT_DIR_REQUIRED: {
+      userMessage: "缺少输出目录：请先选择输出目录后再继续。",
+      actionSuggestion: "在“生成参数”区域选择一个明确可写的输出目录。",
+    },
+    E_OUTPUT_NOT_WRITABLE: {
+      userMessage: "输出目录不可写：请换到桌面、文档或其他可写目录后重试。",
+      actionSuggestion: "避免写入系统目录、只读目录或云盘受限目录。",
+    },
+    E_MEDIA_SOURCE_MISSING: {
+      userMessage: "素材缺失：请确认素材没有被移动或删除，然后重新扫描并编译。",
+      actionSuggestion: "恢复原素材路径，或重新扫描素材并重新生成 render_plan.json。",
+    },
+    E_RENDER_PLAN_INVALID_JSON: {
+      userMessage: "渲染计划损坏：请重新确认蓝图并生成新的 render_plan.json。",
+      actionSuggestion: "不要手工修改 render_plan.json；若已修改，请重新编译。",
+    },
+    E_PROJECT_DIR_MISSING: {
+      userMessage: "项目目录不存在：最近项目对应的 .video_create_project 已丢失或不可访问。",
+      actionSuggestion: "确认输出目录仍在原位置；若已丢失，请重新扫描素材创建新项目。",
+    },
+    E_PROJECT_DOC_INVALID_JSON: {
+      userMessage: "项目文档损坏：项目 JSON 无法解析，建议重新扫描和编译。",
+      actionSuggestion: "优先保留仍可读取的 JSON，损坏文件建议重新生成。",
+    },
+    E_PROJECT_DOC_TYPE_MISMATCH: {
+      userMessage: "项目文档类型异常：项目目录中的 JSON 与当前步骤不匹配。",
+      actionSuggestion: "检查 media_library.json、story_blueprint.json、render_plan.json 是否被错误覆盖。",
+    },
+    E_PROJECT_DOC_REWRITE_FAILED: {
+      userMessage: "项目迁移失败：旧项目已识别，但无法写回迁移结果。",
+      actionSuggestion: "确认 .video_create_project 可写后，再重新恢复最近项目。",
+    },
+    E_WORKER_ENTRYPOINT_MISSING: {
+      userMessage: "Worker 不可用：请先运行 npm run check，确认桌面 worker 已正确打包。",
+      actionSuggestion: "重点检查打包资源、src-tauri/bin 和安装目录完整性。",
+    },
+    E_WORKER_HEALTH_FAILED: {
+      userMessage: "Worker 健康检查失败：请先运行 npm run check，确认渲染依赖正常。",
+      actionSuggestion: "重点查看 FFmpeg、Python worker、编码器检测和环境权限。",
+    },
+    E_TASK_ALREADY_RUNNING: {
+      userMessage: "已有渲染任务正在运行，请等待完成或先取消当前任务。",
+      actionSuggestion: "查看渲染队列，避免重复点击“开始渲染”。",
+    },
+    E_TASK_CANCELLED: {
+      userMessage: "渲染已取消。",
+      actionSuggestion: "如果不是主动取消，请导出诊断包并检查最近日志。",
+    },
+    E_STARTUP_CHECK_FAILED: {
+      userMessage: "启动自检未通过：请先修复自检卡中的失败项。",
+      actionSuggestion: "优先处理 worker、资源文件和可写目录相关问题。",
+    },
+    E_PREFLIGHT_CHECK_FAILED: {
+      userMessage: "渲染前预检未通过：请先修复预检卡中的失败项。",
+      actionSuggestion: "优先处理输出目录、render_plan.json 和素材缺失问题。",
+    },
+  };
+  return map[code] || null;
+}
+
+function fallbackErrorResolution(message: string): { userMessage: string; actionSuggestion?: string } {
+  const lower = message.toLowerCase();
+  if (lower.includes("permission") || message.includes("拒绝访问") || message.includes("access is denied")) {
+    return {
+      userMessage: "权限不足：请确认素材目录和输出目录可读写。",
+      actionSuggestion: "必要时换到桌面或文档目录后重试。",
+    };
+  }
+  if (lower.includes("no such file") || message.includes("系统找不到") || message.includes("找不到")) {
+    return {
+      userMessage: "文件缺失：请确认素材没有被移动或删除。",
+      actionSuggestion: "重新扫描素材并生成新的渲染计划。",
+    };
+  }
+  if (lower.includes("moviepy") || lower.includes("ffmpeg") || lower.includes("pyinstaller")) {
+    return {
+      userMessage: "渲染依赖异常：请先运行 npm run check。",
+      actionSuggestion: "确认 Python worker、MoviePy 和 FFmpeg 都可用。",
+    };
+  }
+  if (lower.includes("json") || lower.includes("render_plan")) {
+    return {
+      userMessage: "渲染计划异常：请重新确认故事蓝图。",
+      actionSuggestion: "重新生成 render_plan.json 后再试。",
+    };
+  }
+  if (lower.includes("cancel")) {
+    return {
+      userMessage: "渲染已取消。",
+      actionSuggestion: "如非主动取消，请导出诊断包继续排查。",
+    };
+  }
+  return {
+    userMessage: message || "发生未知错误，请查看日志。",
+    actionSuggestion: "如问题可复现，请导出诊断包并附带错误截图。",
+  };
 }
 
 function formatInvokeError(error: unknown, fallback: string): string {
-  const detail = formatUnknownError(error);
+  const parsed = parseAppError(error);
+  const detail = parsed.message;
   return detail ? `${fallback} ${detail}` : fallback;
 }
 

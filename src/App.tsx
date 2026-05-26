@@ -31,14 +31,21 @@ import {
 import { useMemo, useState, useEffect, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import {
   AspectRatio,
+  clearSessionSnapshot,
   EditStrategy,
+  exportDiagnosticBundle,
   GenerateVideoResult,
+  loadSessionSnapshot,
+  loadProjectDocumentsV5,
+  resolveAppError,
   PerformanceMode,
   Quality,
   RenderEngine,
+  SessionSnapshotPayload,
+  saveSessionSnapshot,
   StartupDiagnostics,
   cancelVideo,
   openInExplorer,
@@ -123,6 +130,61 @@ interface RecentProject {
   updatedAt: number;
 }
 
+interface StudioDraft {
+  inputFolder: string | null;
+  outputFolder: string | null;
+  title: string;
+  titleSubtitle: string;
+  endText: string;
+  titleStyle: V5TitleStyle;
+  endStyle: V5TitleStyle;
+  titleBackgroundPath: string | null;
+  endBackgroundPath: string | null;
+  chapterBackgroundMode: V5ChapterBackgroundMode;
+  outputName: string;
+  aspectRatio: AspectRatio;
+  quality: Quality;
+  watermark: string;
+  recursive: boolean;
+  chaptersFromDirs: boolean;
+  cover: boolean;
+  editStrategy: EditStrategy;
+  performanceMode: PerformanceMode;
+  renderEngine: RenderEngine;
+  musicMode: StudioState["musicMode"];
+  musicPath: string | null;
+  musicPlaylistMode: MusicPlaylistMode;
+  musicPlaylistPaths: string[];
+  musicFitStrategy: MusicFitStrategy;
+  bgmVolume: number;
+  sourceAudioVolume: number;
+  keepSourceAudio: boolean;
+  autoDucking: boolean;
+  musicFadeInSeconds: number;
+  musicFadeOutSeconds: number;
+  isDryRun: boolean;
+  v5Stage: StudioState["v5Stage"];
+  v5Library: V5MediaLibrary | null;
+  v5Blueprint: V5StoryBlueprint | null;
+  v5RenderPlan: V5RenderPlan | null;
+}
+
+interface SessionRecoveryData {
+  studio: StudioDraft;
+  logs: string[];
+  phase: string;
+  progress: number | null;
+  progressTone: ProgressTone;
+  progressDetail: string | null;
+  result: GenerateVideoResult | null;
+  preflightDiagnostics: StartupDiagnostics | null;
+  materials: VideoEvent[];
+  photoSegmentCache: PhotoSegmentCacheStats | null;
+  videoSegmentCache: VideoSegmentCacheStats | null;
+  proxyMedia: ProxyMediaStats | null;
+  selectedAudioSectionId: string | null;
+}
+
 function ProgressBar({
   percent,
   phase,
@@ -192,9 +254,15 @@ export function App() {
   const [preflightDiagnostics, setPreflightDiagnostics] = useState<StartupDiagnostics | null>(null);
   const [preflightLoading, setPreflightLoading] = useState(false);
   const [recentProjects, setRecentProjects] = useState<RecentProject[]>(() => loadRecentProjects());
+  const [recoverableSession, setRecoverableSession] = useState<SessionSnapshotPayload | null>(null);
+  const [sessionSnapshotReady, setSessionSnapshotReady] = useState(false);
+  const [isExportingDiagnostics, setIsExportingDiagnostics] = useState(false);
+  const [projectMigrationNotes, setProjectMigrationNotes] = useState<string[]>([]);
+  const [projectMigrationSource, setProjectMigrationSource] = useState<string | null>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
   const segmentsTimelineRef = useRef<HTMLDivElement>(null);
   const activeJobRef = useRef<string | null>(null);
+  const skipResetRef = useRef(false);
   const [activeNav, setActiveNav] = useState("workspace");
 
   const [hasPreChecked, setHasPreChecked] = useState(false);
@@ -221,10 +289,16 @@ export function App() {
     setRenderPreviewPath(null);
     setBackgroundPickerTarget(null);
     setPreflightDiagnostics(null);
+    setProjectMigrationNotes([]);
+    setProjectMigrationSource(null);
     state.patch({ isDryRun: false });
   };
 
   useEffect(() => {
+    if (skipResetRef.current) {
+      skipResetRef.current = false;
+      return;
+    }
     resetTask();
   }, [state.inputFolder]);
 
@@ -276,6 +350,28 @@ export function App() {
     };
   }, []);
 
+  useEffect(() => {
+    let disposed = false;
+
+    void loadSessionSnapshot()
+      .then((snapshot) => {
+        if (disposed || !snapshot) return;
+        const restored = parseSessionRecoveryData(snapshot.data);
+        if (!restored || !hasMeaningfulStudioDraft(restored.studio)) return;
+        setRecoverableSession(snapshot);
+      })
+      .catch((error) => {
+        console.error("Failed to load session snapshot:", error);
+      })
+      .finally(() => {
+        if (!disposed) setSessionSnapshotReady(true);
+      });
+
+    return () => {
+      disposed = true;
+    };
+  }, []);
+
   function scrollToSection(id: string) {
     setActiveNav(id);
     document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -298,20 +394,163 @@ export function App() {
     });
   }
 
-  function restoreRecentProject(project: RecentProject) {
-    state.patch({
-      inputFolder: project.inputFolder,
-      outputFolder: project.outputFolder,
-      title: project.title,
-      outputName: project.outputName,
-      v5Stage: "INPUT",
-      v5Library: null,
-      v5Blueprint: null,
-      v5RenderPlan: null,
-      titleBackgroundPath: null,
-      endBackgroundPath: null,
-    });
-    setToast(`已恢复最近项目：${shortPathName(project.inputFolder)}`);
+  async function restoreRecentProject(project: RecentProject) {
+    const projectDir = `${(project.outputFolder || project.inputFolder)}\\.video_create_project`;
+    try {
+      const loaded = await loadProjectDocumentsV5(projectDir);
+      const nextStage: StudioState["v5Stage"] = loaded.renderPlan
+        ? "RENDER"
+        : loaded.blueprint
+          ? "BLUEPRINT"
+          : "INPUT";
+      skipResetRef.current = true;
+      state.patch({
+        inputFolder: project.inputFolder,
+        outputFolder: project.outputFolder,
+        title: loaded.blueprint?.title || project.title,
+        titleSubtitle: loaded.blueprint?.subtitle || state.titleSubtitle,
+        outputName: project.outputName,
+        v5Stage: nextStage,
+        v5Library: loaded.library,
+        v5Blueprint: loaded.blueprint,
+        v5RenderPlan: loaded.renderPlan,
+        titleBackgroundPath: state.titleBackgroundPath,
+        endBackgroundPath: state.endBackgroundPath,
+      });
+      setProjectMigrationNotes(loaded.migrated ? loaded.migrationNotes : []);
+      setProjectMigrationSource(project.title || shortPathName(project.inputFolder));
+      const suffix = loaded.migrated ? `，并已自动迁移 ${loaded.migrationNotes.length} 项旧版项目数据` : "";
+      setToast(`已恢复最近项目：${shortPathName(project.inputFolder)}${suffix}`);
+    } catch (error) {
+      console.error("Restore recent project failed:", error);
+      const fallbackMessage = friendlyErrorMessage(error);
+      skipResetRef.current = true;
+      state.patch({
+        inputFolder: project.inputFolder,
+        outputFolder: project.outputFolder,
+        title: project.title,
+        outputName: project.outputName,
+        v5Stage: "INPUT",
+        v5Library: null,
+        v5Blueprint: null,
+        v5RenderPlan: null,
+        titleBackgroundPath: null,
+        endBackgroundPath: null,
+      });
+      setProjectMigrationNotes([]);
+      setProjectMigrationSource(null);
+      setToast(`已恢复项目路径，但项目文档加载失败：${fallbackMessage}`);
+    }
+  }
+
+  function restoreSessionDraft(snapshot: SessionSnapshotPayload) {
+    const restored = parseSessionRecoveryData(snapshot.data);
+    if (!restored) {
+      setToast("上次会话草稿无法解析，已跳过恢复。");
+      return;
+    }
+
+    skipResetRef.current = true;
+    state.patch({ ...restored.studio });
+    setLogs(restored.logs || []);
+    setPhase(restored.phase || "已恢复");
+    setProgress(restored.progress ?? null);
+    setProgressTone(restored.progressTone || "idle");
+    setProgressDetail(restored.progressDetail || null);
+    setResult(restored.result || null);
+    setPreflightDiagnostics(restored.preflightDiagnostics || null);
+    setMaterials(restored.materials || []);
+    setPhotoSegmentCache(restored.photoSegmentCache || null);
+    setVideoSegmentCache(restored.videoSegmentCache || null);
+    setProxyMedia(restored.proxyMedia || null);
+    setSelectedAudioSectionId(restored.selectedAudioSectionId || null);
+    setRenderQueue([]);
+    setRenderPreviewPath(null);
+    setIsPlanningWorkflow(false);
+    setIsCancelling(false);
+    setRecoverableSession(null);
+    setToast(`已恢复 ${formatSnapshotSavedAt(snapshot.savedAt)} 保存的会话草稿。`);
+  }
+
+  async function dismissSessionDraft() {
+    setRecoverableSession(null);
+    try {
+      await clearSessionSnapshot();
+      setToast("已丢弃上次会话草稿。");
+    } catch (error) {
+      console.error("Failed to clear session snapshot:", error);
+      setToast(`丢弃会话草稿失败：${friendlyErrorMessage(error)}`);
+    }
+  }
+
+  async function onExportDiagnostics() {
+    const suggestedName = buildDiagnosticsFileName(state.outputName || state.title || "video-create-studio");
+    try {
+      const target = await save({
+        defaultPath: suggestedName,
+        filters: [{ name: "JSON", extensions: ["json"] }],
+      });
+      if (typeof target !== "string" || !target) return;
+
+      setIsExportingDiagnostics(true);
+      const exported = await exportDiagnosticBundle(target, {
+        generatedAt: new Date().toISOString(),
+        data: {
+          app: {
+            product: "Video Create Studio",
+            snapshotSavedAt: recoverableSession?.savedAt || null,
+            exportedAtLocal: new Date().toLocaleString(),
+            userAgent: window.navigator.userAgent,
+          },
+          project: {
+            inputFolder: state.inputFolder,
+            outputFolder: state.outputFolder,
+            projectDir: v5ProjectDir || null,
+            planPath: v5PlanPath || null,
+            outputPath: v5OutputPath || null,
+            stage: state.v5Stage,
+            title: state.title,
+            outputName: state.outputName,
+          },
+          upgrade: {
+            migrationSource: projectMigrationSource,
+            migrationNotes: projectMigrationNotes,
+          },
+          diagnostics: {
+            startup: startupDiagnostics,
+            preflight: preflightDiagnostics,
+            errorCodeSummary: summarizeErrorCodes({
+              startupDiagnostics,
+              preflightDiagnostics,
+              result,
+            }),
+          },
+          workflow: {
+            phase,
+            progress,
+            progressTone,
+            progressDetail,
+            result,
+            commandPreview: v5CommandPreview,
+          },
+          runtime: {
+            photoSegmentCache,
+            videoSegmentCache,
+            proxyMedia,
+            renderQueue,
+            materialsSample: materials.slice(0, 120),
+            logs: logs.slice(-120),
+          },
+          sessionDraft: sessionRecoveryData,
+        },
+      });
+      setToast(`诊断包已导出：${shortPathName(exported)}`);
+    } catch (error) {
+      console.error("Failed to export diagnostics:", error);
+      setToast(`导出诊断包失败：${friendlyErrorMessage(error)}`);
+    } finally {
+      setIsExportingDiagnostics(false);
+    }
   }
 
   async function runRenderPreflight(): Promise<boolean> {
@@ -569,6 +808,52 @@ export function App() {
     outputPath: v5OutputPath || "<输出视频路径>",
     params: v5RenderParams,
   }), [v5PlanPath, v5OutputPath, v5RenderParams]);
+
+  const sessionRecoveryData = useMemo<SessionRecoveryData>(() => ({
+    studio: captureStudioDraft(state),
+    logs: logs.slice(-60),
+    phase,
+    progress,
+    progressTone,
+    progressDetail,
+    result,
+    preflightDiagnostics,
+    materials: materials.slice(-120),
+    photoSegmentCache,
+    videoSegmentCache,
+    proxyMedia,
+    selectedAudioSectionId,
+  }), [
+    state,
+    logs,
+    phase,
+    progress,
+    progressTone,
+    progressDetail,
+    result,
+    preflightDiagnostics,
+    materials,
+    photoSegmentCache,
+    videoSegmentCache,
+    proxyMedia,
+    selectedAudioSectionId,
+  ]);
+
+  useEffect(() => {
+    if (!sessionSnapshotReady) return;
+    if (!hasMeaningfulStudioDraft(sessionRecoveryData.studio)) return;
+
+    const timeoutId = window.setTimeout(() => {
+      void saveSessionSnapshot({
+        savedAt: new Date().toISOString(),
+        data: sessionRecoveryData as unknown as Record<string, unknown>,
+      }).catch((error) => {
+        console.error("Failed to save session snapshot:", error);
+      });
+    }, 900);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [sessionRecoveryData, sessionSnapshotReady]);
 
   async function ensureBackgroundLibrary(target: BackgroundPickerTarget) {
     if (!state.inputFolder) {
@@ -1126,6 +1411,16 @@ export function App() {
         {toast && <Toast title={state.v5Stage === "BLUEPRINT" ? "蓝图生成成功" : "提示"} message={toast} onClose={() => setToast(null)} />}
         <div className="workspace-inner">
         <StartupHealthCard diagnostics={startupDiagnostics} loading={startupDiagnosticsLoading} />
+        {projectMigrationNotes.length > 0 && projectMigrationSource && (
+          <ProjectMigrationCard notes={projectMigrationNotes} source={projectMigrationSource} />
+        )}
+        {recoverableSession && (
+          <SessionRecoveryCard
+            snapshot={recoverableSession}
+            onDismiss={dismissSessionDraft}
+            onRestore={restoreSessionDraft}
+          />
+        )}
         <RecentProjectsCard projects={recentProjects} onRestore={restoreRecentProject} />
         {(preflightLoading || preflightDiagnostics) && (
           <DiagnosticsCard
@@ -1142,6 +1437,10 @@ export function App() {
             <h1>Turn Moments into Motion.</h1>
           </div>
           <div className="topbar-actions">
+            <button className="secondary-action" disabled={isExportingDiagnostics} onClick={onExportDiagnostics}>
+              {isExportingDiagnostics ? <Loader2 className="spin" size={18} /> : <ListChecks size={18} />}
+              {isExportingDiagnostics ? "正在导出诊断包" : "导出诊断包"}
+            </button>
             {state.v5Stage === "BLUEPRINT" && (
                <button className="secondary-action" onClick={() => state.patch({ v5Stage: "INPUT" })}>
                  <FolderOpen size={18} /> 重新选择
@@ -1827,29 +2126,20 @@ function saveRecentProjects(projects: RecentProject[]) {
 function friendlyDiagnosticsMessage(diagnostics: StartupDiagnostics): string {
   const failed = diagnostics.checks.filter((check) => !check.ok);
   if (failed.length === 0) return diagnostics.summary;
-  const details = failed.map((check) => `${check.label}: ${check.message}`).join("\n");
+  const details = failed
+    .map((check) => `${check.label}${check.code ? ` [${check.code}]` : ""}: ${check.message}`)
+    .join("\n");
   return `${diagnostics.summary}\n${details}`;
 }
 
 function friendlyErrorMessage(error: unknown): string {
-  const raw = error instanceof Error ? error.message : String(error ?? "");
-  const lower = raw.toLowerCase();
-  if (lower.includes("permission") || raw.includes("拒绝访问") || raw.includes("access is denied")) {
-    return `权限不足：请确认素材目录和输出目录可读写，必要时换到桌面或文档目录后重试。\n${raw}`;
+  const resolved = resolveAppError(error);
+  const parts = [resolved.userMessage];
+  if (resolved.actionSuggestion) parts.push(`建议操作：${resolved.actionSuggestion}`);
+  if (resolved.technicalMessage && resolved.technicalMessage !== resolved.userMessage) {
+    parts.push(resolved.technicalMessage);
   }
-  if (lower.includes("no such file") || raw.includes("系统找不到") || raw.includes("找不到")) {
-    return `文件缺失：请确认素材没有被移动或删除，并重新扫描生成渲染计划。\n${raw}`;
-  }
-  if (lower.includes("moviepy") || lower.includes("ffmpeg") || lower.includes("pyinstaller")) {
-    return `渲染依赖异常：请先运行 npm run check，确认 Python worker、MoviePy 和 FFmpeg 可用。\n${raw}`;
-  }
-  if (lower.includes("json") || lower.includes("render_plan")) {
-    return `渲染计划异常：请重新确认故事蓝图，生成新的 render_plan.json 后再试。\n${raw}`;
-  }
-  if (lower.includes("cancel")) {
-    return "渲染已取消。";
-  }
-  return raw || "发生未知错误，请查看日志。";
+  return parts.filter(Boolean).join("\n");
 }
 
 function StartupHealthCard({
@@ -1892,21 +2182,24 @@ function DiagnosticsCard({
           <span className="startup-health-kicker">{kicker}</span>
           <strong>{loading ? title : diagnostics?.summary || `${title}不可用。`}</strong>
         </div>
-        <span className={`startup-health-badge ${loading ? "pending" : diagnostics?.ok ? "ok" : "failed"}`}>
-          {loading ? (
-            <>
-              <Loader2 className="spin" size={14} /> 检查中
-            </>
-          ) : diagnostics?.ok ? (
-            <>
-              <CheckCircle2 size={14} /> 通过
-            </>
-          ) : (
-            <>
-              <TriangleAlert size={14} /> 需处理
-            </>
-          )}
-        </span>
+        <div className="startup-health-badge-group">
+          {diagnostics?.code ? <span className="error-code-badge">{diagnostics.code}</span> : null}
+          <span className={`startup-health-badge ${loading ? "pending" : diagnostics?.ok ? "ok" : "failed"}`}>
+            {loading ? (
+              <>
+                <Loader2 className="spin" size={14} /> 检查中
+              </>
+            ) : diagnostics?.ok ? (
+              <>
+                <CheckCircle2 size={14} /> 通过
+              </>
+            ) : (
+              <>
+                <TriangleAlert size={14} /> 需处理
+              </>
+            )}
+          </span>
+        </div>
       </div>
 
       <div className="startup-health-grid">
@@ -1922,11 +2215,83 @@ function DiagnosticsCard({
                 {check.ok ? <CheckCircle2 size={16} /> : <TriangleAlert size={16} />}
                 <strong>{check.label}</strong>
               </div>
+              {check.code ? <span className="error-code-inline">{check.code}</span> : null}
               <span>{check.message}</span>
               {check.detail ? <small>{check.detail}</small> : null}
             </div>
           ))
         )}
+      </div>
+    </section>
+  );
+}
+
+function SessionRecoveryCard({
+  snapshot,
+  onRestore,
+  onDismiss,
+}: {
+  snapshot: SessionSnapshotPayload;
+  onRestore: (snapshot: SessionSnapshotPayload) => void;
+  onDismiss: () => void;
+}) {
+  const restored = parseSessionRecoveryData(snapshot.data);
+  if (!restored) return null;
+
+  const draft = restored.studio;
+  const summary = draft.title || (draft.inputFolder ? shortPathName(draft.inputFolder) : "未命名项目");
+
+  return (
+    <section className="session-recovery-card">
+      <div className="session-recovery-head">
+        <div>
+          <span className="startup-health-kicker">SESSION RECOVERY</span>
+          <strong>检测到上次未完成会话</strong>
+        </div>
+        <span className="session-recovery-badge">{formatSnapshotSavedAt(snapshot.savedAt)}</span>
+      </div>
+      <div className="session-recovery-body">
+        <div className="session-recovery-summary">
+          <strong>{summary}</strong>
+          <span>{draft.inputFolder ? shortPathName(draft.inputFolder) : "未选择素材目录"} → {draft.outputFolder ? shortPathName(draft.outputFolder) : "未选择输出目录"}</span>
+          <small>恢复后会带回当前阶段、渲染计划、最近日志和预检上下文，但不会自动继续中断中的渲染任务。</small>
+        </div>
+        <div className="session-recovery-actions">
+          <button className="primary-action" type="button" onClick={() => onRestore(snapshot)}>
+            <RotateCcw size={16} /> 恢复草稿
+          </button>
+          <button className="secondary-action" type="button" onClick={onDismiss}>
+            <X size={16} /> 丢弃草稿
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function ProjectMigrationCard({
+  source,
+  notes,
+}: {
+  source: string;
+  notes: string[];
+}) {
+  return (
+    <section className="project-migration-card">
+      <div className="project-migration-head">
+        <div>
+          <span className="startup-health-kicker">PROJECT MIGRATION</span>
+          <strong>已自动迁移旧版项目文档</strong>
+        </div>
+        <span className="project-migration-badge">{source}</span>
+      </div>
+      <div className="project-migration-body">
+        <p>当前项目在恢复时检测到旧版 schema，系统已自动升级到当前版本。以下是本次迁移内容：</p>
+        <ul>
+          {notes.map((note, index) => (
+            <li key={`${note}-${index}`}>{note}</li>
+          ))}
+        </ul>
       </div>
     </section>
   );
@@ -1966,12 +2331,14 @@ function RecentProjectsCard({
 }
 
 function ResultCard({ result }: { result: GenerateVideoResult }) {
+  const resolution = resolveResultError(result);
   return (
     <div className={`result-card ${result.ok ? "success" : "warning"}`}>
       <div className="result-card-header">
         {result.ok ? <CheckCircle2 size={20} /> : <TriangleAlert size={20} />}
         <strong>{result.isDryRun ? (result.ok ? "预检完成" : "预检失败") : (result.ok ? "生成完成" : "生成失败")}</strong>
       </div>
+      {result.code ? <div className="result-code-row"><span className="error-code-badge">{result.code}</span></div> : null}
       <p className="result-card-message">
         {result.message}
         {result.isDryRun && result.ok && (
@@ -1980,6 +2347,9 @@ function ResultCard({ result }: { result: GenerateVideoResult }) {
           </span>
         )}
       </p>
+      {!result.ok && resolution.actionSuggestion ? (
+        <div className="result-action-note">建议操作：{resolution.actionSuggestion}</div>
+      ) : null}
       {result.ok && result.outputPath && (
         <div className="result-card-actions">
           <button className="result-open-btn" onClick={() => openInExplorer(result.outputDir || result.outputPath!)}>
@@ -3200,6 +3570,157 @@ function assetStatusState(asset: V5Asset): string {
 function clampNumber(value: number, min: number, max: number, fallback: number): number {
   if (!Number.isFinite(value)) return fallback;
   return Math.min(max, Math.max(min, value));
+}
+
+function captureStudioDraft(state: StudioState): StudioDraft {
+  return {
+    inputFolder: state.inputFolder,
+    outputFolder: state.outputFolder,
+    title: state.title,
+    titleSubtitle: state.titleSubtitle,
+    endText: state.endText,
+    titleStyle: state.titleStyle,
+    endStyle: state.endStyle,
+    titleBackgroundPath: state.titleBackgroundPath,
+    endBackgroundPath: state.endBackgroundPath,
+    chapterBackgroundMode: state.chapterBackgroundMode,
+    outputName: state.outputName,
+    aspectRatio: state.aspectRatio,
+    quality: state.quality,
+    watermark: state.watermark,
+    recursive: state.recursive,
+    chaptersFromDirs: state.chaptersFromDirs,
+    cover: state.cover,
+    editStrategy: state.editStrategy,
+    performanceMode: state.performanceMode,
+    renderEngine: state.renderEngine,
+    musicMode: state.musicMode,
+    musicPath: state.musicPath,
+    musicPlaylistMode: state.musicPlaylistMode,
+    musicPlaylistPaths: [...state.musicPlaylistPaths],
+    musicFitStrategy: state.musicFitStrategy,
+    bgmVolume: state.bgmVolume,
+    sourceAudioVolume: state.sourceAudioVolume,
+    keepSourceAudio: state.keepSourceAudio,
+    autoDucking: state.autoDucking,
+    musicFadeInSeconds: state.musicFadeInSeconds,
+    musicFadeOutSeconds: state.musicFadeOutSeconds,
+    isDryRun: state.isDryRun,
+    v5Stage: state.v5Stage,
+    v5Library: state.v5Library,
+    v5Blueprint: state.v5Blueprint,
+    v5RenderPlan: state.v5RenderPlan,
+  };
+}
+
+function hasMeaningfulStudioDraft(draft: StudioDraft): boolean {
+  return Boolean(
+    draft.inputFolder ||
+      draft.outputFolder ||
+      draft.v5Library ||
+      draft.v5Blueprint ||
+      draft.v5RenderPlan ||
+      draft.titleBackgroundPath ||
+      draft.endBackgroundPath ||
+      draft.musicPath ||
+      draft.musicPlaylistPaths.length > 0,
+  );
+}
+
+function parseSessionRecoveryData(value: unknown): SessionRecoveryData | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as Partial<SessionRecoveryData>;
+  if (!candidate.studio || typeof candidate.studio !== "object") return null;
+  return {
+    studio: candidate.studio as StudioDraft,
+    logs: Array.isArray(candidate.logs) ? candidate.logs.filter((item): item is string => typeof item === "string") : [],
+    phase: typeof candidate.phase === "string" ? candidate.phase : "已恢复",
+    progress: typeof candidate.progress === "number" ? candidate.progress : null,
+    progressTone:
+      candidate.progressTone === "running" ||
+      candidate.progressTone === "done" ||
+      candidate.progressTone === "failed" ||
+      candidate.progressTone === "cancelled"
+        ? candidate.progressTone
+        : "idle",
+    progressDetail: typeof candidate.progressDetail === "string" ? candidate.progressDetail : null,
+    result: (candidate.result as GenerateVideoResult | null) || null,
+    preflightDiagnostics: (candidate.preflightDiagnostics as StartupDiagnostics | null) || null,
+    materials: Array.isArray(candidate.materials) ? (candidate.materials as VideoEvent[]) : [],
+    photoSegmentCache: (candidate.photoSegmentCache as PhotoSegmentCacheStats | null) || null,
+    videoSegmentCache: (candidate.videoSegmentCache as VideoSegmentCacheStats | null) || null,
+    proxyMedia: (candidate.proxyMedia as ProxyMediaStats | null) || null,
+    selectedAudioSectionId: typeof candidate.selectedAudioSectionId === "string" ? candidate.selectedAudioSectionId : null,
+  };
+}
+
+function formatSnapshotSavedAt(timestamp: string): string {
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return "最近保存";
+  return `保存于 ${date.toLocaleString()}`;
+}
+
+function buildDiagnosticsFileName(baseName: string): string {
+  const safeBase = (baseName || "video-create-studio")
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, "_")
+    .replace(/\s+/g, "_")
+    .slice(0, 48);
+  const now = new Date();
+  const stamp = [
+    now.getFullYear(),
+    String(now.getMonth() + 1).padStart(2, "0"),
+    String(now.getDate()).padStart(2, "0"),
+    "-",
+    String(now.getHours()).padStart(2, "0"),
+    String(now.getMinutes()).padStart(2, "0"),
+    String(now.getSeconds()).padStart(2, "0"),
+  ].join("");
+  return `${safeBase}_diagnostics_${stamp}.json`;
+}
+
+function summarizeErrorCodes({
+  startupDiagnostics,
+  preflightDiagnostics,
+  result,
+}: {
+  startupDiagnostics: StartupDiagnostics | null;
+  preflightDiagnostics: StartupDiagnostics | null;
+  result: GenerateVideoResult | null;
+}) {
+  const summary = new Map<string, { count: number; messages: string[] }>();
+
+  const push = (code: string | null | undefined, message?: string | null) => {
+    if (!code) return;
+    const current = summary.get(code) || { count: 0, messages: [] };
+    current.count += 1;
+    if (message && !current.messages.includes(message)) current.messages.push(message);
+    summary.set(code, current);
+  };
+
+  push(startupDiagnostics?.code, startupDiagnostics?.summary);
+  for (const check of startupDiagnostics?.checks || []) {
+    push(check.code, `${check.label}: ${check.message}`);
+  }
+
+  push(preflightDiagnostics?.code, preflightDiagnostics?.summary);
+  for (const check of preflightDiagnostics?.checks || []) {
+    push(check.code, `${check.label}: ${check.message}`);
+  }
+
+  push(result?.code, result?.message);
+
+  return Array.from(summary.entries()).map(([code, value]) => ({
+    code,
+    count: value.count,
+    messages: value.messages,
+  }));
+}
+
+function resolveResultError(result: GenerateVideoResult) {
+  if (result.code) {
+    return resolveAppError(`[${result.code}] ${result.message}`);
+  }
+  return resolveAppError(result.message);
 }
 
 function editStrategyHint(strategy: EditStrategy): string {
