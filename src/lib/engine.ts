@@ -494,6 +494,11 @@ export interface SessionSnapshotPayload {
   data: Record<string, unknown>;
 }
 
+export interface ProjectStatePayload {
+  savedAt: string;
+  data: Record<string, unknown>;
+}
+
 export interface DiagnosticBundlePayload {
   generatedAt: string;
   data: Record<string, unknown>;
@@ -753,6 +758,19 @@ export async function clearSessionSnapshot(): Promise<void> {
   await invoke("clear_session_snapshot");
 }
 
+export async function saveProjectState(projectDir: string, payload: ProjectStatePayload): Promise<void> {
+  await invoke("save_project_state", {
+    projectDir,
+    payloadJson: JSON.stringify(payload),
+  });
+}
+
+export async function loadProjectState(projectDir: string): Promise<ProjectStatePayload | null> {
+  const raw = await invoke<string | null>("load_project_state", { projectDir });
+  if (!raw) return null;
+  return parseSnapshotPayload<ProjectStatePayload>(raw, "project state");
+}
+
 export async function exportDiagnosticBundle(outputPath: string, payload: DiagnosticBundlePayload): Promise<string> {
   return await invoke<string>("export_diagnostic_bundle", {
     outputPath,
@@ -984,6 +1002,17 @@ export function toPythonQualityLabel(quality: Quality): string {
 
 function quote(value: string): string {
   return `"${value.split('"').join('\\"')}"`;
+}
+
+function parseSnapshotPayload<T extends { savedAt?: string; data?: Record<string, unknown> }>(
+  raw: string,
+  label: string,
+): T {
+  const parsed = JSON.parse(raw) as T;
+  if (!parsed || typeof parsed !== "object" || typeof parsed.savedAt !== "string" || !parsed.data || typeof parsed.data !== "object") {
+    throw new Error(`${label} payload is invalid.`);
+  }
+  return parsed;
 }
 
 function parseV5Json<T extends { document_type?: V5DocumentType; schema_version?: string }>(

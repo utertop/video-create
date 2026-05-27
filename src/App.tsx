@@ -42,16 +42,19 @@ import {
   flushRemoteTelemetryQueue,
   GenerateVideoResult,
   loadBuildReportSummary,
+  loadProjectState,
   loadSessionSnapshot,
   loadTelemetrySummary,
   loadProjectDocumentsV5,
   parseAppError,
+  ProjectStatePayload,
   recordTelemetryEvent,
   resolveAppError,
   PerformanceMode,
   Quality,
   RenderEngine,
   SessionSnapshotPayload,
+  saveProjectState,
   saveSessionSnapshot,
   StartupDiagnostics,
   cancelVideo,
@@ -142,6 +145,11 @@ interface RecentProject {
   title: string;
   outputName: string;
   updatedAt: number;
+}
+
+interface RecoverableProjectState {
+  project: RecentProject;
+  snapshot: ProjectStatePayload;
 }
 
 interface StudioDraft {
@@ -270,6 +278,7 @@ export function App() {
   const [preflightLoading, setPreflightLoading] = useState(false);
   const [recentProjects, setRecentProjects] = useState<RecentProject[]>(() => loadRecentProjects());
   const [recoverableSession, setRecoverableSession] = useState<SessionSnapshotPayload | null>(null);
+  const [recoverableProjectState, setRecoverableProjectState] = useState<RecoverableProjectState | null>(null);
   const [sessionSnapshotReady, setSessionSnapshotReady] = useState(false);
   const [isExportingDiagnostics, setIsExportingDiagnostics] = useState(false);
   const [projectMigrationNotes, setProjectMigrationNotes] = useState<string[]>([]);
@@ -422,6 +431,36 @@ export function App() {
       disposed = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (!sessionSnapshotReady) return;
+    if (recoverableSession) return;
+    if (recoverableProjectState) return;
+    if (recentProjects.length === 0) return;
+
+    let disposed = false;
+
+    void (async () => {
+      for (const project of recentProjects.slice(0, 3)) {
+        const projectDir = projectDirFromRecentProject(project);
+        if (!projectDir) continue;
+        try {
+          const snapshot = await loadProjectState(projectDir);
+          if (disposed || !snapshot) continue;
+          const restored = parseSessionRecoveryData(snapshot.data);
+          if (!restored || !hasMeaningfulStudioDraft(restored.studio)) continue;
+          setRecoverableProjectState({ project, snapshot });
+          return;
+        } catch (error) {
+          console.warn("Failed to inspect recent project autosave:", error);
+        }
+      }
+    })();
+
+    return () => {
+      disposed = true;
+    };
+  }, [recentProjects, recoverableProjectState, recoverableSession, sessionSnapshotReady]);
 
   useEffect(() => {
     const stored = window.localStorage.getItem(TELEMETRY_PREFERENCE_KEY);
@@ -634,33 +673,104 @@ export function App() {
     };
   }, [state.telemetryEnabled]);
 
+  function resetRecoveredWorkspaceRuntimeState(nextPhase: string = "已恢复项目") {
+    setLogs([]);
+    setPhase(nextPhase);
+    setProgress(null);
+    setProgressTone("idle");
+    setProgressDetail(null);
+    setResult(null);
+    setPreflightDiagnostics(null);
+    setMaterials([]);
+    setPhotoSegmentCache(null);
+    setVideoSegmentCache(null);
+    setProxyMedia(null);
+    setSelectedAudioSectionId(null);
+    setRenderQueue([]);
+    setSelectedMaterial(null);
+    setShowGalleryOverlay(false);
+    setRenderPreviewPath(null);
+    setIsPlanningWorkflow(false);
+    setIsCancelling(false);
+    setHighlightOutput(false);
+    setBackgroundPickerTarget(null);
+  }
+
+  function applyRecoveredWorkspaceRuntimeState(restored: SessionRecoveryData) {
+    setLogs(restored.logs || []);
+    setPhase(restored.phase || "已恢复");
+    setProgress(restored.progress ?? null);
+    setProgressTone(restored.progressTone || "idle");
+    setProgressDetail(restored.progressDetail || null);
+    setResult(restored.result || null);
+    setPreflightDiagnostics(restored.preflightDiagnostics || null);
+    setMaterials(restored.materials || []);
+    setPhotoSegmentCache(restored.photoSegmentCache || null);
+    setVideoSegmentCache(restored.videoSegmentCache || null);
+    setProxyMedia(restored.proxyMedia || null);
+    setSelectedAudioSectionId(restored.selectedAudioSectionId || null);
+    setRenderQueue([]);
+    setSelectedMaterial(null);
+    setShowGalleryOverlay(false);
+    setRenderPreviewPath(null);
+    setIsPlanningWorkflow(false);
+    setIsCancelling(false);
+    setHighlightOutput(false);
+    setBackgroundPickerTarget(null);
+  }
+
   async function restoreRecentProject(project: RecentProject) {
-    const projectDir = `${(project.outputFolder || project.inputFolder)}\\.video_create_project`;
+    const projectDir = projectDirFromRecentProject(project);
+    if (!projectDir) {
+      setToast("最近项目缺少可恢复的项目目录。");
+      return;
+    }
     try {
       const loaded = await loadProjectDocumentsV5(projectDir);
-      const nextStage: StudioState["v5Stage"] = loaded.renderPlan
+      let restoredProjectState: ProjectStatePayload | null = null;
+      try {
+        restoredProjectState = await loadProjectState(projectDir);
+      } catch (error) {
+        console.warn("Project state autosave could not be loaded:", error);
+      }
+      const recovered = restoredProjectState ? parseSessionRecoveryData(restoredProjectState.data) : null;
+      const recoveredStudio = recovered?.studio || null;
+      const nextStage: StudioState["v5Stage"] = recoveredStudio?.v5RenderPlan
         ? "RENDER"
-        : loaded.blueprint
+        : recoveredStudio?.v5Blueprint
           ? "BLUEPRINT"
-          : "INPUT";
+          : loaded.renderPlan
+            ? "RENDER"
+            : loaded.blueprint
+              ? "BLUEPRINT"
+              : "INPUT";
       skipResetRef.current = true;
       state.patch({
-        inputFolder: project.inputFolder,
-        outputFolder: project.outputFolder,
-        title: loaded.blueprint?.title || project.title,
-        titleSubtitle: loaded.blueprint?.subtitle || state.titleSubtitle,
-        outputName: project.outputName,
+        ...(recoveredStudio || {}),
+        inputFolder: recoveredStudio?.inputFolder || project.inputFolder,
+        outputFolder: recoveredStudio?.outputFolder || project.outputFolder,
+        title: recoveredStudio?.title || loaded.blueprint?.title || project.title,
+        titleSubtitle: recoveredStudio?.titleSubtitle || loaded.blueprint?.subtitle || state.titleSubtitle,
+        outputName: recoveredStudio?.outputName || project.outputName,
+        telemetryEnabled: state.telemetryEnabled,
         v5Stage: nextStage,
-        v5Library: loaded.library,
-        v5Blueprint: loaded.blueprint,
-        v5RenderPlan: loaded.renderPlan,
-        titleBackgroundPath: state.titleBackgroundPath,
-        endBackgroundPath: state.endBackgroundPath,
+        v5Library: recoveredStudio?.v5Library || loaded.library,
+        v5Blueprint: recoveredStudio?.v5Blueprint || loaded.blueprint,
+        v5RenderPlan: recoveredStudio?.v5RenderPlan || loaded.renderPlan,
       });
+      if (recovered) {
+        applyRecoveredWorkspaceRuntimeState(recovered);
+      } else {
+        resetRecoveredWorkspaceRuntimeState("已恢复最近项目");
+      }
       setProjectMigrationNotes(loaded.migrated ? loaded.migrationNotes : []);
       setProjectMigrationSource(project.title || shortPathName(project.inputFolder));
-      const suffix = loaded.migrated ? `，并已自动迁移 ${loaded.migrationNotes.length} 项旧版项目数据` : "";
-      setToast(`已恢复最近项目：${shortPathName(project.inputFolder)}${suffix}`);
+      const migrationSuffix = loaded.migrated ? `，并已自动迁移 ${loaded.migrationNotes.length} 项旧版项目数据` : "";
+      const autosaveSuffix = recovered && restoredProjectState
+        ? `，并恢复了 ${formatSnapshotSavedAt(restoredProjectState.savedAt)} 的项目草稿`
+        : "";
+      setRecoverableProjectState(null);
+      setToast(`已恢复最近项目：${shortPathName(project.inputFolder)}${migrationSuffix}${autosaveSuffix}`);
     } catch (error) {
       console.error("Restore recent project failed:", error);
       const fallbackMessage = friendlyErrorMessage(error);
@@ -677,8 +787,10 @@ export function App() {
         titleBackgroundPath: null,
         endBackgroundPath: null,
       });
+      resetRecoveredWorkspaceRuntimeState("恢复项目失败");
       setProjectMigrationNotes([]);
       setProjectMigrationSource(null);
+      setRecoverableProjectState(null);
       setToast(`已恢复项目路径，但项目文档加载失败：${fallbackMessage}`);
     }
   }
@@ -723,6 +835,11 @@ export function App() {
     }
   }
 
+  function dismissProjectRecovery() {
+    setRecoverableProjectState(null);
+    setToast("已忽略最近项目草稿，本次启动不再提醒。");
+  }
+
   async function onExportDiagnostics() {
     const suggestedName = buildDiagnosticsFileName(state.outputName || state.title || "video-create-studio");
     try {
@@ -740,6 +857,7 @@ export function App() {
           app: {
             product: "Video Create Studio",
             snapshotSavedAt: recoverableSession?.savedAt || null,
+            recentProjectAutosaveSavedAt: recoverableProjectState?.snapshot.savedAt || null,
             exportedAtLocal: new Date().toLocaleString(),
             userAgent: window.navigator.userAgent,
             telemetryEnabled: state.telemetryEnabled,
@@ -753,6 +871,7 @@ export function App() {
             stage: state.v5Stage,
             title: state.title,
             outputName: state.outputName,
+            recentProjectAutosaveInputFolder: recoverableProjectState?.project.inputFolder || null,
           },
           upgrade: {
             migrationSource: projectMigrationSource,
@@ -1228,6 +1347,23 @@ export function App() {
 
     return () => window.clearTimeout(timeoutId);
   }, [sessionRecoveryData, sessionSnapshotReady]);
+
+  useEffect(() => {
+    if (!state.outputFolder || !v5ProjectDir) return;
+    if (!hasMeaningfulStudioDraft(sessionRecoveryData.studio)) return;
+
+    const timeoutId = window.setTimeout(() => {
+      const payload: ProjectStatePayload = {
+        savedAt: new Date().toISOString(),
+        data: sessionRecoveryData as unknown as Record<string, unknown>,
+      };
+      void saveProjectState(v5ProjectDir, payload).catch((error) => {
+        console.error("Failed to save project state autosave:", error);
+      });
+    }, 1200);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [sessionRecoveryData, state.outputFolder, v5ProjectDir]);
 
   async function ensureBackgroundLibrary(target: BackgroundPickerTarget) {
     if (!state.inputFolder) {
@@ -1910,6 +2046,14 @@ export function App() {
             snapshot={recoverableSession}
             onDismiss={dismissSessionDraft}
             onRestore={restoreSessionDraft}
+          />
+        )}
+        {!recoverableSession && recoverableProjectState && (
+          <ProjectRecoveryCard
+            project={recoverableProjectState.project}
+            snapshot={recoverableProjectState.snapshot}
+            onDismiss={dismissProjectRecovery}
+            onRestore={() => void restoreRecentProject(recoverableProjectState.project)}
           />
         )}
         <RecentProjectsCard projects={recentProjects} onRestore={restoreRecentProject} />
@@ -2611,6 +2755,11 @@ function formatRecentProjectTime(timestamp: number): string {
   return date.toLocaleDateString();
 }
 
+function projectDirFromRecentProject(project: RecentProject): string | null {
+  const base = project.outputFolder || project.inputFolder;
+  return base ? `${base}\\.video_create_project` : null;
+}
+
 function loadRecentProjects(): RecentProject[] {
   try {
     const raw = window.localStorage.getItem(RECENT_PROJECTS_KEY);
@@ -2977,6 +3126,51 @@ function SessionRecoveryCard({
           </button>
           <button className="secondary-action" type="button" onClick={onDismiss}>
             <X size={16} /> 丢弃草稿
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function ProjectRecoveryCard({
+  project,
+  snapshot,
+  onRestore,
+  onDismiss,
+}: {
+  project: RecentProject;
+  snapshot: ProjectStatePayload;
+  onRestore: () => void;
+  onDismiss: () => void;
+}) {
+  const restored = parseSessionRecoveryData(snapshot.data);
+  if (!restored) return null;
+
+  const draft = restored.studio;
+  const summary = draft.title || project.title || shortPathName(project.inputFolder);
+
+  return (
+    <section className="session-recovery-card">
+      <div className="session-recovery-head">
+        <div>
+          <span className="startup-health-kicker">PROJECT AUTOSAVE</span>
+          <strong>检测到上次未完成项目</strong>
+        </div>
+        <span className="session-recovery-badge">{formatSnapshotSavedAt(snapshot.savedAt)}</span>
+      </div>
+      <div className="session-recovery-body">
+        <div className="session-recovery-summary">
+          <strong>{summary}</strong>
+          <span>{shortPathName(project.inputFolder)}{" -> "}{project.outputFolder ? shortPathName(project.outputFolder) : "未选择输出目录"}</span>
+          <small>恢复后会先重新加载项目文档，再尽量带回自动保存的阶段、日志、预检和最近渲染上下文。</small>
+        </div>
+        <div className="session-recovery-actions">
+          <button className="primary-action" type="button" onClick={onRestore}>
+            <RotateCcw size={16} /> 恢复最近项目
+          </button>
+          <button className="secondary-action" type="button" onClick={onDismiss}>
+            <X size={16} /> 稍后再说
           </button>
         </div>
       </div>

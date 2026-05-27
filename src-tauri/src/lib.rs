@@ -381,6 +381,20 @@ async fn clear_session_snapshot(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn save_project_state(project_dir: String, payload_json: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || save_project_state_blocking(project_dir, payload_json))
+        .await
+        .map_err(|e| coded_error("E_PROJECT_STATE_INTERNAL", format!("save project state task failed unexpectedly: {}", e)))?
+}
+
+#[tauri::command]
+async fn load_project_state(project_dir: String) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || load_project_state_blocking(project_dir))
+        .await
+        .map_err(|e| coded_error("E_PROJECT_STATE_INTERNAL", format!("load project state task failed unexpectedly: {}", e)))?
+}
+
+#[tauri::command]
 async fn export_diagnostic_bundle(output_path: String, payload_json: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let path = PathBuf::from(&output_path);
@@ -2362,12 +2376,55 @@ fn coded_error(code: impl AsRef<str>, message: impl Into<String>) -> String {
     format!("[{}] {}", code.as_ref(), message.into())
 }
 
+fn project_state_path(project_dir: &str) -> Result<PathBuf, String> {
+    let trimmed = project_dir.trim();
+    if trimmed.is_empty() {
+        return Err(coded_error(
+            "E_PROJECT_STATE_DIR_REQUIRED",
+            "project_dir is required for project state autosave",
+        ));
+    }
+    Ok(PathBuf::from(trimmed).join("project_state.json"))
+}
+
 fn session_snapshot_path(app: &AppHandle) -> Result<PathBuf, String> {
     let app_data_dir = app
         .path()
         .app_data_dir()
         .map_err(|e| format!("无法解析应用数据目录: {}", e))?;
     Ok(app_data_dir.join("session_snapshot.json"))
+}
+
+fn save_project_state_blocking(project_dir: String, payload_json: String) -> Result<(), String> {
+    let path = project_state_path(&project_dir)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            coded_error(
+                "E_PROJECT_STATE_DIR_CREATE_FAILED",
+                format!("failed to create project state directory {}: {}", parent.display(), e),
+            )
+        })?;
+    }
+    std::fs::write(&path, payload_json).map_err(|e| {
+        coded_error(
+            "E_PROJECT_STATE_WRITE_FAILED",
+            format!("failed to write project state {}: {}", path.display(), e),
+        )
+    })
+}
+
+fn load_project_state_blocking(project_dir: String) -> Result<Option<String>, String> {
+    let path = project_state_path(&project_dir)?;
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let content = std::fs::read_to_string(&path).map_err(|e| {
+        coded_error(
+            "E_PROJECT_STATE_READ_FAILED",
+            format!("failed to read project state {}: {}", path.display(), e),
+        )
+    })?;
+    Ok(Some(content))
 }
 
 fn telemetry_store_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -3481,6 +3538,36 @@ mod tests {
     }
 
     #[test]
+    fn project_state_roundtrip_reads_back_saved_payload() {
+        let root = unique_test_dir("project_state_roundtrip");
+        let payload = r#"{"savedAt":"2026-05-27T10:00:00.000Z","data":{"phase":"render"}}"#;
+
+        save_project_state_blocking(root.display().to_string(), payload.to_string())
+            .expect("project state should save");
+        let loaded = load_project_state_blocking(root.display().to_string())
+            .expect("project state should load");
+
+        assert_eq!(loaded.as_deref(), Some(payload));
+        cleanup_test_dir(&root);
+    }
+
+    #[test]
+    fn project_state_missing_file_returns_none() {
+        let root = unique_test_dir("project_state_missing");
+        let loaded = load_project_state_blocking(root.display().to_string())
+            .expect("missing project state should not fail");
+        assert!(loaded.is_none());
+        cleanup_test_dir(&root);
+    }
+
+    #[test]
+    fn project_state_requires_non_empty_project_dir() {
+        let error = save_project_state_blocking("   ".to_string(), "{}".to_string())
+            .expect_err("blank project dir should fail");
+        assert!(error.contains("[E_PROJECT_STATE_DIR_REQUIRED]"));
+    }
+
+    #[test]
     fn build_report_summary_extracts_resume_recovery_fields() {
         let root = unique_test_dir("build_report_summary_resume");
         std::fs::write(
@@ -3715,6 +3802,8 @@ pub fn run() {
             save_session_snapshot,
             load_session_snapshot,
             clear_session_snapshot,
+            save_project_state,
+            load_project_state,
             export_diagnostic_bundle,
             load_project_documents_v5,
             load_build_report_summary,
