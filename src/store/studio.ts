@@ -48,6 +48,7 @@ export interface StudioState {
   musicFadeInSeconds: number;
   musicFadeOutSeconds: number;
   isDryRun: boolean;
+  telemetryEnabled: boolean;
 
   v5Stage: "INPUT" | "BLUEPRINT" | "RENDER";
   v5Library: V5MediaLibrary | null;
@@ -92,6 +93,7 @@ export const useStudio = create<StudioState>((set) => ({
   musicFadeInSeconds: 1.5,
   musicFadeOutSeconds: 3.0,
   isDryRun: false,
+  telemetryEnabled: false,
 
   v5Stage: "INPUT",
   v5Library: null,

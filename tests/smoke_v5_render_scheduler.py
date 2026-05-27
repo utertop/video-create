@@ -255,12 +255,29 @@ def test_render_diagnostics_expose_route_observability() -> None:
         "tests/tmp_vcs_render_diag/output.mp4",
         {"fps": 12, "quality": "draft", "render_mode": "standard", "performance_mode": "balanced"},
     )
-    diagnostics = engine._v56_render_diagnostics(renderer, [], [], False, {"total_render_seconds": 1.23})
+    diagnostics = engine._v56_render_diagnostics(
+        renderer,
+        [],
+        [],
+        False,
+        {
+            "total_render_seconds": 1.23,
+            "visual_base_materialize_seconds": 0.72,
+            "finalize_seconds": 0.31,
+        },
+    )
 
     assert diagnostics["strategy_version"] == "render_diagnostics_v2"
     assert diagnostics["routing"]["segments"]["route_counts"]["image_live_compose"] == 1
     assert diagnostics["routing"]["segments"]["route_counts"]["direct_chunk_candidate"] == 1
     assert diagnostics["timings"]["total_render_seconds"] == 1.23
+    observability = diagnostics["observability"]
+    assert observability["backend_resolution"]["selected_backend"] == "legacy_moviepy_backend"
+    assert observability["backend_resolution"]["preview"] is False
+    assert observability["timing_highlights"]["top_steps"][0]["name"] == "visual_base_materialize_seconds"
+    assert observability["fast_path_coverage"]["segments"]["fast_path_count"] == 1
+    assert observability["fast_path_coverage"]["segments"]["non_fast_path_count"] == 1
+    assert observability["cache_efficiency"]["proxy_media"]["eligible"] == 0
 
 
 def test_render_backend_selector_keeps_preview_on_legacy_backend() -> None:

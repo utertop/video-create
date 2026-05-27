@@ -1807,6 +1807,133 @@ select:focus {
   word-break: break-all;
 }
 
+.telemetry-summary-footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.telemetry-summary-footer span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 10px;
+  color: #294137;
+  font-size: 12px;
+  font-weight: 700;
+  background: rgb(255 255 255 / 78%);
+  border: 1px solid rgb(41 65 55 / 12%);
+  border-radius: 999px;
+}
+
+.telemetry-reset-btn {
+  min-width: 152px;
+  justify-content: center;
+}
+
+.telemetry-summary-note {
+  margin: 0;
+  color: #5a7065;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.telemetry-remote-panel {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  background: rgb(255 255 255 / 68%);
+  border: 1px solid rgb(41 65 55 / 12%);
+  border-radius: 12px;
+}
+
+.telemetry-remote-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.telemetry-remote-head strong {
+  color: #17362b;
+}
+
+.telemetry-remote-head span {
+  color: #5f766b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.telemetry-remote-field {
+  display: grid;
+  gap: 6px;
+}
+
+.telemetry-remote-field span {
+  color: #4f675b;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.telemetry-remote-field input {
+  width: 100%;
+}
+
+.telemetry-remote-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.telemetry-remote-btn {
+  min-width: 178px;
+  justify-content: center;
+}
+
+.telemetry-consent-modal {
+  width: min(560px, calc(100vw - 32px));
+  display: grid;
+  gap: 14px;
+  padding: 22px;
+  background: linear-gradient(135deg, #fbfff9 0%, #eef7ef 100%);
+  border: 1px solid #cddfd2;
+  border-radius: 18px;
+  box-shadow: 0 22px 60px rgb(15 32 26 / 22%);
+}
+
+.telemetry-consent-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
+
+.telemetry-consent-head strong {
+  color: #17362b;
+  font-size: 18px;
+}
+
+.telemetry-consent-head span {
+  color: #5f766b;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.telemetry-consent-modal p {
+  margin: 0;
+  color: #4f675b;
+  line-height: 1.6;
+}
+
+.telemetry-consent-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
 .session-recovery-card {
   display: grid;
   gap: 12px;
@@ -2071,6 +2198,67 @@ select:focus {
   font-size: 12px;
   font-weight: 800;
   line-height: 1.5;
+}
+
+.result-recovery-card {
+  margin-top: 12px;
+  padding: 12px 14px;
+  background: rgb(255 255 255 / 65%);
+  border: 1px solid rgb(41 65 55 / 12%);
+  border-radius: 8px;
+}
+
+.result-recovery-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #294137;
+}
+
+.result-recovery-message {
+  margin: 8px 0 0;
+  color: #365246;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.result-recovery-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.result-recovery-metrics span,
+.result-recovery-meta span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 10px;
+  color: #294137;
+  font-size: 12px;
+  font-weight: 700;
+  background: rgb(255 255 255 / 78%);
+  border: 1px solid rgb(41 65 55 / 12%);
+  border-radius: 999px;
+}
+
+.result-recovery-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.result-resume-btn {
+  color: #7a5119;
+  background: rgb(215 146 42 / 12%);
+  border-color: rgb(215 146 42 / 28%);
+}
+
+.result-resume-btn:hover {
+  background: rgb(215 146 42 / 20%);
+  border-color: #d7922a;
 }
 
 .result-open-btn {

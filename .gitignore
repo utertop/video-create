@@ -12,6 +12,7 @@ __pycache__/
 *$py.class
 .pytest_cache/
 tests/tmp_vcs_*/
+tests/.generated-diagnostic-check/
 
 # Local render/cache output
 .cache_bilibili_video/

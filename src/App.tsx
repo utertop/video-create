@@ -34,12 +34,19 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import {
   AspectRatio,
+  clearTelemetryHistory,
   clearSessionSnapshot,
   EditStrategy,
   exportDiagnosticBundle,
+  finishTelemetrySession,
+  flushRemoteTelemetryQueue,
   GenerateVideoResult,
+  loadBuildReportSummary,
   loadSessionSnapshot,
+  loadTelemetrySummary,
   loadProjectDocumentsV5,
+  parseAppError,
+  recordTelemetryEvent,
   resolveAppError,
   PerformanceMode,
   Quality,
@@ -69,9 +76,13 @@ import {
   MusicPlaylistMode,
   V5ChapterBackgroundMode,
   RenderV5Params,
+  RenderRecoverySummary,
+  TelemetrySummary,
   buildV5RenderCommandPreview,
   preflightRenderV5,
+  startTelemetrySession,
   startupSelfCheck,
+  updateTelemetrySettings,
 } from "./lib/engine";
 import { findSectionById, getAssetThumbnailPath, updateBlueprintSection, withBlueprintMetadata } from "./lib/blueprint";
 import { BackgroundAssetPicker, shortPathName } from "./components/BackgroundAssetPicker";
@@ -84,6 +95,7 @@ import { PerformanceModeControl, PerformanceRecommendation, performanceModeLabel
 import { normalizeTitleStyle, titleTemplateLabel, TitleStyleLab } from "./components/TitleStylePreview";
 import { StudioState, useStudio } from "./store/studio";
 import { BackgroundPickerTarget, PhotoSegmentCacheStats, ProxyMediaStats, VideoEvent, VideoSegmentCacheStats } from "./types/studio";
+import { buildDiagnosticBundlePayload, buildErrorCodeStats, buildSupportCaseSummary, summarizeErrorCodes } from "./lib/diagnostics";
 import {
   applyStructuredEvent,
   derivePhaseFromStructuredEvent,
@@ -116,10 +128,12 @@ interface RenderQueueItem {
   startedAt?: number;
   finishedAt?: number;
   retryCount: number;
+  recovery?: RenderRecoverySummary | null;
 }
 
 const ACTIVE_RENDER_QUEUE_STATUSES = new Set<RenderQueueStatus>(["queued", "running"]);
 const RECENT_PROJECTS_KEY = "video-create-studio.recent-projects.v1";
+const TELEMETRY_PREFERENCE_KEY = "video-create-studio.telemetry-enabled.v1";
 
 interface RecentProject {
   id: string;
@@ -163,6 +177,7 @@ interface StudioDraft {
   musicFadeInSeconds: number;
   musicFadeOutSeconds: number;
   isDryRun: boolean;
+  telemetryEnabled: boolean;
   v5Stage: StudioState["v5Stage"];
   v5Library: V5MediaLibrary | null;
   v5Blueprint: V5StoryBlueprint | null;
@@ -259,9 +274,21 @@ export function App() {
   const [isExportingDiagnostics, setIsExportingDiagnostics] = useState(false);
   const [projectMigrationNotes, setProjectMigrationNotes] = useState<string[]>([]);
   const [projectMigrationSource, setProjectMigrationSource] = useState<string | null>(null);
+  const [telemetrySummary, setTelemetrySummary] = useState<TelemetrySummary | null>(null);
+  const [isClearingTelemetry, setIsClearingTelemetry] = useState(false);
+  const [showTelemetryConsentDialog, setShowTelemetryConsentDialog] = useState(false);
+  const [pendingTelemetryEnable, setPendingTelemetryEnable] = useState(false);
+  const [isSavingTelemetrySettings, setIsSavingTelemetrySettings] = useState(false);
+  const [isFlushingRemoteTelemetry, setIsFlushingRemoteTelemetry] = useState(false);
+  const [remoteTelemetryEndpoint, setRemoteTelemetryEndpoint] = useState("");
+  const [remoteUploadEnabledDraft, setRemoteUploadEnabledDraft] = useState(false);
   const logEndRef = useRef<HTMLDivElement>(null);
   const segmentsTimelineRef = useRef<HTMLDivElement>(null);
   const activeJobRef = useRef<string | null>(null);
+  const telemetrySessionIdRef = useRef<string | null>(null);
+  const telemetryInitializedRef = useRef(false);
+  const sessionFirstExportRecordedRef = useRef(false);
+  const startupTelemetryRecordedRef = useRef(false);
   const skipResetRef = useRef(false);
   const [activeNav, setActiveNav] = useState("workspace");
 
@@ -351,6 +378,30 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    if (!startupDiagnostics || startupTelemetryRecordedRef.current) return;
+    if (!state.telemetryEnabled || !telemetrySessionIdRef.current) return;
+    startupTelemetryRecordedRef.current = true;
+    void recordTelemetryEvent({
+      sessionId: telemetrySessionIdRef.current,
+      eventType: "startup_check",
+      timestamp: new Date().toISOString(),
+      success: startupDiagnostics.ok,
+      errorCode: startupDiagnostics.code || startupDiagnostics.checks.find((item) => !item.ok)?.code || null,
+      supportQueue: startupDiagnostics.ok ? "general-triage" : "environment",
+      severity: startupDiagnostics.ok ? "info" : "high",
+      tags: [
+        "startup-check",
+        ...(startupDiagnostics.ok ? [] : ["startup-failed"]),
+        ...startupDiagnostics.checks.filter((item) => !item.ok).map((item) => item.id),
+      ],
+    })
+      .then((summary) => setTelemetrySummary(summary))
+      .catch((error) => {
+        console.error("Failed to record startup telemetry:", error);
+      });
+  }, [startupDiagnostics, state.telemetryEnabled]);
+
+  useEffect(() => {
     let disposed = false;
 
     void loadSessionSnapshot()
@@ -372,9 +423,88 @@ export function App() {
     };
   }, []);
 
+  useEffect(() => {
+    const stored = window.localStorage.getItem(TELEMETRY_PREFERENCE_KEY);
+    void loadTelemetrySummary()
+      .then((summary) => {
+        setTelemetrySummary(summary);
+        if (stored === "false") {
+          state.patch({ telemetryEnabled: false });
+          return;
+        }
+        if (stored === "true" && summary.consentAcceptedVersion === summary.currentConsentVersion) {
+          state.patch({ telemetryEnabled: true });
+          return;
+        }
+        if (stored === "true") {
+          state.patch({ telemetryEnabled: false });
+          setPendingTelemetryEnable(true);
+          setShowTelemetryConsentDialog(true);
+          setToast("Telemetry consent needs to be reviewed again before this version can re-enable anonymous reporting.");
+        }
+      })
+      .catch((error) => {
+        console.error("Failed to load telemetry summary:", error);
+      });
+  }, []);
+
+  useEffect(() => {
+    if (!telemetrySummary) return;
+    setRemoteUploadEnabledDraft(telemetrySummary.remoteUploadEnabled);
+    setRemoteTelemetryEndpoint(telemetrySummary.remoteEndpoint || "");
+  }, [telemetrySummary]);
+
   function scrollToSection(id: string) {
     setActiveNav(id);
     document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  function captureTelemetryEventContext(renderResult: GenerateVideoResult, recovery?: RenderRecoverySummary | null) {
+    const errorSummary = summarizeErrorCodes({
+      startupDiagnostics,
+      preflightDiagnostics,
+      result: renderResult,
+      resultActionSuggestion: renderResult.actionSuggestion || null,
+    });
+    const errorStats = buildErrorCodeStats(errorSummary);
+    return buildSupportCaseSummary({
+      summary: errorSummary,
+      stats: errorStats,
+      result: renderResult,
+      recovery: recovery || null,
+      startupDiagnostics,
+      preflightDiagnostics,
+    });
+  }
+
+  async function pushTelemetryEvent(
+    renderResult: GenerateVideoResult,
+    recovery?: RenderRecoverySummary | null,
+    extra?: Partial<{
+      eventType: string;
+      firstExport: boolean;
+      tags: string[];
+    }>,
+  ) {
+    if (!state.telemetryEnabled || !telemetrySessionIdRef.current) return;
+    const supportCase = captureTelemetryEventContext(renderResult, recovery);
+    const mergedTags = [...supportCase.tags, ...(extra?.tags || [])];
+    const nextSummary = await recordTelemetryEvent({
+      sessionId: telemetrySessionIdRef.current,
+      eventType: extra?.eventType || "render_result",
+      timestamp: new Date().toISOString(),
+      success: renderResult.ok,
+      firstExport: extra?.firstExport ?? false,
+      errorCode: renderResult.code || null,
+      supportQueue: supportCase.queue,
+      severity: supportCase.severity,
+      tags: Array.from(new Set(mergedTags)),
+      recoveryResumable: Boolean(recovery?.resumable),
+      recoveryRetryable: Boolean(recovery?.retryable),
+      recoveryCompletedChunks: recovery?.completedChunkCount ?? 0,
+      recoveryReusedChunks: recovery?.reusedChunkCount ?? 0,
+    });
+    setTelemetrySummary(nextSummary);
   }
 
   function rememberCurrentProject() {
@@ -393,6 +523,116 @@ export function App() {
       return next;
     });
   }
+
+  useEffect(() => {
+    let cancelled = false;
+    window.localStorage.setItem(TELEMETRY_PREFERENCE_KEY, String(state.telemetryEnabled));
+
+    const syncTelemetrySession = async () => {
+      try {
+        if (!telemetryInitializedRef.current) {
+          const started = await startTelemetrySession(state.telemetryEnabled);
+          if (cancelled) return;
+          telemetryInitializedRef.current = true;
+          telemetrySessionIdRef.current = started.sessionId || null;
+          sessionFirstExportRecordedRef.current = false;
+          setTelemetrySummary(started.summary);
+          if (started.previousSessionRecoveredAsCrash) {
+            setToast("检测到上一次应用会话未正常结束，已记录为匿名 crash 事件。");
+          }
+          return;
+        }
+
+        if (state.telemetryEnabled && !telemetrySessionIdRef.current) {
+          const started = await startTelemetrySession(true);
+          if (cancelled) return;
+          telemetrySessionIdRef.current = started.sessionId || null;
+          sessionFirstExportRecordedRef.current = false;
+          setTelemetrySummary(started.summary);
+          return;
+        }
+
+        if (!state.telemetryEnabled && telemetrySessionIdRef.current) {
+          const sessionId = telemetrySessionIdRef.current;
+          telemetrySessionIdRef.current = null;
+          sessionFirstExportRecordedRef.current = false;
+          const summary = await finishTelemetrySession(sessionId, true);
+          if (!cancelled) setTelemetrySummary(summary);
+        }
+      } catch (error) {
+        console.error("Failed to sync telemetry session:", error);
+      }
+    };
+
+    void syncTelemetrySession();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [state.telemetryEnabled]);
+
+  useEffect(() => {
+    const finishCurrentTelemetrySession = () => {
+      const sessionId = telemetrySessionIdRef.current;
+      if (!sessionId || !state.telemetryEnabled) return;
+      void finishTelemetrySession(sessionId, true).catch((error) => {
+        console.error("Failed to finish telemetry session:", error);
+      });
+      telemetrySessionIdRef.current = null;
+    };
+
+    window.addEventListener("beforeunload", finishCurrentTelemetrySession);
+    return () => {
+      window.removeEventListener("beforeunload", finishCurrentTelemetrySession);
+    };
+  }, [state.telemetryEnabled]);
+
+  useEffect(() => {
+    const handleWindowError = (event: ErrorEvent) => {
+      if (!state.telemetryEnabled || !telemetrySessionIdRef.current) return;
+      const parsed = parseAppError(event.error ?? event.message);
+      void recordTelemetryEvent({
+        sessionId: telemetrySessionIdRef.current,
+        eventType: "frontend_crash",
+        timestamp: new Date().toISOString(),
+        success: false,
+        errorCode: parsed?.code || null,
+        supportQueue: "app-runtime",
+        severity: "high",
+        tags: ["frontend-runtime", "window-error"],
+      })
+        .then((summary) => setTelemetrySummary(summary))
+        .catch((error) => {
+          console.error("Failed to record window error telemetry:", error);
+        });
+    };
+
+    const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
+      if (!state.telemetryEnabled || !telemetrySessionIdRef.current) return;
+      const parsed = parseAppError(event.reason);
+      void recordTelemetryEvent({
+        sessionId: telemetrySessionIdRef.current,
+        eventType: "frontend_crash",
+        timestamp: new Date().toISOString(),
+        success: false,
+        errorCode: parsed?.code || null,
+        supportQueue: "app-runtime",
+        severity: "high",
+        tags: ["frontend-runtime", "unhandled-rejection"],
+      })
+        .then((summary) => setTelemetrySummary(summary))
+        .catch((error) => {
+          console.error("Failed to record unhandled rejection telemetry:", error);
+        });
+    };
+
+    window.addEventListener("error", handleWindowError);
+    window.addEventListener("unhandledrejection", handleUnhandledRejection);
+    return () => {
+      window.removeEventListener("error", handleWindowError);
+      window.removeEventListener("unhandledrejection", handleUnhandledRejection);
+    };
+  }, [state.telemetryEnabled]);
 
   async function restoreRecentProject(project: RecentProject) {
     const projectDir = `${(project.outputFolder || project.inputFolder)}\\.video_create_project`;
@@ -493,14 +733,16 @@ export function App() {
       if (typeof target !== "string" || !target) return;
 
       setIsExportingDiagnostics(true);
-      const exported = await exportDiagnosticBundle(target, {
+      const resultResolution = result && !result.ok ? resolveResultError(result) : null;
+      const exported = await exportDiagnosticBundle(target, buildDiagnosticBundlePayload({
         generatedAt: new Date().toISOString(),
-        data: {
+        sections: {
           app: {
             product: "Video Create Studio",
             snapshotSavedAt: recoverableSession?.savedAt || null,
             exportedAtLocal: new Date().toLocaleString(),
             userAgent: window.navigator.userAgent,
+            telemetryEnabled: state.telemetryEnabled,
           },
           project: {
             inputFolder: state.inputFolder,
@@ -516,15 +758,6 @@ export function App() {
             migrationSource: projectMigrationSource,
             migrationNotes: projectMigrationNotes,
           },
-          diagnostics: {
-            startup: startupDiagnostics,
-            preflight: preflightDiagnostics,
-            errorCodeSummary: summarizeErrorCodes({
-              startupDiagnostics,
-              preflightDiagnostics,
-              result,
-            }),
-          },
           workflow: {
             phase,
             progress,
@@ -538,18 +771,128 @@ export function App() {
             videoSegmentCache,
             proxyMedia,
             renderQueue,
+            telemetrySummary: telemetrySummary
+              ? {
+                  ...telemetrySummary,
+                  remoteEndpoint: telemetrySummary.remoteEndpoint ? "[configured]" : null,
+                }
+              : null,
             materialsSample: materials.slice(0, 120),
             logs: logs.slice(-120),
           },
           sessionDraft: sessionRecoveryData,
         },
-      });
+        startupDiagnostics,
+        preflightDiagnostics,
+        result,
+        resultActionSuggestion: result?.actionSuggestion || resultResolution?.actionSuggestion || null,
+        resultRecovery: result?.recovery || latestRecoverableFailedJob?.recovery || null,
+        telemetrySummary: telemetrySummary
+          ? {
+              ...telemetrySummary,
+              remoteEndpoint: telemetrySummary.remoteEndpoint ? "[configured]" : null,
+            }
+          : null,
+      }));
       setToast(`诊断包已导出：${shortPathName(exported)}`);
     } catch (error) {
       console.error("Failed to export diagnostics:", error);
       setToast(`导出诊断包失败：${friendlyErrorMessage(error)}`);
     } finally {
       setIsExportingDiagnostics(false);
+    }
+  }
+
+  async function onClearTelemetryHistory() {
+    setIsClearingTelemetry(true);
+    try {
+      const summary = await clearTelemetryHistory();
+      setTelemetrySummary(summary);
+      sessionFirstExportRecordedRef.current = false;
+      setToast("已清空本地匿名遥测历史，当前会话将从新的统计基线继续。");
+    } catch (error) {
+      console.error("Failed to clear telemetry history:", error);
+      setToast(`清空匿名遥测历史失败：${friendlyErrorMessage(error)}`);
+    } finally {
+      setIsClearingTelemetry(false);
+    }
+  }
+
+  function onToggleTelemetryEnabled(nextValue: boolean) {
+    if (!nextValue) {
+      state.patch({ telemetryEnabled: false });
+      return;
+    }
+    if (telemetrySummary && telemetrySummary.consentAcceptedVersion === telemetrySummary.currentConsentVersion) {
+      state.patch({ telemetryEnabled: true });
+      return;
+    }
+    setPendingTelemetryEnable(true);
+    setShowTelemetryConsentDialog(true);
+  }
+
+  async function onAcceptTelemetryConsent() {
+    if (!telemetrySummary) return;
+    setIsSavingTelemetrySettings(true);
+    try {
+      const summary = await updateTelemetrySettings({
+        consentAcceptedVersion: telemetrySummary.currentConsentVersion,
+        remoteUploadEnabled: remoteUploadEnabledDraft,
+        remoteEndpoint: remoteTelemetryEndpoint || null,
+      });
+      setTelemetrySummary(summary);
+      setShowTelemetryConsentDialog(false);
+      if (pendingTelemetryEnable) {
+        state.patch({ telemetryEnabled: true });
+      }
+      setPendingTelemetryEnable(false);
+      setToast("Telemetry consent saved. Anonymous local metrics are now available for this version.");
+    } catch (error) {
+      console.error("Failed to save telemetry consent:", error);
+      setToast(`Failed to save telemetry consent: ${friendlyErrorMessage(error)}`);
+    } finally {
+      setIsSavingTelemetrySettings(false);
+    }
+  }
+
+  function onDeclineTelemetryConsent() {
+    setPendingTelemetryEnable(false);
+    setShowTelemetryConsentDialog(false);
+    state.patch({ telemetryEnabled: false });
+  }
+
+  async function onSaveRemoteTelemetrySettings() {
+    setIsSavingTelemetrySettings(true);
+    try {
+      const summary = await updateTelemetrySettings({
+        consentAcceptedVersion:
+          telemetrySummary?.consentAcceptedVersion === telemetrySummary?.currentConsentVersion
+            ? telemetrySummary?.currentConsentVersion
+            : undefined,
+        remoteUploadEnabled: remoteUploadEnabledDraft,
+        remoteEndpoint: remoteTelemetryEndpoint || null,
+      });
+      setTelemetrySummary(summary);
+      setToast("Remote telemetry settings saved.");
+    } catch (error) {
+      console.error("Failed to save remote telemetry settings:", error);
+      setToast(`Failed to save remote telemetry settings: ${friendlyErrorMessage(error)}`);
+    } finally {
+      setIsSavingTelemetrySettings(false);
+    }
+  }
+
+  async function onFlushRemoteTelemetryQueue() {
+    setIsFlushingRemoteTelemetry(true);
+    try {
+      const summary = await flushRemoteTelemetryQueue();
+      setTelemetrySummary(summary);
+      setToast(summary.lastRemoteUploadError ? "Remote telemetry retry finished with an error." : "Remote telemetry queue flushed.");
+    } catch (error) {
+      console.error("Failed to flush remote telemetry queue:", error);
+      setToast(`Failed to flush remote telemetry queue: ${friendlyErrorMessage(error)}`);
+    } finally {
+      setIsFlushingRemoteTelemetry(false);
     }
   }
 
@@ -575,6 +918,26 @@ export function App() {
         outputPath: v5OutputPath,
       });
       setPreflightDiagnostics(diagnostics);
+      if (state.telemetryEnabled && telemetrySessionIdRef.current) {
+        void recordTelemetryEvent({
+          sessionId: telemetrySessionIdRef.current,
+          eventType: "preflight_check",
+          timestamp: new Date().toISOString(),
+          success: diagnostics.ok,
+          errorCode: diagnostics.code || diagnostics.checks.find((item) => !item.ok)?.code || null,
+          supportQueue: diagnostics.ok ? "general-triage" : "project-validation",
+          severity: diagnostics.ok ? "info" : "warning",
+          tags: [
+            "preflight-check",
+            ...(diagnostics.ok ? [] : ["preflight-failed"]),
+            ...diagnostics.checks.filter((item) => !item.ok).map((item) => item.id),
+          ],
+        })
+          .then((summary) => setTelemetrySummary(summary))
+          .catch((error) => {
+            console.error("Failed to record preflight telemetry:", error);
+          });
+      }
 
       if (!diagnostics.ok) {
         const message = friendlyDiagnosticsMessage(diagnostics);
@@ -746,6 +1109,17 @@ export function App() {
   const v5OutputPath = useMemo(() => {
     return state.outputFolder ? `${state.outputFolder}\\${v5FinalOutputName}` : "";
   }, [state.outputFolder, v5FinalOutputName]);
+
+  const latestRecoverableFailedJob = useMemo(() => {
+    const failed = renderQueue
+      .filter((item) => item.status === "failed" && item.recovery?.resumable && item.recovery.retryable)
+      .sort((left, right) => {
+        const leftTime = left.finishedAt || left.createdAt;
+        const rightTime = right.finishedAt || right.createdAt;
+        return rightTime - leftTime;
+      });
+    return failed[0] || null;
+  }, [renderQueue]);
 
   const performanceRecommendation = useMemo(
     () => recommendPerformanceMode(state.v5RenderPlan, state.v5Library, state.quality, state.editStrategy),
@@ -989,6 +1363,37 @@ export function App() {
     }
   }
 
+  function projectDirFromPlanPath(planPath?: string): string | null {
+    if (!planPath) return null;
+    const normalized = String(planPath).trim();
+    if (!normalized) return null;
+    const index = Math.max(normalized.lastIndexOf("\\"), normalized.lastIndexOf("/"));
+    if (index <= 0) return null;
+    return normalized.slice(0, index);
+  }
+
+  async function loadRecoverySummaryForPlan(planPath?: string): Promise<RenderRecoverySummary | null> {
+    const projectDir = projectDirFromPlanPath(planPath);
+    if (!projectDir) return null;
+    try {
+      return await loadBuildReportSummary(projectDir);
+    } catch (error) {
+      const parsed = parseAppError(error);
+      if (parsed.code === "E_BUILD_REPORT_MISSING") return null;
+      console.warn("Failed to load build report summary:", error);
+      return null;
+    }
+  }
+
+  function resumeActionSuggestion(recovery: RenderRecoverySummary | null): string | null {
+    if (!recovery?.resumable || !recovery.retryable) return null;
+    const completed = recovery.completedChunkCount;
+    if (completed > 0) {
+      return `可直接点击“恢复并重试”，系统会复用已完成的 ${completed} 个分段，只重算失败部分。`;
+    }
+    return "可直接点击“恢复并重试”，系统会接着当前 stable render 进度继续执行。";
+  }
+
   async function enqueueV5RenderJob() {
     if (!v5PlanPath || !v5OutputPath) {
       const message = "V5 渲染计划或输出路径缺失。请先确认故事蓝图并生成 render_plan.json。";
@@ -1039,6 +1444,7 @@ export function App() {
     if (!job.planPath || !job.outputPath || !job.params) return;
     try {
       await renderV5(job.planPath, job.outputPath, job.params, job.id);
+      const recovery = await loadRecoverySummaryForPlan(job.planPath);
       setRenderQueue((prev) =>
         prev.map((item) =>
           item.id === job.id
@@ -1046,8 +1452,11 @@ export function App() {
                 ...item,
                 status: "done",
                 progress: 100,
-                message: "Render completed",
+                message: recovery?.reusedChunkCount
+                  ? `Render completed with ${recovery.reusedChunkCount} reused chunks`
+                  : "Render completed",
                 finishedAt: item.finishedAt || Date.now(),
+                recovery,
               }
             : item,
         ),
@@ -1058,6 +1467,31 @@ export function App() {
         commandPreview: job.commandPreview || v5CommandPreview,
         outputPath: job.outputPath,
         outputDir: job.outputDir,
+        recovery,
+      });
+      if (recovery?.resumedFromManifest || recovery?.reusedChunkCount) {
+        setLogs((prev) =>
+          [
+            ...prev,
+            `Stable render resumed: reused ${recovery.reusedChunkCount} completed chunks for ${job.label}.`,
+          ].slice(-100),
+        );
+      }
+      const successResult: GenerateVideoResult = {
+        ok: true,
+        message: `V5 render completed: ${job.outputPath}`,
+        commandPreview: job.commandPreview || v5CommandPreview,
+        outputPath: job.outputPath,
+        outputDir: job.outputDir,
+        recovery,
+      };
+      const isFirstExport = !sessionFirstExportRecordedRef.current;
+      sessionFirstExportRecordedRef.current = true;
+      void pushTelemetryEvent(successResult, recovery, {
+        firstExport: isFirstExport,
+        tags: ["render-success"],
+      }).catch((error) => {
+        console.error("Failed to record render success telemetry:", error);
       });
       rememberCurrentProject();
       setProgress(100);
@@ -1067,7 +1501,10 @@ export function App() {
       setProgressDetail(null);
       setActiveSegmentIndex(null);
     } catch (err: any) {
+      const resolution = resolveAppError(err);
       const message = friendlyErrorMessage(err);
+      const recovery = await loadRecoverySummaryForPlan(job.planPath);
+      const actionSuggestion = resumeActionSuggestion(recovery) || resolution.actionSuggestion || null;
       let shouldShowFailure = true;
       let cancelled = false;
       setRenderQueue((prev) =>
@@ -1081,15 +1518,47 @@ export function App() {
             status: wasCancelled ? "cancelled" : "failed",
             message: wasCancelled ? "渲染已取消" : message,
             finishedAt: item.finishedAt || Date.now(),
+            recovery: wasCancelled ? null : recovery,
           };
         }),
       );
       if (shouldShowFailure) {
         setResult({
           ok: false,
+          code: resolution.code || null,
           message,
           commandPreview: job.commandPreview || v5CommandPreview,
+          outputPath: job.outputPath,
+          outputDir: job.outputDir,
+          actionSuggestion,
+          recovery,
         });
+        const failedResult: GenerateVideoResult = {
+          ok: false,
+          code: resolution.code || null,
+          message,
+          commandPreview: job.commandPreview || v5CommandPreview,
+          outputPath: job.outputPath,
+          outputDir: job.outputDir,
+          actionSuggestion,
+          recovery,
+        };
+        const isFirstExport = !sessionFirstExportRecordedRef.current;
+        sessionFirstExportRecordedRef.current = true;
+        void pushTelemetryEvent(failedResult, recovery, {
+          firstExport: isFirstExport,
+          tags: ["render-failure"],
+        }).catch((error) => {
+          console.error("Failed to record render failure telemetry:", error);
+        });
+      }
+      if (!cancelled && recovery?.resumable && recovery.retryable) {
+        setLogs((prev) =>
+          [
+            ...prev,
+            `Stable render failure can resume: ${recovery.completedChunkCount} completed chunks saved for ${job.label}.`,
+          ].slice(-100),
+        );
       }
       setProgressTone(cancelled ? "cancelled" : "failed");
       setProgressDetail(cancelled ? "渲染已取消。" : message);
@@ -1362,14 +1831,22 @@ export function App() {
       status: "queued",
       position: 0,
       progress: 0,
-      message: "Retry queued",
+      message: item.recovery?.resumable ? "Resume retry queued" : "Retry queued",
       createdAt: Date.now(),
       startedAt: undefined,
       finishedAt: undefined,
       retryCount: item.retryCount + 1,
+      recovery: null,
     };
     setRenderQueue((prev) => [...prev, retryJob]);
-    setLogs((prev) => [...prev, `Retry queued: ${retryJob.label} (${shortJobId(retryJob.id)})`].slice(-100));
+    setLogs((prev) =>
+      [
+        ...prev,
+        item.recovery?.resumable
+          ? `Resume retry queued: ${retryJob.label} (${shortJobId(retryJob.id)}) will reuse completed stable chunks.`
+          : `Retry queued: ${retryJob.label} (${shortJobId(retryJob.id)})`,
+      ].slice(-100),
+    );
     void runRenderQueueJob(retryJob);
   }
 
@@ -1411,6 +1888,20 @@ export function App() {
         {toast && <Toast title={state.v5Stage === "BLUEPRINT" ? "蓝图生成成功" : "提示"} message={toast} onClose={() => setToast(null)} />}
         <div className="workspace-inner">
         <StartupHealthCard diagnostics={startupDiagnostics} loading={startupDiagnosticsLoading} />
+        <TelemetrySummaryCard
+          enabled={state.telemetryEnabled}
+          summary={telemetrySummary}
+          isClearing={isClearingTelemetry}
+          onClear={onClearTelemetryHistory}
+          remoteEndpoint={remoteTelemetryEndpoint}
+          remoteUploadEnabled={remoteUploadEnabledDraft}
+          isSavingSettings={isSavingTelemetrySettings}
+          isFlushingRemote={isFlushingRemoteTelemetry}
+          onRemoteEndpointChange={setRemoteTelemetryEndpoint}
+          onRemoteUploadEnabledChange={setRemoteUploadEnabledDraft}
+          onSaveRemoteSettings={onSaveRemoteTelemetrySettings}
+          onFlushRemoteQueue={onFlushRemoteTelemetryQueue}
+        />
         {projectMigrationNotes.length > 0 && projectMigrationSource && (
           <ProjectMigrationCard notes={projectMigrationNotes} source={projectMigrationSource} />
         )}
@@ -1671,6 +2162,7 @@ export function App() {
                 onChange={(chaptersFromDirs) => state.patch({ chaptersFromDirs })}
               />
               <Toggle checked={state.cover} label="生成 B 站封面" onChange={(cover) => state.patch({ cover })} />
+              <Toggle checked={state.telemetryEnabled} label="匿名遥测（可选）" onChange={onToggleTelemetryEnabled} />
             </div>
           </section>
 
@@ -1859,7 +2351,16 @@ export function App() {
                 />
               ) : null}
             </div>
-            {result && <ResultCard result={result} />}
+            {result && (
+              <ResultCard
+                result={result}
+                onResumeRetry={
+                  !result.ok && result.recovery?.resumable && result.recovery.retryable && latestRecoverableFailedJob
+                    ? () => onRetryQueueJob(latestRecoverableFailedJob)
+                    : undefined
+                }
+              />
+            )}
           </section>
 
           <section className="panel wide-panel ai-panel" id="ai">
@@ -1921,6 +2422,15 @@ export function App() {
           <MaterialGallery materials={materials} onSelect={setSelectedMaterial} viewMode={galleryView} />
         </div>
       </div>
+    )}
+
+    {showTelemetryConsentDialog && telemetrySummary && (
+      <TelemetryConsentDialog
+        consentVersion={telemetrySummary.currentConsentVersion}
+        isSaving={isSavingTelemetrySettings}
+        onAccept={onAcceptTelemetryConsent}
+        onDecline={onDeclineTelemetryConsent}
+      />
     )}
 
     {backgroundPickerTarget && (
@@ -2142,6 +2652,211 @@ function friendlyErrorMessage(error: unknown): string {
   return parts.filter(Boolean).join("\n");
 }
 
+function formatTelemetryRate(value: number): string {
+  return `${Math.round(value * 100)}%`;
+}
+
+function describeTopTelemetryEntry(entries: TelemetrySummary["topErrorCodes"]): string {
+  const top = entries[0];
+  if (!top) return "No events yet";
+  return `${top.key} (${top.count})`;
+}
+
+function TelemetrySummaryCard({
+  enabled,
+  summary,
+  isClearing,
+  onClear,
+  remoteEndpoint,
+  remoteUploadEnabled,
+  isSavingSettings,
+  isFlushingRemote,
+  onRemoteEndpointChange,
+  onRemoteUploadEnabledChange,
+  onSaveRemoteSettings,
+  onFlushRemoteQueue,
+}: {
+  enabled: boolean;
+  summary: TelemetrySummary | null;
+  isClearing: boolean;
+  onClear: () => void;
+  remoteEndpoint: string;
+  remoteUploadEnabled: boolean;
+  isSavingSettings: boolean;
+  isFlushingRemote: boolean;
+  onRemoteEndpointChange: (value: string) => void;
+  onRemoteUploadEnabledChange: (value: boolean) => void;
+  onSaveRemoteSettings: () => void;
+  onFlushRemoteQueue: () => void;
+}) {
+  const recentEvents = summary?.recentEvents || [];
+  const recentEvent = recentEvents.length > 0 ? recentEvents[recentEvents.length - 1] : null;
+
+  return (
+    <section className="startup-health-card">
+      <div className="startup-health-head">
+        <div>
+          <span className="startup-health-kicker">OPTIONAL TELEMETRY</span>
+          <strong>{enabled ? "匿名稳定性指标已启用" : "匿名稳定性指标未启用"}</strong>
+        </div>
+        <div className="startup-health-badge-group">
+          <span className={`startup-health-badge ${enabled ? "ok" : "pending"}`}>
+            {enabled ? (
+              <>
+                <CheckCircle2 size={14} /> Enabled
+              </>
+            ) : (
+              <>
+                <Clock size={14} /> Opt-in
+              </>
+            )}
+          </span>
+          <button className="secondary-action telemetry-reset-btn" disabled={isClearing} type="button" onClick={onClear}>
+            {isClearing ? <Loader2 className="spin" size={16} /> : <RotateCcw size={16} />}
+            {isClearing ? "清空中" : "清空本地历史"}
+          </button>
+        </div>
+      </div>
+
+      <div className="startup-health-grid">
+        <div className="startup-health-item">
+          <div className="startup-health-item-head">
+            <Gauge size={16} />
+            <strong>Crash-free sessions</strong>
+          </div>
+          <span>{summary ? formatTelemetryRate(summary.crashFreeSessionRate) : "Waiting for local metrics"}</span>
+          <small>
+            {summary
+              ? `${summary.sessionsCompletedCleanly}/${summary.sessionsStarted} sessions closed cleanly`
+              : "Enable telemetry to start measuring app stability."}
+          </small>
+        </div>
+
+        <div className="startup-health-item">
+          <div className="startup-health-item-head">
+            <PlayCircle size={16} />
+            <strong>First export success</strong>
+          </div>
+          <span>{summary ? formatTelemetryRate(summary.firstExportSuccessRate) : "Waiting for export attempts"}</span>
+          <small>
+            {summary
+              ? `${summary.firstExportSuccesses}/${summary.firstExportSessions} first exports succeeded`
+              : "Tracked once per session after the first render result."}
+          </small>
+        </div>
+
+        <div className="startup-health-item">
+          <div className="startup-health-item-head">
+            <TriangleAlert size={16} />
+            <strong>Common error code</strong>
+          </div>
+          <span>{summary ? describeTopTelemetryEntry(summary.topErrorCodes) : "No failures recorded yet"}</span>
+          <small>{summary ? `${summary.renderFailures} render failures recorded locally` : "Recent failures will surface here."}</small>
+        </div>
+
+        <div className="startup-health-item">
+          <div className="startup-health-item-head">
+            <History size={16} />
+            <strong>Support routing</strong>
+          </div>
+          <span>{summary ? describeTopTelemetryEntry(summary.topSupportQueues) : "No support events yet"}</span>
+          <small>
+            {summary
+              ? `Recovery resumable: ${summary.recoveryResumableEvents}, retryable: ${summary.recoveryRetryableEvents}`
+              : "Queue, severity, tag, and recovery labels stay anonymous."}
+          </small>
+        </div>
+      </div>
+
+      {summary ? (
+        <div className="telemetry-summary-footer">
+          <span>Render attempts: {summary.renderAttempts}</span>
+          <span>Last event: {recentEvent ? `${recentEvent.eventType}${recentEvent.errorCode ? ` [${recentEvent.errorCode}]` : ""}` : "none"}</span>
+          <span>Last updated: {summary.lastUpdatedAt ? new Date(summary.lastUpdatedAt).toLocaleString() : "not yet"}</span>
+        </div>
+      ) : null}
+
+      <div className="telemetry-remote-panel">
+        <div className="telemetry-remote-head">
+          <strong>Remote Crash Reporting</strong>
+          <span>Consent: {summary?.consentAcceptedVersion === summary?.currentConsentVersion ? summary?.currentConsentVersion : "not accepted"}</span>
+        </div>
+        <label className="telemetry-remote-field">
+          <span>Remote endpoint</span>
+          <input
+            placeholder="https://telemetry.example.com/collect"
+            type="url"
+            value={remoteEndpoint}
+            onChange={(event) => onRemoteEndpointChange(event.target.value)}
+          />
+        </label>
+        <div className="telemetry-remote-actions">
+          <Toggle checked={remoteUploadEnabled} label="允许远程匿名上报" onChange={onRemoteUploadEnabledChange} />
+          <button className="secondary-action telemetry-remote-btn" disabled={isSavingSettings} type="button" onClick={onSaveRemoteSettings}>
+            {isSavingSettings ? <Loader2 className="spin" size={16} /> : <Settings2 size={16} />}
+            {isSavingSettings ? "Saving" : "Save remote settings"}
+          </button>
+          <button className="secondary-action telemetry-remote-btn" disabled={isFlushingRemote || !summary?.pendingRemoteEvents} type="button" onClick={onFlushRemoteQueue}>
+            {isFlushingRemote ? <Loader2 className="spin" size={16} /> : <RotateCcw size={16} />}
+            {isFlushingRemote ? "Retrying" : `Retry queued uploads${summary?.pendingRemoteEvents ? ` (${summary.pendingRemoteEvents})` : ""}`}
+          </button>
+        </div>
+        <div className="telemetry-summary-footer">
+          <span>Endpoint: {summary?.remoteEndpointHost || "not configured"}</span>
+          <span>Pending uploads: {summary?.pendingRemoteEvents || 0}</span>
+          <span>Last remote upload: {summary?.lastRemoteUploadAt ? new Date(summary.lastRemoteUploadAt).toLocaleString() : "never"}</span>
+          <span>Last remote status: {summary?.lastRemoteUploadError || "ok"}</span>
+        </div>
+      </div>
+
+      <p className="telemetry-summary-note">
+        仅记录匿名稳定性标签与聚合计数，不包含素材路径、标题文本或媒体内容；可以随时关闭或清空本地历史。
+      </p>
+    </section>
+  );
+}
+
+function TelemetryConsentDialog({
+  consentVersion,
+  isSaving,
+  onAccept,
+  onDecline,
+}: {
+  consentVersion: string;
+  isSaving: boolean;
+  onAccept: () => void;
+  onDecline: () => void;
+}) {
+  return (
+    <div className="gallery-overlay">
+      <div className="telemetry-consent-modal">
+        <div className="telemetry-consent-head">
+          <strong>Telemetry Consent</strong>
+          <span>{consentVersion}</span>
+        </div>
+        <p>
+          Anonymous telemetry helps track crash-free sessions, first export success, common failure codes, and render recovery outcomes.
+        </p>
+        <p>
+          It does not include media content, titles, or raw project text. Remote upload is optional and can stay disabled even after consent.
+        </p>
+        <p>
+          Privacy notice: <code>docs/TELEMETRY_PRIVACY_NOTICE_V2026_05.md</code>
+        </p>
+        <div className="telemetry-consent-actions">
+          <button className="secondary-action" type="button" onClick={onDecline}>
+            Not now
+          </button>
+          <button className="primary-action" disabled={isSaving} type="button" onClick={onAccept}>
+            {isSaving ? <Loader2 className="spin" size={16} /> : <CheckCircle2 size={16} />}
+            {isSaving ? "Saving consent" : "Accept privacy notice"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function StartupHealthCard({
   diagnostics,
   loading,
@@ -2330,8 +3045,25 @@ function RecentProjectsCard({
   );
 }
 
-function ResultCard({ result }: { result: GenerateVideoResult }) {
+function ResultCard({
+  result,
+  onResumeRetry,
+}: {
+  result: GenerateVideoResult;
+  onResumeRetry?: () => void;
+}) {
   const resolution = resolveResultError(result);
+  const recovery = result.recovery || null;
+  const actionSuggestion = result.actionSuggestion || resolution.actionSuggestion || null;
+  const showRecovery =
+    Boolean(recovery) &&
+    (
+      recovery!.resumable ||
+      recovery!.resumedFromManifest ||
+      recovery!.reusedChunkCount > 0 ||
+      recovery!.completedChunkCount > 0 ||
+      recovery!.failedChunkCount > 0
+    );
   return (
     <div className={`result-card ${result.ok ? "success" : "warning"}`}>
       <div className="result-card-header">
@@ -2347,8 +3079,51 @@ function ResultCard({ result }: { result: GenerateVideoResult }) {
           </span>
         )}
       </p>
-      {!result.ok && resolution.actionSuggestion ? (
+      {false && !result.ok && actionSuggestion ? (
         <div className="result-action-note">建议操作：{resolution.actionSuggestion}</div>
+      ) : null}
+      {!result.ok && actionSuggestion ? (
+        <div className="result-action-note">建议操作：{actionSuggestion}</div>
+      ) : null}
+      {showRecovery && recovery ? (
+        <div className="result-recovery-card">
+          <div className="result-recovery-header">
+            <RotateCcw size={16} />
+            <strong>{result.ok ? "Stable Render 复用摘要" : "Stable Render 恢复点"}</strong>
+          </div>
+          <p className="result-recovery-message">
+            {result.ok
+              ? recovery.reusedChunkCount > 0
+                ? `本次渲染复用了 ${recovery.reusedChunkCount} 个已完成分段，不需要从头开始。`
+                : recovery.resumedFromManifest
+                  ? "本次渲染接续了上一次 stable render 的进度。"
+                  : "本次渲染已记录 stable render 恢复信息。"
+              : recovery.resumable && recovery.retryable
+                ? "当前失败可直接恢复重试，系统会尽量复用已经完成的 stable chunks。"
+                : "当前失败已生成 stable render 恢复摘要，便于定位失败段和支持排障。"}
+          </p>
+          <div className="result-recovery-metrics">
+            <span>已完成 {recovery.completedChunkCount}</span>
+            <span>已复用 {recovery.reusedChunkCount}</span>
+            <span>失败 {recovery.failedChunkCount}</span>
+            {recovery.chunkCount ? <span>总分段 {recovery.chunkCount}</span> : null}
+          </div>
+          {(recovery.failedStage || recovery.failedChunk || recovery.failureCode) ? (
+            <div className="result-recovery-meta">
+              {recovery.failedStage ? <span>失败阶段：{recovery.failedStage}</span> : null}
+              {recovery.failedChunk ? <span>失败分段：{recovery.failedChunk}</span> : null}
+              {recovery.failureCode ? <span>失败标识：{recovery.failureCode}</span> : null}
+            </div>
+          ) : null}
+          {!result.ok && onResumeRetry && recovery.resumable && recovery.retryable ? (
+            <div className="result-card-actions">
+              <button className="result-open-btn result-resume-btn" onClick={onResumeRetry}>
+                <RotateCcw size={15} />
+                恢复并重试
+              </button>
+            </div>
+          ) : null}
+        </div>
       ) : null}
       {result.ok && result.outputPath && (
         <div className="result-card-actions">
@@ -3606,6 +4381,7 @@ function captureStudioDraft(state: StudioState): StudioDraft {
     musicFadeInSeconds: state.musicFadeInSeconds,
     musicFadeOutSeconds: state.musicFadeOutSeconds,
     isDryRun: state.isDryRun,
+    telemetryEnabled: state.telemetryEnabled,
     v5Stage: state.v5Stage,
     v5Library: state.v5Library,
     v5Blueprint: state.v5Blueprint,
@@ -3676,44 +4452,6 @@ function buildDiagnosticsFileName(baseName: string): string {
     String(now.getSeconds()).padStart(2, "0"),
   ].join("");
   return `${safeBase}_diagnostics_${stamp}.json`;
-}
-
-function summarizeErrorCodes({
-  startupDiagnostics,
-  preflightDiagnostics,
-  result,
-}: {
-  startupDiagnostics: StartupDiagnostics | null;
-  preflightDiagnostics: StartupDiagnostics | null;
-  result: GenerateVideoResult | null;
-}) {
-  const summary = new Map<string, { count: number; messages: string[] }>();
-
-  const push = (code: string | null | undefined, message?: string | null) => {
-    if (!code) return;
-    const current = summary.get(code) || { count: 0, messages: [] };
-    current.count += 1;
-    if (message && !current.messages.includes(message)) current.messages.push(message);
-    summary.set(code, current);
-  };
-
-  push(startupDiagnostics?.code, startupDiagnostics?.summary);
-  for (const check of startupDiagnostics?.checks || []) {
-    push(check.code, `${check.label}: ${check.message}`);
-  }
-
-  push(preflightDiagnostics?.code, preflightDiagnostics?.summary);
-  for (const check of preflightDiagnostics?.checks || []) {
-    push(check.code, `${check.label}: ${check.message}`);
-  }
-
-  push(result?.code, result?.message);
-
-  return Array.from(summary.entries()).map(([code, value]) => ({
-    code,
-    count: value.count,
-    messages: value.messages,
-  }));
 }
 
 function resolveResultError(result: GenerateVideoResult) {

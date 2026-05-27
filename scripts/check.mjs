@@ -35,6 +35,29 @@ const fullSmokeTests = [
   "tests/smoke_v5_6_long_video_stability.py",
 ];
 
+const fullOnlySteps = [
+  {
+    label: "Compile diagnostic bundle helpers",
+    command: npmCommand(),
+    args: ["exec", "--", "tsc", "-p", "./tsconfig.diagnostic-check.json"],
+  },
+  {
+    label: "Assert diagnostic bundle payload",
+    command: "node",
+    args: ["./tests/diagnostic_bundle_assert.mjs"],
+  },
+  {
+    label: "Print diagnostic error code summary",
+    command: "node",
+    args: ["./scripts/error-code-summary.mjs", "./tests/.generated-diagnostic-check/diagnostic_bundle_fixture.json"],
+  },
+  {
+    label: "Run Tauri regression tests",
+    command: "cargo",
+    args: ["test", "--manifest-path", "./src-tauri/Cargo.toml"],
+  },
+];
+
 const steps = [
   {
     label: "Build web frontend",
@@ -56,6 +79,7 @@ const steps = [
     command: "python",
     args: ["./video_engine_v5.py", "--help"],
   },
+  ...(full ? fullOnlySteps : []),
   ...smokeTestSteps(full ? fullSmokeTests : coreSmokeTests),
 ];
 

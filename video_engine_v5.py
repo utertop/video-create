@@ -7470,6 +7470,155 @@ def _v56_route_reason_summary(items: List[Dict[str, Any]], route_key: str, reaso
     }
 
 
+def _v56_top_named_counts(counts: Dict[str, int], limit: int = 5) -> List[Dict[str, Any]]:
+    ranked = sorted(
+        ((str(name), int(count)) for name, count in (counts or {}).items() if count),
+        key=lambda item: (-item[1], item[0]),
+    )
+    return [{"name": name, "count": count} for name, count in ranked[: max(1, int(limit or 5))]]
+
+
+def _v56_timing_highlights(timings: Optional[Dict[str, Any]], limit: int = 3) -> Dict[str, Any]:
+    timings = dict(timings or {})
+    numeric_steps: List[Tuple[str, float]] = []
+    for key, value in timings.items():
+        if key == "total_render_seconds":
+            continue
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)) and key.endswith("_seconds"):
+            numeric_steps.append((key, round(float(value), 4)))
+    numeric_steps.sort(key=lambda item: (-item[1], item[0]))
+    accounted_seconds = round(sum(seconds for _, seconds in numeric_steps), 4)
+    total_render_seconds = round(float(timings.get("total_render_seconds") or 0.0), 4)
+    return {
+        "top_steps": [
+            {"name": name, "seconds": seconds}
+            for name, seconds in numeric_steps[: max(1, int(limit or 3))]
+        ],
+        "measured_step_count": len(numeric_steps),
+        "accounted_seconds": accounted_seconds,
+        "total_render_seconds": total_render_seconds,
+        "unaccounted_seconds": round(max(0.0, total_render_seconds - accounted_seconds), 4),
+    }
+
+
+def _v56_cache_efficiency_entry(
+    stats: Optional[Dict[str, Any]],
+    *,
+    hit_keys: Tuple[str, ...] = ("hit",),
+    created_keys: Tuple[str, ...] = ("created",),
+    fallback_keys: Tuple[str, ...] = ("fallback",),
+) -> Dict[str, Any]:
+    raw = dict(stats or {})
+    eligible = int(raw.get("eligible") or 0)
+    hits = sum(int(raw.get(key) or 0) for key in hit_keys)
+    created = sum(int(raw.get(key) or 0) for key in created_keys)
+    fallback = sum(int(raw.get(key) or 0) for key in fallback_keys)
+    payload: Dict[str, Any] = {
+        "eligible": eligible,
+        "hit_count": hits,
+        "created_count": created,
+        "fallback_count": fallback,
+        "raw": raw,
+    }
+    if eligible > 0:
+        payload["hit_rate"] = round(hits / float(eligible), 4)
+        payload["created_rate"] = round(created / float(eligible), 4)
+        payload["fallback_rate"] = round(fallback / float(eligible), 4)
+    else:
+        payload["hit_rate"] = None
+        payload["created_rate"] = None
+        payload["fallback_rate"] = None
+    return payload
+
+
+def _v56_fast_path_coverage(
+    items: List[Dict[str, Any]],
+    *,
+    fast_routes: Tuple[str, ...],
+    route_key: str = "route",
+    reason_key: str = "reason",
+    limit: int = 5,
+) -> Dict[str, Any]:
+    fast_route_set = set(str(route) for route in fast_routes)
+    total = len(items)
+    fast_path_count = 0
+    slow_reason_counts: Dict[str, int] = {}
+    slow_route_counts: Dict[str, int] = {}
+    for item in items:
+        route = str(item.get(route_key) or item.get("route") or "")
+        if route in fast_route_set:
+            fast_path_count += 1
+            continue
+        if route:
+            slow_route_counts[route] = slow_route_counts.get(route, 0) + 1
+        reason = str(item.get(reason_key) or item.get("reason") or "")
+        if reason:
+            slow_reason_counts[reason] = slow_reason_counts.get(reason, 0) + 1
+    non_fast_path_count = max(0, total - fast_path_count)
+    return {
+        "total": total,
+        "fast_path_count": fast_path_count,
+        "non_fast_path_count": non_fast_path_count,
+        "fast_path_rate": round(fast_path_count / float(total), 4) if total > 0 else None,
+        "top_non_fast_path_routes": _v56_top_named_counts(slow_route_counts, limit=limit),
+        "top_non_fast_path_reasons": _v56_top_named_counts(slow_reason_counts, limit=limit),
+    }
+
+
+def _v56_observability_summary(
+    renderer: Any,
+    *,
+    segment_route_details: List[Dict[str, Any]],
+    chunk_route_details: List[Dict[str, Any]],
+    timings: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    params = getattr(renderer, "params", {}) or {}
+    render_settings = getattr(renderer, "plan", {}).get("render_settings", {}) or {}
+    backend_payload = _v56_backend_report_payload(
+        getattr(renderer, "backend_execution", None) or getattr(renderer, "backend_decision", None)
+    )
+    return {
+        "backend_resolution": {
+            **backend_payload,
+            "render_mode": params.get("render_mode") or render_settings.get("render_mode") or "auto",
+            "performance_mode": params.get("performance_mode") or render_settings.get("performance_mode"),
+            "preview": bool(params.get("preview")),
+        },
+        "timing_highlights": _v56_timing_highlights(timings or getattr(renderer, "last_render_timings", {}) or {}),
+        "cache_efficiency": {
+            "visual_base_cache": _v56_cache_efficiency_entry(
+                getattr(renderer, "visual_base_cache_stats", {}) or {},
+                hit_keys=("hit", "chunk_hit"),
+            ),
+            "photo_segment_cache": _v56_cache_efficiency_entry(
+                renderer._photo_segment_cache_summary() if hasattr(renderer, "_photo_segment_cache_summary") else {}
+            ),
+            "card_segment_cache": _v56_cache_efficiency_entry(
+                renderer._card_segment_cache_summary() if hasattr(renderer, "_card_segment_cache_summary") else {}
+            ),
+            "video_segment_cache": _v56_cache_efficiency_entry(
+                renderer._video_segment_cache_summary() if hasattr(renderer, "_video_segment_cache_summary") else {}
+            ),
+            "proxy_media": _v56_cache_efficiency_entry(
+                renderer._proxy_media_summary() if hasattr(renderer, "_proxy_media_summary") else {},
+                hit_keys=("hit", "manifest_hit"),
+            ),
+        },
+        "fast_path_coverage": {
+            "segments": _v56_fast_path_coverage(
+                segment_route_details,
+                fast_routes=("photo_prerender", "direct_chunk_candidate", "video_fit", "video_motion_fit"),
+            ),
+            "chunks": _v56_fast_path_coverage(
+                chunk_route_details,
+                fast_routes=("ffmpeg_direct_chunk", "ffmpeg_fitted_video_chunk", "ffmpeg_card_chunk", "ffmpeg_image_chunk"),
+            ),
+        },
+    }
+
+
 def _v56_classify_render_failure(error: Any, stage: str) -> Dict[str, Any]:
     message = str(error or "")
     lowered = message.lower()
@@ -7589,6 +7738,12 @@ def _v56_render_diagnostics(
             "chunk_details": chunk_route_details,
         },
         "timings": dict(timings or getattr(renderer, "last_render_timings", {}) or {}),
+        "observability": _v56_observability_summary(
+            renderer,
+            segment_route_details=segment_route_details,
+            chunk_route_details=chunk_route_details,
+            timings=timings,
+        ),
     }
 
 

@@ -134,6 +134,9 @@ def test_music_bed_and_playlist_render() -> None:
     assert report["render_mode"] == "v5_standard"
     assert report["proxy_media"]["eligible"] >= 1
     assert report["diagnostics"]["audio_mix"]["music_mode"] == "manual"
+    assert report["diagnostics"]["observability"]["backend_resolution"]["preview"] is True
+    assert report["diagnostics"]["observability"]["timing_highlights"]["measured_step_count"] >= 1
+    assert report["diagnostics"]["observability"]["cache_efficiency"]["proxy_media"]["eligible"] >= 1
 
 
 def test_audio_loudness_normalized_cache_is_distinct() -> None:

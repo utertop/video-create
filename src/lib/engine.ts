@@ -453,6 +453,8 @@ export interface GenerateVideoResult {
   outputDir?: string;
   cancelled?: boolean;
   isDryRun?: boolean;
+  actionSuggestion?: string | null;
+  recovery?: RenderRecoverySummary | null;
 }
 
 export interface StartupCheckItem {
@@ -504,6 +506,106 @@ export interface ProjectDocumentsLoadResult {
   library: V5MediaLibrary | null;
   blueprint: V5StoryBlueprint | null;
   renderPlan: V5RenderPlan | null;
+}
+
+export interface RenderRecoverySummary {
+  reportPath: string;
+  manifestPath?: string | null;
+  status?: string | null;
+  renderMode?: string | null;
+  failedStage?: string | null;
+  outputPath?: string | null;
+  selectedBackend?: string | null;
+  chunkCount?: number | null;
+  createdAt?: string | null;
+  resumable: boolean;
+  resumedFromManifest: boolean;
+  reusedChunkCount: number;
+  completedChunkCount: number;
+  failedChunkCount: number;
+  reportedChunkCount: number;
+  failedChunk?: string | null;
+  failureCode?: string | null;
+  failureMessage?: string | null;
+  retryable: boolean;
+}
+
+export interface TelemetryCountEntry {
+  key: string;
+  count: number;
+}
+
+export interface TelemetryEventPayload {
+  sessionId?: string | null;
+  eventType: string;
+  timestamp?: string | null;
+  success?: boolean | null;
+  firstExport?: boolean | null;
+  errorCode?: string | null;
+  supportQueue?: string | null;
+  severity?: string | null;
+  tags?: string[] | null;
+  recoveryResumable?: boolean | null;
+  recoveryRetryable?: boolean | null;
+  recoveryCompletedChunks?: number | null;
+  recoveryReusedChunks?: number | null;
+}
+
+export interface TelemetrySummary {
+  telemetryEnabled: boolean;
+  currentConsentVersion: string;
+  consentAcceptedVersion?: string | null;
+  remoteUploadEnabled: boolean;
+  remoteEndpointConfigured: boolean;
+  remoteEndpoint?: string | null;
+  remoteEndpointHost?: string | null;
+  pendingRemoteEvents: number;
+  lastRemoteUploadAt?: string | null;
+  lastRemoteUploadError?: string | null;
+  sessionsStarted: number;
+  sessionsCompletedCleanly: number;
+  sessionsCrashed: number;
+  crashFreeSessionRate: number;
+  firstExportSessions: number;
+  firstExportSuccesses: number;
+  firstExportSuccessRate: number;
+  renderAttempts: number;
+  renderSuccesses: number;
+  renderFailures: number;
+  recoveryResumableEvents: number;
+  recoveryRetryableEvents: number;
+  topErrorCodes: TelemetryCountEntry[];
+  topSupportQueues: TelemetryCountEntry[];
+  topTags: TelemetryCountEntry[];
+  topSeverities: TelemetryCountEntry[];
+  recentEvents: Array<{
+    sessionId?: string | null;
+    eventType: string;
+    timestamp: string;
+    success?: boolean | null;
+    errorCode?: string | null;
+    supportQueue?: string | null;
+    severity?: string | null;
+    tags: string[];
+    recoveryResumable: boolean;
+    recoveryRetryable: boolean;
+    recoveryCompletedChunks: number;
+    recoveryReusedChunks: number;
+  }>;
+  lastUpdatedAt?: string | null;
+}
+
+export interface TelemetrySessionStartResponse {
+  sessionId?: string | null;
+  telemetryEnabled: boolean;
+  previousSessionRecoveredAsCrash: boolean;
+  summary: TelemetrySummary;
+}
+
+export interface TelemetrySettingsPayload {
+  consentAcceptedVersion?: string | null;
+  remoteUploadEnabled?: boolean | null;
+  remoteEndpoint?: string | null;
 }
 
 export interface RenderV5Params {
@@ -677,6 +779,42 @@ export async function loadProjectDocumentsV5(projectDir: string): Promise<Projec
     blueprint: payload.blueprint ? parseV5Value<V5StoryBlueprint>(payload.blueprint, "story_blueprint") : null,
     renderPlan: (payload.renderPlan || payload.render_plan) ? parseV5Value<V5RenderPlan>(payload.renderPlan || payload.render_plan, "render_plan") : null,
   };
+}
+
+export async function loadBuildReportSummary(projectDir: string): Promise<RenderRecoverySummary> {
+  return await invoke<RenderRecoverySummary>("load_build_report_summary", { projectDir });
+}
+
+export async function startTelemetrySession(telemetryEnabled: boolean): Promise<TelemetrySessionStartResponse> {
+  return await invoke<TelemetrySessionStartResponse>("start_telemetry_session", { telemetryEnabled });
+}
+
+export async function finishTelemetrySession(sessionId: string, cleanExit: boolean): Promise<TelemetrySummary> {
+  return await invoke<TelemetrySummary>("finish_telemetry_session", { sessionId, cleanExit });
+}
+
+export async function recordTelemetryEvent(payload: TelemetryEventPayload): Promise<TelemetrySummary> {
+  return await invoke<TelemetrySummary>("record_telemetry_event", {
+    payloadJson: JSON.stringify(payload),
+  });
+}
+
+export async function loadTelemetrySummary(): Promise<TelemetrySummary> {
+  return await invoke<TelemetrySummary>("load_telemetry_summary");
+}
+
+export async function clearTelemetryHistory(): Promise<TelemetrySummary> {
+  return await invoke<TelemetrySummary>("clear_telemetry_history");
+}
+
+export async function updateTelemetrySettings(payload: TelemetrySettingsPayload): Promise<TelemetrySummary> {
+  return await invoke<TelemetrySummary>("update_telemetry_settings", {
+    payloadJson: JSON.stringify(payload),
+  });
+}
+
+export async function flushRemoteTelemetryQueue(): Promise<TelemetrySummary> {
+  return await invoke<TelemetrySummary>("flush_remote_telemetry_queue");
 }
 
 // =========================

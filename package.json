@@ -12,6 +12,7 @@
     "build:desktop-assets": "npm run build:web && npm run build:worker",
     "check": "node ./scripts/check.mjs",
     "check:full": "node ./scripts/check.mjs --full",
+    "diagnostics:summary": "node ./scripts/error-code-summary.mjs",
     "verify:worker-packaged": "node ./scripts/verify-worker-packaged.mjs",
     "build:desktop": "node ./scripts/build-desktop.mjs",
     "build:desktop:msi": "npm run tauri -- build --bundles msi",

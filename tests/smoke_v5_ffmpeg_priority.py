@@ -160,6 +160,9 @@ def test_ffmpeg_priority_fits_simple_video_segments() -> None:
     assert report["backend"]["selected_backend"] == "legacy_moviepy_backend"
     assert report["segment_routes"][0]["route"] == "direct_chunk_candidate"
     assert report["diagnostics"]["routing"]["segments"]["route_counts"]["direct_chunk_candidate"] == 1
+    assert report["diagnostics"]["observability"]["backend_resolution"]["selected_backend"] == "legacy_moviepy_backend"
+    assert report["diagnostics"]["observability"]["fast_path_coverage"]["segments"]["fast_path_count"] == 1
+    assert report["diagnostics"]["observability"]["cache_efficiency"]["video_segment_cache"]["eligible"] >= 1
     assert report["timings"]["visual_base_materialize_seconds"] >= 0
     assert "finalize" in report["timings"]
 
@@ -230,6 +233,9 @@ def test_ffmpeg_image_chunk_renders_safe_image_only_stable_chunk() -> None:
     assert route_counts.get("ffmpeg_image_chunk") == 1
     assert report["chunk_routes"][0]["route"] == "ffmpeg_image_chunk"
     assert report["diagnostics"]["routing"]["chunks"]["route_counts"]["ffmpeg_image_chunk"] == 1
+    assert report["diagnostics"]["observability"]["backend_resolution"]["selected_backend"] == "ffmpeg_stable_backend"
+    assert report["diagnostics"]["observability"]["fast_path_coverage"]["chunks"]["fast_path_count"] == 1
+    assert report["diagnostics"]["observability"]["timing_highlights"]["measured_step_count"] >= 1
     assert report["timings"]["concat_strategy"] in {"ffmpeg_copy", "ffmpeg_reencode", "moviepy_fallback"}
     assert report["recovery"]["resumable"] is True
     assert report["recovery"]["reused_chunk_count"] >= 0

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::hash_map::DefaultHasher;
+use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -9,6 +9,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
 };
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 #[derive(Clone, Default)]
@@ -38,11 +39,13 @@ struct WorkerProcess {
     stdout: BufReader<ChildStdout>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkerLaunchKind {
     BundledExecutable,
     PythonScript,
 }
 
+#[derive(Debug)]
 struct WorkerLaunchSpec {
     program: PathBuf,
     args: Vec<String>,
@@ -51,6 +54,9 @@ struct WorkerLaunchSpec {
 }
 
 const CURRENT_V5_SCHEMA_VERSION: &str = "5.5";
+const TELEMETRY_SCHEMA_VERSION: &str = "1";
+const TELEMETRY_CONSENT_VERSION: &str = "telemetry-consent-2026-05-v1";
+const MAX_PENDING_REMOTE_EVENTS: usize = 50;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -114,6 +120,198 @@ struct ProjectDocumentsLoadResult {
     library: Option<Value>,
     blueprint: Option<Value>,
     render_plan: Option<Value>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BuildReportSummary {
+    report_path: String,
+    manifest_path: Option<String>,
+    status: Option<String>,
+    render_mode: Option<String>,
+    failed_stage: Option<String>,
+    output_path: Option<String>,
+    selected_backend: Option<String>,
+    chunk_count: Option<usize>,
+    created_at: Option<String>,
+    resumable: bool,
+    resumed_from_manifest: bool,
+    reused_chunk_count: usize,
+    completed_chunk_count: usize,
+    failed_chunk_count: usize,
+    reported_chunk_count: usize,
+    failed_chunk: Option<String>,
+    failure_code: Option<String>,
+    failure_message: Option<String>,
+    retryable: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+struct TelemetryCountEntry {
+    key: String,
+    count: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+struct TelemetrySummary {
+    telemetry_enabled: bool,
+    current_consent_version: String,
+    consent_accepted_version: Option<String>,
+    remote_upload_enabled: bool,
+    remote_endpoint_configured: bool,
+    remote_endpoint: Option<String>,
+    remote_endpoint_host: Option<String>,
+    pending_remote_events: u64,
+    last_remote_upload_at: Option<String>,
+    last_remote_upload_error: Option<String>,
+    sessions_started: u64,
+    sessions_completed_cleanly: u64,
+    sessions_crashed: u64,
+    crash_free_session_rate: f64,
+    first_export_sessions: u64,
+    first_export_successes: u64,
+    first_export_success_rate: f64,
+    render_attempts: u64,
+    render_successes: u64,
+    render_failures: u64,
+    recovery_resumable_events: u64,
+    recovery_retryable_events: u64,
+    top_error_codes: Vec<TelemetryCountEntry>,
+    top_support_queues: Vec<TelemetryCountEntry>,
+    top_tags: Vec<TelemetryCountEntry>,
+    top_severities: Vec<TelemetryCountEntry>,
+    recent_events: Vec<TelemetryEventRecord>,
+    last_updated_at: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+struct TelemetrySessionStartResponse {
+    session_id: Option<String>,
+    telemetry_enabled: bool,
+    previous_session_recovered_as_crash: bool,
+    summary: TelemetrySummary,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+struct TelemetryEventRecord {
+    session_id: Option<String>,
+    event_type: String,
+    timestamp: String,
+    success: Option<bool>,
+    error_code: Option<String>,
+    support_queue: Option<String>,
+    severity: Option<String>,
+    tags: Vec<String>,
+    recovery_resumable: bool,
+    recovery_retryable: bool,
+    recovery_completed_chunks: u64,
+    recovery_reused_chunks: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+struct TelemetryRemoteEnvelope {
+    id: String,
+    queued_at: String,
+    app_version: String,
+    consent_version: String,
+    event: TelemetryEventRecord,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+struct TelemetrySettingsPayload {
+    consent_accepted_version: Option<String>,
+    remote_upload_enabled: Option<bool>,
+    remote_endpoint: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+#[serde(default)]
+struct TelemetryRemoteConfig {
+    consent_accepted_version: Option<String>,
+    remote_upload_enabled: bool,
+    remote_endpoint: Option<String>,
+    pending_events: Vec<TelemetryRemoteEnvelope>,
+    last_upload_at: Option<String>,
+    last_upload_error: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+struct TelemetryEventPayload {
+    session_id: Option<String>,
+    event_type: String,
+    timestamp: Option<String>,
+    success: Option<bool>,
+    first_export: Option<bool>,
+    error_code: Option<String>,
+    support_queue: Option<String>,
+    severity: Option<String>,
+    tags: Option<Vec<String>>,
+    recovery_resumable: Option<bool>,
+    recovery_retryable: Option<bool>,
+    recovery_completed_chunks: Option<u64>,
+    recovery_reused_chunks: Option<u64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+struct ActiveTelemetrySession {
+    session_id: String,
+    started_at: String,
+    telemetry_enabled: bool,
+    first_export_recorded: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+struct TelemetryAggregate {
+    sessions_started: u64,
+    sessions_completed_cleanly: u64,
+    sessions_crashed: u64,
+    first_export_sessions: u64,
+    first_export_successes: u64,
+    render_attempts: u64,
+    render_successes: u64,
+    render_failures: u64,
+    recovery_resumable_events: u64,
+    recovery_retryable_events: u64,
+    error_codes: HashMap<String, u64>,
+    support_queues: HashMap<String, u64>,
+    tags: HashMap<String, u64>,
+    severities: HashMap<String, u64>,
+    last_updated_at: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+#[serde(default)]
+struct TelemetryStore {
+    schema_version: String,
+    preference_enabled: bool,
+    active_session: Option<ActiveTelemetrySession>,
+    remote: TelemetryRemoteConfig,
+    summary: TelemetryAggregate,
+    recent_events: Vec<TelemetryEventRecord>,
+}
+
+impl Default for TelemetryStore {
+    fn default() -> Self {
+        Self {
+            schema_version: TELEMETRY_SCHEMA_VERSION.to_string(),
+            preference_enabled: false,
+            active_session: None,
+            remote: TelemetryRemoteConfig::default(),
+            summary: TelemetryAggregate::default(),
+            recent_events: Vec::new(),
+        }
+    }
 }
 
 #[tauri::command]
@@ -203,6 +401,62 @@ async fn load_project_documents_v5(project_dir: String) -> Result<ProjectDocumen
     tauri::async_runtime::spawn_blocking(move || load_project_documents_v5_blocking(project_dir))
         .await
         .map_err(|e| coded_error("E_PROJECT_LOAD_INTERNAL", format!("加载项目文档后台任务异常: {}", e)))?
+}
+
+#[tauri::command]
+async fn load_build_report_summary(project_dir: String) -> Result<BuildReportSummary, String> {
+    tauri::async_runtime::spawn_blocking(move || load_build_report_summary_blocking(project_dir))
+        .await
+        .map_err(|e| coded_error("E_BUILD_REPORT_INTERNAL", format!("鍔犺浇 build_report 鍚庡彴浠诲姟寮傚父: {}", e)))?
+}
+
+#[tauri::command]
+async fn start_telemetry_session(app: AppHandle, telemetry_enabled: bool) -> Result<TelemetrySessionStartResponse, String> {
+    tauri::async_runtime::spawn_blocking(move || start_telemetry_session_blocking(&app, telemetry_enabled))
+        .await
+        .map_err(|e| coded_error("E_TELEMETRY_INTERNAL", format!("鍚姩 telemetry session 鍚庡彴浠诲姟寮傚父: {}", e)))?
+}
+
+#[tauri::command]
+async fn finish_telemetry_session(app: AppHandle, session_id: String, clean_exit: bool) -> Result<TelemetrySummary, String> {
+    tauri::async_runtime::spawn_blocking(move || finish_telemetry_session_blocking(&app, session_id, clean_exit))
+        .await
+        .map_err(|e| coded_error("E_TELEMETRY_INTERNAL", format!("缁撴潫 telemetry session 鍚庡彴浠诲姟寮傚父: {}", e)))?
+}
+
+#[tauri::command]
+async fn record_telemetry_event(app: AppHandle, payload_json: String) -> Result<TelemetrySummary, String> {
+    tauri::async_runtime::spawn_blocking(move || record_telemetry_event_blocking(&app, payload_json))
+        .await
+        .map_err(|e| coded_error("E_TELEMETRY_INTERNAL", format!("璁板綍 telemetry event 鍚庡彴浠诲姟寮傚父: {}", e)))?
+}
+
+#[tauri::command]
+async fn load_telemetry_summary(app: AppHandle) -> Result<TelemetrySummary, String> {
+    tauri::async_runtime::spawn_blocking(move || load_telemetry_summary_blocking(&app))
+        .await
+        .map_err(|e| coded_error("E_TELEMETRY_INTERNAL", format!("鍔犺浇 telemetry summary 鍚庡彴浠诲姟寮傚父: {}", e)))?
+}
+
+#[tauri::command]
+async fn clear_telemetry_history(app: AppHandle) -> Result<TelemetrySummary, String> {
+    tauri::async_runtime::spawn_blocking(move || clear_telemetry_history_blocking(&app))
+        .await
+        .map_err(|e| coded_error("E_TELEMETRY_INTERNAL", format!("clear telemetry history failed unexpectedly: {}", e)))?
+}
+
+#[tauri::command]
+async fn update_telemetry_settings(app: AppHandle, payload_json: String) -> Result<TelemetrySummary, String> {
+    tauri::async_runtime::spawn_blocking(move || update_telemetry_settings_blocking(&app, payload_json))
+        .await
+        .map_err(|e| coded_error("E_TELEMETRY_INTERNAL", format!("update telemetry settings failed unexpectedly: {}", e)))?
+}
+
+#[tauri::command]
+async fn flush_remote_telemetry_queue(app: AppHandle) -> Result<TelemetrySummary, String> {
+    tauri::async_runtime::spawn_blocking(move || flush_remote_telemetry_queue_blocking(&app))
+        .await
+        .map_err(|e| coded_error("E_TELEMETRY_INTERNAL", format!("flush remote telemetry queue failed unexpectedly: {}", e)))?
 }
 
 #[tauri::command]
@@ -1510,26 +1764,7 @@ fn find_v5_worker_script(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 fn find_v5_worker_entrypoint(app: &AppHandle) -> Result<WorkerLaunchSpec, String> {
-    for candidate in worker_executable_candidates(app) {
-        if candidate.is_file() {
-            let working_dir = candidate.parent().map(Path::to_path_buf);
-            return Ok(WorkerLaunchSpec {
-                program: candidate,
-                args: Vec::new(),
-                working_dir,
-                kind: WorkerLaunchKind::BundledExecutable,
-            });
-        }
-    }
-
-    let script_path = find_v5_worker_script(app)?;
-    let working_dir = script_path.parent().map(Path::to_path_buf);
-    Ok(WorkerLaunchSpec {
-        program: PathBuf::from("python"),
-        args: vec![script_path.display().to_string()],
-        working_dir,
-        kind: WorkerLaunchKind::PythonScript,
-    })
+    resolve_worker_launch_spec(worker_executable_candidates(app), find_v5_worker_script(app).ok())
 }
 
 fn worker_executable_candidates(app: &AppHandle) -> Vec<PathBuf> {
@@ -1569,6 +1804,37 @@ fn worker_executable_candidates(app: &AppHandle) -> Vec<PathBuf> {
     }
 
     candidates
+}
+
+fn resolve_worker_launch_spec(
+    candidates: Vec<PathBuf>,
+    script_path: Option<PathBuf>,
+) -> Result<WorkerLaunchSpec, String> {
+    for candidate in candidates {
+        if candidate.is_file() {
+            let working_dir = candidate.parent().map(Path::to_path_buf);
+            return Ok(WorkerLaunchSpec {
+                program: candidate,
+                args: Vec::new(),
+                working_dir,
+                kind: WorkerLaunchKind::BundledExecutable,
+            });
+        }
+    }
+
+    let script_path = script_path.ok_or_else(|| {
+        coded_error(
+            "E_WORKER_ENTRYPOINT_MISSING",
+            "Cannot find V5 worker executable or fallback script video_engine_worker.py.",
+        )
+    })?;
+    let working_dir = script_path.parent().map(Path::to_path_buf);
+    Ok(WorkerLaunchSpec {
+        program: PathBuf::from("python"),
+        args: vec![script_path.display().to_string()],
+        working_dir,
+        kind: WorkerLaunchKind::PythonScript,
+    })
 }
 
 fn find_generator_script(app: &AppHandle) -> Result<PathBuf, String> {
@@ -2104,6 +2370,499 @@ fn session_snapshot_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(app_data_dir.join("session_snapshot.json"))
 }
 
+fn telemetry_store_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("鏃犳硶瑙ｆ瀽 telemetry 鏁版嵁鐩綍: {}", e))?;
+    Ok(app_data_dir.join("telemetry_store.json"))
+}
+
+fn load_telemetry_store(path: &Path) -> Result<TelemetryStore, String> {
+    if !path.is_file() {
+        return Ok(TelemetryStore::default());
+    }
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| coded_error("E_TELEMETRY_READ_FAILED", format!("鏃犳硶璇诲彇 telemetry store {}: {}", path.display(), e)))?;
+    let mut store: TelemetryStore = serde_json::from_str(&raw)
+        .map_err(|e| coded_error("E_TELEMETRY_INVALID_JSON", format!("telemetry store JSON 鏃犳硶瑙ｆ瀽 {}: {}", path.display(), e)))?;
+    if store.schema_version.is_empty() {
+        store.schema_version = TELEMETRY_SCHEMA_VERSION.to_string();
+    }
+    Ok(store)
+}
+
+fn save_telemetry_store(path: &Path, store: &TelemetryStore) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| coded_error("E_TELEMETRY_WRITE_FAILED", format!("鏃犳硶鍒涘缓 telemetry 鐩綍 {}: {}", parent.display(), e)))?;
+    }
+    let serialized = serde_json::to_string_pretty(store)
+        .map_err(|e| coded_error("E_TELEMETRY_WRITE_FAILED", format!("鏃犳硶搴忓垪鍖? telemetry store: {}", e)))?;
+    std::fs::write(path, serialized)
+        .map_err(|e| coded_error("E_TELEMETRY_WRITE_FAILED", format!("鏃犳硶鍐欏叆 telemetry store {}: {}", path.display(), e)))
+}
+
+fn current_timestamp_iso() -> String {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    format!("{}", seconds)
+}
+
+fn next_telemetry_session_id() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    format!("session-{}", nanos)
+}
+
+fn next_telemetry_remote_event_id() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    format!("remote-{}", nanos)
+}
+
+fn normalize_remote_endpoint(endpoint: Option<String>) -> Option<String> {
+    endpoint.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn is_valid_remote_endpoint(endpoint: &str) -> bool {
+    endpoint.starts_with("https://") || endpoint.starts_with("http://127.0.0.1") || endpoint.starts_with("http://localhost")
+}
+
+fn remote_endpoint_host(endpoint: &str) -> Option<String> {
+    let without_scheme = endpoint
+        .strip_prefix("https://")
+        .or_else(|| endpoint.strip_prefix("http://"))
+        .unwrap_or(endpoint);
+    let host = without_scheme.split('/').next().unwrap_or("").trim();
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_string())
+    }
+}
+
+fn summarize_count_map(map: &HashMap<String, u64>, limit: usize) -> Vec<TelemetryCountEntry> {
+    let mut entries = map
+        .iter()
+        .map(|(key, count)| TelemetryCountEntry {
+            key: key.clone(),
+            count: *count,
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| {
+        right
+            .count
+            .cmp(&left.count)
+            .then_with(|| left.key.cmp(&right.key))
+    });
+    entries.truncate(limit);
+    entries
+}
+
+fn telemetry_summary_from_store(store: &TelemetryStore) -> TelemetrySummary {
+    let crash_free_session_rate = if store.summary.sessions_started > 0 {
+        store.summary.sessions_completed_cleanly as f64 / store.summary.sessions_started as f64
+    } else {
+        0.0
+    };
+    let first_export_success_rate = if store.summary.first_export_sessions > 0 {
+        store.summary.first_export_successes as f64 / store.summary.first_export_sessions as f64
+    } else {
+        0.0
+    };
+
+    TelemetrySummary {
+        telemetry_enabled: store.preference_enabled,
+        current_consent_version: TELEMETRY_CONSENT_VERSION.to_string(),
+        consent_accepted_version: store.remote.consent_accepted_version.clone(),
+        remote_upload_enabled: store.remote.remote_upload_enabled,
+        remote_endpoint_configured: store.remote.remote_endpoint.is_some(),
+        remote_endpoint: store.remote.remote_endpoint.clone(),
+        remote_endpoint_host: store
+            .remote
+            .remote_endpoint
+            .as_deref()
+            .and_then(remote_endpoint_host),
+        pending_remote_events: store.remote.pending_events.len() as u64,
+        last_remote_upload_at: store.remote.last_upload_at.clone(),
+        last_remote_upload_error: store.remote.last_upload_error.clone(),
+        sessions_started: store.summary.sessions_started,
+        sessions_completed_cleanly: store.summary.sessions_completed_cleanly,
+        sessions_crashed: store.summary.sessions_crashed,
+        crash_free_session_rate,
+        first_export_sessions: store.summary.first_export_sessions,
+        first_export_successes: store.summary.first_export_successes,
+        first_export_success_rate,
+        render_attempts: store.summary.render_attempts,
+        render_successes: store.summary.render_successes,
+        render_failures: store.summary.render_failures,
+        recovery_resumable_events: store.summary.recovery_resumable_events,
+        recovery_retryable_events: store.summary.recovery_retryable_events,
+        top_error_codes: summarize_count_map(&store.summary.error_codes, 5),
+        top_support_queues: summarize_count_map(&store.summary.support_queues, 5),
+        top_tags: summarize_count_map(&store.summary.tags, 8),
+        top_severities: summarize_count_map(&store.summary.severities, 5),
+        recent_events: store.recent_events.clone(),
+        last_updated_at: store.summary.last_updated_at.clone(),
+    }
+}
+
+fn telemetry_start_session(store: &mut TelemetryStore, telemetry_enabled: bool) -> (Option<String>, bool) {
+    let mut previous_session_recovered_as_crash = false;
+    if let Some(active) = store.active_session.take() {
+        if active.telemetry_enabled {
+            store.summary.sessions_crashed += 1;
+            store.summary.last_updated_at = Some(current_timestamp_iso());
+            previous_session_recovered_as_crash = true;
+        }
+    }
+
+    store.preference_enabled = telemetry_enabled;
+    if !telemetry_enabled {
+        return (None, previous_session_recovered_as_crash);
+    }
+
+    store.summary.sessions_started += 1;
+    store.summary.last_updated_at = Some(current_timestamp_iso());
+    let session_id = next_telemetry_session_id();
+    store.active_session = Some(ActiveTelemetrySession {
+        session_id: session_id.clone(),
+        started_at: current_timestamp_iso(),
+        telemetry_enabled: true,
+        first_export_recorded: false,
+    });
+    (Some(session_id), previous_session_recovered_as_crash)
+}
+
+fn telemetry_finish_session(store: &mut TelemetryStore, session_id: &str, clean_exit: bool) {
+    let matches_active = store
+        .active_session
+        .as_ref()
+        .map(|active| active.session_id == session_id)
+        .unwrap_or(false);
+    if !matches_active {
+        return;
+    }
+    let active = store.active_session.take();
+    if active.as_ref().map(|item| item.telemetry_enabled).unwrap_or(false) {
+        if clean_exit {
+            store.summary.sessions_completed_cleanly += 1;
+        } else {
+            store.summary.sessions_crashed += 1;
+        }
+        store.summary.last_updated_at = Some(current_timestamp_iso());
+    }
+}
+
+fn increment_counter(map: &mut HashMap<String, u64>, key: Option<String>) {
+    let Some(key) = key else { return };
+    if key.trim().is_empty() {
+        return;
+    }
+    *map.entry(key).or_insert(0) += 1;
+}
+
+fn telemetry_record_event(store: &mut TelemetryStore, payload: TelemetryEventPayload) {
+    if !store.preference_enabled {
+        return;
+    }
+
+    let event = TelemetryEventRecord {
+        session_id: payload.session_id.clone(),
+        event_type: payload.event_type.clone(),
+        timestamp: payload.timestamp.clone().unwrap_or_else(current_timestamp_iso),
+        success: payload.success,
+        error_code: payload.error_code.clone(),
+        support_queue: payload.support_queue.clone(),
+        severity: payload.severity.clone(),
+        tags: payload.tags.clone().unwrap_or_default(),
+        recovery_resumable: payload.recovery_resumable.unwrap_or(false),
+        recovery_retryable: payload.recovery_retryable.unwrap_or(false),
+        recovery_completed_chunks: payload.recovery_completed_chunks.unwrap_or(0),
+        recovery_reused_chunks: payload.recovery_reused_chunks.unwrap_or(0),
+    };
+
+    if payload.event_type == "render_result" {
+        store.summary.render_attempts += 1;
+        if payload.success.unwrap_or(false) {
+            store.summary.render_successes += 1;
+        } else {
+            store.summary.render_failures += 1;
+        }
+
+        if payload.first_export.unwrap_or(false) {
+            if let Some(active) = store.active_session.as_mut() {
+                if !active.first_export_recorded {
+                    active.first_export_recorded = true;
+                    store.summary.first_export_sessions += 1;
+                    if payload.success.unwrap_or(false) {
+                        store.summary.first_export_successes += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    if event.recovery_resumable {
+        store.summary.recovery_resumable_events += 1;
+    }
+    if event.recovery_retryable {
+        store.summary.recovery_retryable_events += 1;
+    }
+
+    increment_counter(&mut store.summary.error_codes, event.error_code.clone());
+    increment_counter(&mut store.summary.support_queues, event.support_queue.clone());
+    increment_counter(&mut store.summary.severities, event.severity.clone());
+    for tag in &event.tags {
+        increment_counter(&mut store.summary.tags, Some(tag.clone()));
+    }
+
+    store.recent_events.push(event.clone());
+    if store.recent_events.len() > 40 {
+        let drain_count = store.recent_events.len() - 40;
+        store.recent_events.drain(0..drain_count);
+    }
+    store.summary.last_updated_at = Some(current_timestamp_iso());
+
+    if store.remote.remote_upload_enabled
+        && store.remote.consent_accepted_version.as_deref() == Some(TELEMETRY_CONSENT_VERSION)
+        && store.remote.remote_endpoint.is_some()
+    {
+        store.remote.pending_events.push(TelemetryRemoteEnvelope {
+            id: next_telemetry_remote_event_id(),
+            queued_at: current_timestamp_iso(),
+            app_version: env!("CARGO_PKG_VERSION").to_string(),
+            consent_version: TELEMETRY_CONSENT_VERSION.to_string(),
+            event,
+        });
+        if store.remote.pending_events.len() > MAX_PENDING_REMOTE_EVENTS {
+            let drain_count = store.remote.pending_events.len() - MAX_PENDING_REMOTE_EVENTS;
+            store.remote.pending_events.drain(0..drain_count);
+        }
+    }
+}
+
+fn telemetry_clear_history(store: &mut TelemetryStore) {
+    let preference_enabled = store.preference_enabled;
+    let active_session = store.active_session.clone().map(|mut session| {
+        session.first_export_recorded = false;
+        session
+    });
+
+    store.summary = TelemetryAggregate::default();
+    store.recent_events.clear();
+    store.remote.pending_events.clear();
+    store.remote.last_upload_at = None;
+    store.remote.last_upload_error = None;
+    store.preference_enabled = preference_enabled;
+    store.active_session = active_session;
+
+    if store
+        .active_session
+        .as_ref()
+        .map(|session| session.telemetry_enabled)
+        .unwrap_or(false)
+    {
+        store.summary.sessions_started = 1;
+        store.summary.last_updated_at = Some(current_timestamp_iso());
+    }
+}
+
+fn flush_remote_queue_if_possible(store: &mut TelemetryStore) {
+    if !store.remote.remote_upload_enabled {
+        return;
+    }
+    if store.remote.consent_accepted_version.as_deref() != Some(TELEMETRY_CONSENT_VERSION) {
+        return;
+    }
+    let Some(endpoint) = store.remote.remote_endpoint.clone() else {
+        return;
+    };
+    if store.remote.pending_events.is_empty() {
+        store.remote.last_upload_error = None;
+        return;
+    }
+
+    let payload = json!({
+        "schemaVersion": TELEMETRY_SCHEMA_VERSION,
+        "consentVersion": TELEMETRY_CONSENT_VERSION,
+        "generatedAt": current_timestamp_iso(),
+        "appVersion": env!("CARGO_PKG_VERSION"),
+        "events": store.remote.pending_events.clone(),
+    });
+
+    let payload_string = payload.to_string();
+    let mut child = match Command::new("curl")
+        .args([
+            "--silent",
+            "--show-error",
+            "--fail",
+            "--max-time",
+            "5",
+            "-X",
+            "POST",
+            "-H",
+            "content-type: application/json",
+            "--data-binary",
+            "@-",
+            endpoint.as_str(),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => {
+            store.remote.last_upload_error = Some(format!("failed to launch curl uploader: {}", error));
+            return;
+        }
+    };
+
+    if let Some(stdin) = child.stdin.as_mut() {
+        if let Err(error) = stdin.write_all(payload_string.as_bytes()) {
+            store.remote.last_upload_error = Some(format!("failed to stream telemetry payload: {}", error));
+            return;
+        }
+    }
+
+    match child.wait_with_output() {
+        Ok(output) if output.status.success() => {
+            store.remote.pending_events.clear();
+            store.remote.last_upload_at = Some(current_timestamp_iso());
+            store.remote.last_upload_error = None;
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            store.remote.last_upload_error = Some(if stderr.is_empty() {
+                format!("remote upload returned status {}", output.status)
+            } else {
+                format!("remote upload failed: {}", stderr)
+            });
+        }
+        Err(error) => {
+            store.remote.last_upload_error = Some(format!("failed to wait for curl uploader: {}", error));
+        }
+    }
+}
+
+fn apply_telemetry_settings(store: &mut TelemetryStore, payload: TelemetrySettingsPayload) -> Result<(), String> {
+    if let Some(version) = payload.consent_accepted_version {
+        if version == TELEMETRY_CONSENT_VERSION {
+            store.remote.consent_accepted_version = Some(version);
+        } else {
+            return Err(coded_error(
+                "E_TELEMETRY_CONSENT_VERSION_MISMATCH",
+                format!("telemetry consent version mismatch: expected {}", TELEMETRY_CONSENT_VERSION),
+            ));
+        }
+    }
+
+    if let Some(remote_upload_enabled) = payload.remote_upload_enabled {
+        store.remote.remote_upload_enabled = remote_upload_enabled;
+    }
+
+    let remote_endpoint_present = payload.remote_endpoint.is_some();
+    if let Some(endpoint) = normalize_remote_endpoint(payload.remote_endpoint) {
+        if !is_valid_remote_endpoint(&endpoint) {
+            return Err(coded_error(
+                "E_TELEMETRY_REMOTE_ENDPOINT_INVALID",
+                "remote telemetry endpoint must use https, or http only for localhost".to_string(),
+            ));
+        }
+        store.remote.remote_endpoint = Some(endpoint);
+    } else if remote_endpoint_present {
+        store.remote.remote_endpoint = None;
+    }
+
+    if store.remote.remote_upload_enabled && store.remote.remote_endpoint.is_none() {
+        store.remote.remote_upload_enabled = false;
+        store.remote.last_upload_error = Some("remote upload disabled because no endpoint is configured".to_string());
+    }
+
+    Ok(())
+}
+
+fn start_telemetry_session_blocking(app: &AppHandle, telemetry_enabled: bool) -> Result<TelemetrySessionStartResponse, String> {
+    let path = telemetry_store_path(app)?;
+    let mut store = load_telemetry_store(&path)?;
+    let (session_id, previous_session_recovered_as_crash) = telemetry_start_session(&mut store, telemetry_enabled);
+    save_telemetry_store(&path, &store)?;
+    let summary = telemetry_summary_from_store(&store);
+    Ok(TelemetrySessionStartResponse {
+        session_id,
+        telemetry_enabled,
+        previous_session_recovered_as_crash,
+        summary,
+    })
+}
+
+fn finish_telemetry_session_blocking(app: &AppHandle, session_id: String, clean_exit: bool) -> Result<TelemetrySummary, String> {
+    let path = telemetry_store_path(app)?;
+    let mut store = load_telemetry_store(&path)?;
+    telemetry_finish_session(&mut store, &session_id, clean_exit);
+    save_telemetry_store(&path, &store)?;
+    Ok(telemetry_summary_from_store(&store))
+}
+
+fn record_telemetry_event_blocking(app: &AppHandle, payload_json: String) -> Result<TelemetrySummary, String> {
+    let payload: TelemetryEventPayload = serde_json::from_str(&payload_json)
+        .map_err(|e| coded_error("E_TELEMETRY_INVALID_JSON", format!("telemetry event JSON 鏃犳硶瑙ｆ瀽: {}", e)))?;
+    let path = telemetry_store_path(app)?;
+    let mut store = load_telemetry_store(&path)?;
+    telemetry_record_event(&mut store, payload);
+    flush_remote_queue_if_possible(&mut store);
+    save_telemetry_store(&path, &store)?;
+    Ok(telemetry_summary_from_store(&store))
+}
+
+fn load_telemetry_summary_blocking(app: &AppHandle) -> Result<TelemetrySummary, String> {
+    let path = telemetry_store_path(app)?;
+    let store = load_telemetry_store(&path)?;
+    Ok(telemetry_summary_from_store(&store))
+}
+
+fn clear_telemetry_history_blocking(app: &AppHandle) -> Result<TelemetrySummary, String> {
+    let path = telemetry_store_path(app)?;
+    let mut store = load_telemetry_store(&path)?;
+    telemetry_clear_history(&mut store);
+    save_telemetry_store(&path, &store)?;
+    Ok(telemetry_summary_from_store(&store))
+}
+
+fn update_telemetry_settings_blocking(app: &AppHandle, payload_json: String) -> Result<TelemetrySummary, String> {
+    let payload: TelemetrySettingsPayload = serde_json::from_str(&payload_json)
+        .map_err(|e| coded_error("E_TELEMETRY_INVALID_JSON", format!("telemetry settings JSON invalid: {}", e)))?;
+    let path = telemetry_store_path(app)?;
+    let mut store = load_telemetry_store(&path)?;
+    apply_telemetry_settings(&mut store, payload)?;
+    flush_remote_queue_if_possible(&mut store);
+    save_telemetry_store(&path, &store)?;
+    Ok(telemetry_summary_from_store(&store))
+}
+
+fn flush_remote_telemetry_queue_blocking(app: &AppHandle) -> Result<TelemetrySummary, String> {
+    let path = telemetry_store_path(app)?;
+    let mut store = load_telemetry_store(&path)?;
+    flush_remote_queue_if_possible(&mut store);
+    save_telemetry_store(&path, &store)?;
+    Ok(telemetry_summary_from_store(&store))
+}
+
 fn load_project_documents_v5_blocking(project_dir: String) -> Result<ProjectDocumentsLoadResult, String> {
     let root = PathBuf::from(&project_dir);
     if !root.is_dir() {
@@ -2128,6 +2887,115 @@ fn load_project_documents_v5_blocking(project_dir: String) -> Result<ProjectDocu
         blueprint,
         render_plan,
     })
+}
+
+fn load_build_report_summary_blocking(project_dir: String) -> Result<BuildReportSummary, String> {
+    let root = PathBuf::from(&project_dir);
+    if !root.is_dir() {
+        return Err(coded_error(
+            "E_PROJECT_DIR_MISSING",
+            format!("椤圭洰鐩綍涓嶅瓨鍦ㄦ垨涓嶅彲璁块棶: {}", root.display()),
+        ));
+    }
+
+    let report_path = root.join("build_report.json");
+    if !report_path.is_file() {
+        return Err(coded_error(
+            "E_BUILD_REPORT_MISSING",
+            format!("鏈壘鍒?build_report.json: {}", report_path.display()),
+        ));
+    }
+
+    let raw = std::fs::read_to_string(&report_path).map_err(|e| {
+        coded_error(
+            "E_BUILD_REPORT_READ_FAILED",
+            format!("鏃犳硶璇诲彇 build_report.json {}: {}", report_path.display(), e),
+        )
+    })?;
+    let value: Value = serde_json::from_str(&raw).map_err(|e| {
+        coded_error(
+            "E_BUILD_REPORT_INVALID_JSON",
+            format!("build_report.json JSON 鏃犳硶瑙ｆ瀽 {}: {}", report_path.display(), e),
+        )
+    })?;
+
+    Ok(extract_build_report_summary(value, &report_path))
+}
+
+fn extract_build_report_summary(value: Value, report_path: &Path) -> BuildReportSummary {
+    let recovery = value.get("recovery").and_then(|item| item.as_object());
+    let failure = value.get("failure").and_then(|item| item.as_object());
+
+    BuildReportSummary {
+        report_path: report_path.display().to_string(),
+        manifest_path: recovery
+            .and_then(|item| item.get("manifest_path"))
+            .and_then(|item| item.as_str())
+            .map(|item| item.to_string()),
+        status: value.get("status").and_then(|item| item.as_str()).map(|item| item.to_string()),
+        render_mode: value
+            .get("render_mode")
+            .and_then(|item| item.as_str())
+            .map(|item| item.to_string()),
+        failed_stage: value
+            .get("failed_stage")
+            .and_then(|item| item.as_str())
+            .map(|item| item.to_string()),
+        output_path: value
+            .get("output_path")
+            .and_then(|item| item.as_str())
+            .map(|item| item.to_string()),
+        selected_backend: value
+            .get("selected_backend")
+            .and_then(|item| item.as_str())
+            .map(|item| item.to_string()),
+        chunk_count: value.get("chunk_count").and_then(|item| item.as_u64()).map(|item| item as usize),
+        created_at: value
+            .get("created_at")
+            .and_then(|item| item.as_str())
+            .map(|item| item.to_string()),
+        resumable: recovery
+            .and_then(|item| item.get("resumable"))
+            .and_then(|item| item.as_bool())
+            .unwrap_or(false),
+        resumed_from_manifest: recovery
+            .and_then(|item| item.get("resumed_from_manifest"))
+            .and_then(|item| item.as_bool())
+            .unwrap_or(false),
+        reused_chunk_count: recovery
+            .and_then(|item| item.get("reused_chunk_count"))
+            .and_then(|item| item.as_u64())
+            .unwrap_or(0) as usize,
+        completed_chunk_count: recovery
+            .and_then(|item| item.get("completed_chunk_count"))
+            .and_then(|item| item.as_u64())
+            .unwrap_or(0) as usize,
+        failed_chunk_count: recovery
+            .and_then(|item| item.get("failed_chunk_count"))
+            .and_then(|item| item.as_u64())
+            .unwrap_or(0) as usize,
+        reported_chunk_count: recovery
+            .and_then(|item| item.get("reported_chunk_count"))
+            .and_then(|item| item.as_u64())
+            .unwrap_or(0) as usize,
+        failed_chunk: recovery
+            .and_then(|item| item.get("failed_chunk"))
+            .and_then(|item| item.as_str())
+            .map(|item| item.to_string()),
+        failure_code: failure
+            .and_then(|item| item.get("code"))
+            .and_then(|item| item.as_str())
+            .map(|item| item.to_string()),
+        failure_message: failure
+            .and_then(|item| item.get("message"))
+            .and_then(|item| item.as_str())
+            .map(|item| item.to_string())
+            .or_else(|| value.get("error").and_then(|item| item.as_str()).map(|item| item.to_string())),
+        retryable: failure
+            .and_then(|item| item.get("retryable"))
+            .and_then(|item| item.as_bool())
+            .unwrap_or(false),
+    }
 }
 
 fn load_and_migrate_project_doc(
@@ -2397,6 +3265,26 @@ fn kill_process_tree(pid: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_test_dir(label: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time went backwards")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "video_create_{}_{}_{}",
+            label,
+            std::process::id(),
+            nonce
+        ));
+        std::fs::create_dir_all(&path).expect("test directory should be created");
+        path
+    }
+
+    fn cleanup_test_dir(path: &Path) {
+        let _ = std::fs::remove_dir_all(path);
+    }
 
     #[test]
     fn migrate_media_library_adds_compat_fields() {
@@ -2483,6 +3371,338 @@ mod tests {
         let error = migrate_v5_document(input, "render_plan").expect_err("type mismatch should fail");
         assert!(error.contains("[E_PROJECT_DOC_TYPE_MISMATCH]"));
     }
+
+    #[test]
+    fn failure_regression_render_plan_sources_handles_chinese_paths_and_missing_assets() {
+        let root = unique_test_dir("失败回归_中文路径");
+        let source_dir = root.join("素材").join("泉州").join("西街");
+        std::fs::create_dir_all(&source_dir).expect("source directory should exist");
+
+        let existing_asset = source_dir.join("镜头1.jpg");
+        std::fs::write(&existing_asset, b"image").expect("asset should be written");
+        let missing_asset = source_dir.join("镜头2.jpg");
+        let plan_path = root.join("render_plan.json");
+        std::fs::write(
+            &plan_path,
+            serde_json::to_string_pretty(&json!({
+                "document_type": "render_plan",
+                "schema_version": CURRENT_V5_SCHEMA_VERSION,
+                "segments": [
+                    { "source_path": existing_asset.display().to_string() },
+                    { "source_path": missing_asset.display().to_string() }
+                ]
+            }))
+            .expect("plan JSON should serialize"),
+        )
+        .expect("plan should be written");
+
+        let check = check_render_plan_sources(&plan_path);
+        assert!(!check.ok);
+        assert_eq!(check.code.as_deref(), Some("E_MEDIA_SOURCE_MISSING"));
+        assert!(
+            check.detail.as_deref().unwrap_or_default().contains("镜头2.jpg"),
+            "missing Chinese path should be surfaced in diagnostics"
+        );
+
+        cleanup_test_dir(&root);
+    }
+
+    #[test]
+    fn failure_regression_render_plan_invalid_json_reports_code() {
+        let root = unique_test_dir("失败回归_render_plan_invalid");
+        let plan_path = root.join("render_plan.json");
+        std::fs::write(&plan_path, "{ invalid json").expect("plan should be written");
+
+        let check = check_render_plan_sources(&plan_path);
+        assert!(!check.ok);
+        assert_eq!(check.code.as_deref(), Some("E_RENDER_PLAN_INVALID_JSON"));
+
+        cleanup_test_dir(&root);
+    }
+
+    #[test]
+    fn failure_regression_output_target_rejects_non_directory_parent() {
+        let root = unique_test_dir("失败回归_output_parent");
+        let fake_dir = root.join("not_a_directory");
+        std::fs::write(&fake_dir, b"blocker").expect("file blocker should be written");
+        let output_path = fake_dir.join("final.mp4");
+
+        let check = check_output_target(&output_path);
+        assert!(!check.ok);
+        assert_eq!(check.code.as_deref(), Some("E_OUTPUT_NOT_WRITABLE"));
+
+        cleanup_test_dir(&root);
+    }
+
+    #[test]
+    fn failure_regression_preflight_reports_unwritable_output_dir() {
+        let root = unique_test_dir("失败回归_preflight_output");
+        let input_dir = root.join("input");
+        std::fs::create_dir_all(&input_dir).expect("input directory should exist");
+
+        let output_dir = root.join("locked_output");
+        std::fs::write(&output_dir, b"not a directory").expect("output blocker should be written");
+
+        let plan_path = root.join("render_plan.json");
+        std::fs::write(
+            &plan_path,
+            serde_json::to_string_pretty(&json!({
+                "document_type": "render_plan",
+                "schema_version": CURRENT_V5_SCHEMA_VERSION,
+                "segments": []
+            }))
+            .expect("plan JSON should serialize"),
+        )
+        .expect("plan should be written");
+
+        let output_path = root.join("final.mp4");
+        let diagnostics = preflight_render_v5_blocking(
+            input_dir.display().to_string(),
+            output_dir.display().to_string(),
+            plan_path.display().to_string(),
+            output_path.display().to_string(),
+        )
+        .expect("preflight should return diagnostics");
+
+        assert!(!diagnostics.ok);
+        assert_eq!(diagnostics.code.as_deref(), Some("E_PREFLIGHT_CHECK_FAILED"));
+        assert!(diagnostics.checks.iter().any(|check| {
+            check.id == "output_dir" && check.code.as_deref() == Some("E_DIRECTORY_NOT_WRITABLE")
+        }));
+
+        cleanup_test_dir(&root);
+    }
+
+    #[test]
+    fn failure_regression_worker_entrypoint_missing_returns_error_code() {
+        let error = resolve_worker_launch_spec(Vec::new(), None)
+            .expect_err("missing worker entrypoint should fail");
+        assert!(error.contains("[E_WORKER_ENTRYPOINT_MISSING]"));
+    }
+
+    #[test]
+    fn build_report_summary_extracts_resume_recovery_fields() {
+        let root = unique_test_dir("build_report_summary_resume");
+        std::fs::write(
+            root.join("build_report.json"),
+            serde_json::to_string_pretty(&json!({
+                "status": "failed",
+                "render_mode": "v5.6_long_video_stable",
+                "failed_stage": "chunk_render",
+                "output_path": root.join("final.mp4").display().to_string(),
+                "selected_backend": "stable_chunked",
+                "chunk_count": 6,
+                "created_at": "2026-05-27T10:30:00",
+                "failure": {
+                    "code": "chunk_render_failed",
+                    "message": "chunk_003 failed",
+                    "retryable": true
+                },
+                "recovery": {
+                    "resumable": true,
+                    "resumed_from_manifest": true,
+                    "manifest_path": root.join("chunks").join("chunk_manifest.json").display().to_string(),
+                    "reused_chunk_count": 2,
+                    "completed_chunk_count": 4,
+                    "failed_chunk_count": 1,
+                    "reported_chunk_count": 5,
+                    "failed_chunk": "chunk_003.mp4"
+                }
+            }))
+            .expect("report JSON should serialize"),
+        )
+        .expect("report should be written");
+
+        let summary = load_build_report_summary_blocking(root.display().to_string())
+            .expect("build report should load");
+        assert_eq!(summary.status.as_deref(), Some("failed"));
+        assert_eq!(summary.failed_stage.as_deref(), Some("chunk_render"));
+        assert!(summary.resumable);
+        assert!(summary.resumed_from_manifest);
+        assert_eq!(summary.reused_chunk_count, 2);
+        assert_eq!(summary.completed_chunk_count, 4);
+        assert_eq!(summary.failed_chunk.as_deref(), Some("chunk_003.mp4"));
+        assert_eq!(summary.failure_code.as_deref(), Some("chunk_render_failed"));
+        assert!(summary.retryable);
+
+        cleanup_test_dir(&root);
+    }
+
+    #[test]
+    fn build_report_summary_missing_file_returns_error_code() {
+        let root = unique_test_dir("build_report_summary_missing");
+        let error = load_build_report_summary_blocking(root.display().to_string())
+            .expect_err("missing report should fail");
+        assert!(error.contains("[E_BUILD_REPORT_MISSING]"));
+        cleanup_test_dir(&root);
+    }
+
+    #[test]
+    fn build_report_summary_invalid_json_returns_error_code() {
+        let root = unique_test_dir("build_report_summary_invalid");
+        std::fs::write(root.join("build_report.json"), "{ invalid json")
+            .expect("broken report should be written");
+        let error = load_build_report_summary_blocking(root.display().to_string())
+            .expect_err("invalid report should fail");
+        assert!(error.contains("[E_BUILD_REPORT_INVALID_JSON]"));
+        cleanup_test_dir(&root);
+    }
+
+    #[test]
+    fn telemetry_starting_new_session_marks_previous_active_session_as_crash() {
+        let mut store = TelemetryStore::default();
+        let (_first_session, first_recovered) = telemetry_start_session(&mut store, true);
+        assert!(!first_recovered);
+        let (_second_session, second_recovered) = telemetry_start_session(&mut store, true);
+        assert!(second_recovered);
+        assert_eq!(store.summary.sessions_started, 2);
+        assert_eq!(store.summary.sessions_crashed, 1);
+    }
+
+    #[test]
+    fn telemetry_records_first_export_only_once_per_session() {
+        let mut store = TelemetryStore::default();
+        let (session_id, _) = telemetry_start_session(&mut store, true);
+        let session_id = session_id.expect("session id should exist");
+
+        telemetry_record_event(
+            &mut store,
+            TelemetryEventPayload {
+                session_id: Some(session_id.clone()),
+                event_type: "render_result".to_string(),
+                success: Some(false),
+                first_export: Some(true),
+                error_code: Some("E_MEDIA_SOURCE_MISSING".to_string()),
+                support_queue: Some("render-recovery".to_string()),
+                severity: Some("warning".to_string()),
+                tags: Some(vec!["resumable".to_string()]),
+                recovery_resumable: Some(true),
+                recovery_retryable: Some(true),
+                recovery_completed_chunks: Some(4),
+                recovery_reused_chunks: Some(2),
+                timestamp: Some("1".to_string()),
+            },
+        );
+        telemetry_record_event(
+            &mut store,
+            TelemetryEventPayload {
+                session_id: Some(session_id),
+                event_type: "render_result".to_string(),
+                success: Some(true),
+                first_export: Some(true),
+                error_code: None,
+                support_queue: Some("render-recovery".to_string()),
+                severity: Some("info".to_string()),
+                tags: Some(vec!["retryable".to_string()]),
+                recovery_resumable: Some(false),
+                recovery_retryable: Some(false),
+                recovery_completed_chunks: Some(0),
+                recovery_reused_chunks: Some(0),
+                timestamp: Some("2".to_string()),
+            },
+        );
+
+        assert_eq!(store.summary.render_attempts, 2);
+        assert_eq!(store.summary.render_successes, 1);
+        assert_eq!(store.summary.render_failures, 1);
+        assert_eq!(store.summary.first_export_sessions, 1);
+        assert_eq!(store.summary.first_export_successes, 0);
+    }
+
+    #[test]
+    fn telemetry_clear_history_resets_counters_but_preserves_active_session() {
+        let mut store = TelemetryStore::default();
+        let (session_id, _) = telemetry_start_session(&mut store, true);
+        let session_id = session_id.expect("session id should exist");
+
+        telemetry_record_event(
+            &mut store,
+            TelemetryEventPayload {
+                session_id: Some(session_id),
+                event_type: "render_result".to_string(),
+                success: Some(true),
+                first_export: Some(true),
+                error_code: None,
+                support_queue: Some("general-triage".to_string()),
+                severity: Some("info".to_string()),
+                tags: Some(vec!["render-success".to_string()]),
+                recovery_resumable: Some(false),
+                recovery_retryable: Some(false),
+                recovery_completed_chunks: Some(0),
+                recovery_reused_chunks: Some(0),
+                timestamp: Some("3".to_string()),
+            },
+        );
+
+        telemetry_clear_history(&mut store);
+
+        assert_eq!(store.summary.render_attempts, 0);
+        assert_eq!(store.summary.first_export_sessions, 0);
+        assert!(store.recent_events.is_empty());
+        assert_eq!(store.summary.sessions_started, 1);
+        assert_eq!(
+            store
+                .active_session
+                .as_ref()
+                .map(|session| session.first_export_recorded),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn telemetry_settings_reject_non_https_remote_endpoint() {
+        let mut store = TelemetryStore::default();
+        let error = apply_telemetry_settings(
+            &mut store,
+            TelemetrySettingsPayload {
+                consent_accepted_version: Some(TELEMETRY_CONSENT_VERSION.to_string()),
+                remote_upload_enabled: Some(true),
+                remote_endpoint: Some("http://example.com/collect".to_string()),
+            },
+        )
+        .expect_err("non-https remote endpoint should be rejected");
+        assert!(error.contains("[E_TELEMETRY_REMOTE_ENDPOINT_INVALID]"));
+    }
+
+    #[test]
+    fn telemetry_event_is_queued_for_remote_upload_when_enabled() {
+        let mut store = TelemetryStore::default();
+        let (session_id, _) = telemetry_start_session(&mut store, true);
+        apply_telemetry_settings(
+            &mut store,
+            TelemetrySettingsPayload {
+                consent_accepted_version: Some(TELEMETRY_CONSENT_VERSION.to_string()),
+                remote_upload_enabled: Some(true),
+                remote_endpoint: Some("https://telemetry.example.com/collect".to_string()),
+            },
+        )
+        .expect("settings should be accepted");
+
+        telemetry_record_event(
+            &mut store,
+            TelemetryEventPayload {
+                session_id,
+                event_type: "frontend_crash".to_string(),
+                success: Some(false),
+                error_code: Some("E_APP_RUNTIME".to_string()),
+                support_queue: Some("app-runtime".to_string()),
+                severity: Some("high".to_string()),
+                tags: Some(vec!["frontend-runtime".to_string()]),
+                recovery_resumable: Some(false),
+                recovery_retryable: Some(false),
+                recovery_completed_chunks: Some(0),
+                recovery_reused_chunks: Some(0),
+                first_export: Some(false),
+                timestamp: Some("4".to_string()),
+            },
+        );
+
+        assert_eq!(store.remote.pending_events.len(), 1);
+        assert_eq!(
+            store.remote.pending_events[0].consent_version,
+            TELEMETRY_CONSENT_VERSION.to_string()
+        );
+    }
 }
 
 pub fn run() {
@@ -2497,6 +3717,14 @@ pub fn run() {
             clear_session_snapshot,
             export_diagnostic_bundle,
             load_project_documents_v5,
+            load_build_report_summary,
+            start_telemetry_session,
+            finish_telemetry_session,
+            record_telemetry_event,
+            load_telemetry_summary,
+            clear_telemetry_history,
+            update_telemetry_settings,
+            flush_remote_telemetry_queue,
             generate_video,
             cancel_video,
             open_in_explorer,
