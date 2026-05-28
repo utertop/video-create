@@ -1,7 +1,49 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Iterable, Optional, Union
+
+
+LEGACY_MOVIEPY_BACKEND_NAME = "legacy_moviepy_backend"
+FFMPEG_STABLE_BACKEND_NAME = "ffmpeg_stable_backend"
+MLT_BACKEND_NAME = "mlt_backend"
+
+STANDARD_TIMELINE_BACKEND_FAMILY = "standard_timeline"
+LONG_VIDEO_STABLE_BACKEND_FAMILY = "long_video_stable"
+MLT_BACKEND_FAMILY = "standard_timeline_gpu_candidate"
+
+BACKEND_MODE_PREVIEW = "preview"
+BACKEND_MODE_FINAL_RENDER = "final_render"
+
+BACKEND_REASON_PREVIEW_STANDARD_RENDERER = "preview_render_uses_standard_renderer"
+BACKEND_REASON_STABLE_RENDERER_SELECTED = "stable_renderer_selected"
+BACKEND_REASON_STANDARD_RENDERER_SELECTED = "standard_renderer_selected"
+
+MLT_BACKEND_REASON_SELECTED = "mlt_backend_selected"
+MLT_BACKEND_REASON_NOT_INSTALLED = "mlt_not_installed"
+MLT_BACKEND_REASON_UNSUPPORTED_SEGMENT_TYPE = "mlt_unsupported_segment_type"
+MLT_BACKEND_REASON_UNSUPPORTED_TRANSITION = "mlt_unsupported_transition"
+MLT_BACKEND_REASON_VALIDATION_FAILED = "mlt_validation_failed"
+MLT_BACKEND_REASON_SCAFFOLD_ONLY = "mlt_backend_scaffold_only"
+
+CAPABILITY_FLAG_PREVIEW = "preview"
+CAPABILITY_FLAG_TIMELINE = "timeline"
+CAPABILITY_FLAG_MOVIEPY = "moviepy"
+CAPABILITY_FLAG_STABLE = "stable"
+CAPABILITY_FLAG_CHUNKED = "chunked"
+CAPABILITY_FLAG_FFMPEG = "ffmpeg"
+CAPABILITY_FLAG_FALLBACK_MOVIEPY = "fallback_moviepy"
+CAPABILITY_FLAG_MLT = "mlt"
+CAPABILITY_FLAG_XML_PROJECT = "xml_project"
+CAPABILITY_FLAG_FFMPEG_CONSUMER = "ffmpeg_consumer"
+
+MLT_BACKEND_CAPABILITY_FLAGS = (
+    CAPABILITY_FLAG_MLT,
+    CAPABILITY_FLAG_TIMELINE,
+    CAPABILITY_FLAG_XML_PROJECT,
+    CAPABILITY_FLAG_FFMPEG_CONSUMER,
+    CAPABILITY_FLAG_FALLBACK_MOVIEPY,
+)
 
 
 @dataclass(frozen=True)
@@ -69,6 +111,23 @@ class BackendExecutionResult:
             "fallback_reason": self.fallback_reason,
             "fallback_applied": self.fallback_applied,
         }
+
+
+def merge_backend_reason_tags(*groups: Optional[Union[str, Iterable[str]]]) -> str:
+    tags: list[str] = []
+    for group in groups:
+        if group is None:
+            continue
+        if isinstance(group, str):
+            candidates = [group]
+        else:
+            candidates = [str(item) for item in group]
+        for candidate in candidates:
+            normalized = str(candidate or "").strip()
+            if not normalized or normalized in tags:
+                continue
+            tags.append(normalized)
+    return "+".join(tags)
 
 
 def coerce_backend_decision(value: Optional[Union["BackendDecision", Dict[str, Any]]]) -> BackendDecision:
