@@ -3,6 +3,7 @@
 ## 相关文档
 
 - [路线图总索引](./ROADMAP_INDEX.md)
+- [对标达芬奇的能力差距表与执行路线图](./DAVINCI_BENCHMARK_GAP_AND_EXECUTION_ROADMAP.md)
 - [低副作用渲染提速路线图](./RENDER_PERFORMANCE_LOW_RISK_ACCELERATION_PLAN.md)
 
 ## 目标

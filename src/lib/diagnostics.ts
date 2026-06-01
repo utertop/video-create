@@ -25,11 +25,22 @@ export interface DiagnosticRecoveryLike {
   reportPath?: string | null;
   manifestPath?: string | null;
   status?: string | null;
+  renderIntent?: string | null;
   renderMode?: string | null;
   failedStage?: string | null;
   outputPath?: string | null;
   selectedBackend?: string | null;
+  actualBackend?: string | null;
+  backendReason?: string | null;
+  fallbackChain?: string[] | null;
+  fallbackUsed?: string | null;
+  fallbackReason?: string | null;
+  fallbackApplied?: boolean;
   chunkCount?: number | null;
+  segmentFastPathRate?: number | null;
+  chunkFastPathRate?: number | null;
+  segmentRouteDifferenceCount?: number | null;
+  segmentRouteDifferenceRate?: number | null;
   createdAt?: string | null;
   resumable?: boolean;
   resumedFromManifest?: boolean;
@@ -132,11 +143,22 @@ function normalizeRecoverySummary(recovery: DiagnosticRecoveryLike | null | unde
     reportPath: typeof recovery.reportPath === "string" ? recovery.reportPath : null,
     manifestPath: typeof recovery.manifestPath === "string" ? recovery.manifestPath : null,
     status: typeof recovery.status === "string" ? recovery.status : null,
+    renderIntent: typeof recovery.renderIntent === "string" ? recovery.renderIntent : null,
     renderMode: typeof recovery.renderMode === "string" ? recovery.renderMode : null,
     failedStage: typeof recovery.failedStage === "string" ? recovery.failedStage : null,
     outputPath: typeof recovery.outputPath === "string" ? recovery.outputPath : null,
     selectedBackend: typeof recovery.selectedBackend === "string" ? recovery.selectedBackend : null,
+    actualBackend: typeof recovery.actualBackend === "string" ? recovery.actualBackend : null,
+    backendReason: typeof recovery.backendReason === "string" ? recovery.backendReason : null,
+    fallbackChain: Array.isArray(recovery.fallbackChain) ? recovery.fallbackChain.filter((item): item is string => typeof item === "string") : [],
+    fallbackUsed: typeof recovery.fallbackUsed === "string" ? recovery.fallbackUsed : null,
+    fallbackReason: typeof recovery.fallbackReason === "string" ? recovery.fallbackReason : null,
+    fallbackApplied: Boolean(recovery.fallbackApplied),
     chunkCount: typeof recovery.chunkCount === "number" ? recovery.chunkCount : null,
+    segmentFastPathRate: typeof recovery.segmentFastPathRate === "number" ? recovery.segmentFastPathRate : null,
+    chunkFastPathRate: typeof recovery.chunkFastPathRate === "number" ? recovery.chunkFastPathRate : null,
+    segmentRouteDifferenceCount: typeof recovery.segmentRouteDifferenceCount === "number" ? recovery.segmentRouteDifferenceCount : null,
+    segmentRouteDifferenceRate: typeof recovery.segmentRouteDifferenceRate === "number" ? recovery.segmentRouteDifferenceRate : null,
     createdAt: typeof recovery.createdAt === "string" ? recovery.createdAt : null,
     resumable: Boolean(recovery.resumable),
     resumedFromManifest: Boolean(recovery.resumedFromManifest),
@@ -174,6 +196,7 @@ export function buildSupportCaseSummary({
   if (normalizedRecovery?.retryable) tags.add("retryable");
   if (normalizedRecovery?.reusedChunkCount) tags.add("partial-reuse");
   if (normalizedRecovery?.renderMode) tags.add(String(normalizedRecovery.renderMode));
+  if (normalizedRecovery?.fallbackUsed) tags.add(`fallback:${normalizedRecovery.fallbackUsed}`);
   if (normalizedRecovery?.failedStage) tags.add(`stage:${normalizedRecovery.failedStage}`);
 
   let severity: SupportCaseSummary["severity"] = "info";

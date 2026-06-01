@@ -46,9 +46,11 @@ from render_backends import (
     build_backend_report_payload as backend_report_payload,
     coerce_backend_decision,
     coerce_backend_execution_result,
+    merge_backend_reason_tags,
     resolve_render_backend as backend_selector_resolve_render_backend,
     run_ffmpeg_stable_backend,
     run_legacy_moviepy_backend,
+    run_mlt_backend,
 )
 
 
@@ -5328,13 +5330,15 @@ class Renderer:
 
             try:
                 project_dir = self._project_cache_root()
+                backend_payload = _v56_backend_report_payload(self.backend_execution)
+                diagnostics = _v56_render_diagnostics(self, [], [], False, self.last_render_timings)
                 _v56_write_build_report(project_dir / "build_report.json", {
                     "engine_version": ENGINE_VERSION,
                     "status": "done",
                     "render_mode": "v5_standard",
                     "output_path": str(self.output_path),
                     "selected_backend": self.backend_execution.selected_backend_name,
-                    "backend": _v56_backend_report_payload(self.backend_execution),
+                    "backend": backend_payload,
                     "output_size_bytes": self.output_path.stat().st_size if self.output_path.exists() else None,
                     "duration_seconds": float(getattr(final, "duration", 0.0) or 0.0),
                     "photo_segment_cache": self._photo_segment_cache_summary(),
@@ -5345,7 +5349,8 @@ class Renderer:
                     "render_scheduler": self.render_scheduler_summary,
                     "segment_routes": _v56_collect_segment_route_details(self.plan.get("segments", []) or []),
                     "timings": dict(self.last_render_timings),
-                    "diagnostics": _v56_render_diagnostics(self, [], [], False, self.last_render_timings),
+                    "diagnostics": diagnostics,
+                    **_v56_report_summary_fields(backend_payload, diagnostics, render_intent="final"),
                     "created_at": datetime.now().isoformat(),
                 })
             except Exception as exc:
@@ -5394,13 +5399,15 @@ class Renderer:
 
             try:
                 project_dir = self._project_cache_root()
+                backend_payload = _v56_backend_report_payload(self.backend_execution)
+                diagnostics = _v56_render_diagnostics(self, [], [], False, self.last_render_timings)
                 _v56_write_build_report(project_dir / "build_report.json", {
                     "engine_version": ENGINE_VERSION,
                     "status": "done",
                     "render_mode": "v5_standard",
                     "output_path": str(self.output_path),
                     "selected_backend": self.backend_execution.selected_backend_name,
-                    "backend": _v56_backend_report_payload(self.backend_execution),
+                    "backend": backend_payload,
                     "output_size_bytes": self.output_path.stat().st_size if self.output_path.exists() else None,
                     "duration_seconds": final_duration,
                     "visual_base_cache": dict(self.visual_base_cache_stats),
@@ -5412,7 +5419,8 @@ class Renderer:
                     "render_scheduler": self.render_scheduler_summary,
                     "segment_routes": _v56_collect_segment_route_details(self.plan.get("segments", []) or []),
                     "timings": dict(self.last_render_timings),
-                    "diagnostics": _v56_render_diagnostics(self, [], [], False, self.last_render_timings),
+                    "diagnostics": diagnostics,
+                    **_v56_report_summary_fields(backend_payload, diagnostics, render_intent="final"),
                     "created_at": datetime.now().isoformat(),
                 })
             except Exception as exc:
@@ -7408,15 +7416,27 @@ def _v56_stable_should_force_chunk_audio_track(renderer: Any, segments: List[Dic
 def _v56_collect_segment_route_details(segments: List[Dict[str, Any]], limit: int = 200) -> List[Dict[str, Any]]:
     details: List[Dict[str, Any]] = []
     for seg in segments[:limit]:
+        static_route = seg.get("render_route")
+        static_reason = seg.get("render_route_reason")
+        static_tags = list(seg.get("render_route_tags") or [])
+        runtime_route = seg.get("runtime_render_route") or static_route
+        runtime_reason = seg.get("runtime_render_route_reason") or static_reason
+        runtime_tags = list(seg.get("runtime_render_route_tags") or static_tags)
         details.append({
             "segment_id": seg.get("segment_id"),
             "type": seg.get("type"),
             "start_time": seg.get("start_time"),
             "end_time": seg.get("end_time"),
             "duration": seg.get("duration"),
-            "route": seg.get("runtime_render_route") or seg.get("render_route"),
-            "reason": seg.get("runtime_render_route_reason") or seg.get("render_route_reason"),
-            "tags": list(seg.get("runtime_render_route_tags") or []),
+            "route": runtime_route,
+            "reason": runtime_reason,
+            "tags": runtime_tags,
+            "static_route": static_route,
+            "static_reason": static_reason,
+            "static_tags": static_tags,
+            "runtime_route": runtime_route,
+            "runtime_reason": runtime_reason,
+            "runtime_tags": runtime_tags,
             "has_overlay": bool(seg.get("overlay_text") or seg.get("overlay_subtitle")),
             "transition": ((seg.get("transition_config") or {}).get("type") or seg.get("transition")),
             "motion": ((seg.get("motion_config") or {}).get("type") or "none"),
@@ -7567,6 +7587,32 @@ def _v56_fast_path_coverage(
     }
 
 
+def _v56_route_difference_summary(items: List[Dict[str, Any]], limit: int = 5) -> Dict[str, Any]:
+    total = len(items)
+    changed_count = 0
+    change_counts: Dict[str, int] = {}
+    runtime_reason_counts: Dict[str, int] = {}
+    for item in items:
+        static_route = str(item.get("static_route") or "")
+        runtime_route = str(item.get("runtime_route") or item.get("route") or "")
+        if not static_route or not runtime_route or static_route == runtime_route:
+            continue
+        changed_count += 1
+        change_key = f"{static_route}->{runtime_route}"
+        change_counts[change_key] = change_counts.get(change_key, 0) + 1
+        runtime_reason = str(item.get("runtime_reason") or item.get("reason") or "")
+        if runtime_reason:
+            runtime_reason_counts[runtime_reason] = runtime_reason_counts.get(runtime_reason, 0) + 1
+    return {
+        "total": total,
+        "changed_count": changed_count,
+        "unchanged_count": max(0, total - changed_count),
+        "changed_rate": round(changed_count / float(total), 4) if total > 0 else None,
+        "top_changes": _v56_top_named_counts(change_counts, limit=limit),
+        "top_runtime_reasons": _v56_top_named_counts(runtime_reason_counts, limit=limit),
+    }
+
+
 def _v56_observability_summary(
     renderer: Any,
     *,
@@ -7616,6 +7662,35 @@ def _v56_observability_summary(
                 fast_routes=("ffmpeg_direct_chunk", "ffmpeg_fitted_video_chunk", "ffmpeg_card_chunk", "ffmpeg_image_chunk"),
             ),
         },
+        "route_differences": {
+            "segments": _v56_route_difference_summary(segment_route_details),
+        },
+    }
+
+
+def _v56_report_summary_fields(
+    backend_payload: Dict[str, Any],
+    diagnostics: Dict[str, Any],
+    *,
+    render_intent: str,
+) -> Dict[str, Any]:
+    observability = dict((diagnostics or {}).get("observability") or {})
+    fast_path_coverage = dict(observability.get("fast_path_coverage") or {})
+    segment_fast_path = dict(fast_path_coverage.get("segments") or {})
+    chunk_fast_path = dict(fast_path_coverage.get("chunks") or {})
+    route_differences = dict((observability.get("route_differences") or {}).get("segments") or {})
+    return {
+        "render_intent": render_intent,
+        "actual_backend": backend_payload.get("actual_backend_name"),
+        "backend_reason": backend_payload.get("reason"),
+        "fallback_chain": list(backend_payload.get("fallback_chain") or []),
+        "fallback_used": backend_payload.get("fallback_used"),
+        "fallback_reason": backend_payload.get("fallback_reason"),
+        "fallback_applied": bool(backend_payload.get("fallback_applied")),
+        "segment_fast_path_rate": segment_fast_path.get("fast_path_rate"),
+        "chunk_fast_path_rate": chunk_fast_path.get("fast_path_rate"),
+        "segment_route_difference_count": int(route_differences.get("changed_count") or 0),
+        "segment_route_difference_rate": route_differences.get("changed_rate"),
     }
 
 
@@ -7936,6 +8011,10 @@ class V56StableRenderer:
         reused_chunk_count: int = 0,
     ) -> None:
         failure = _v56_classify_render_failure(error, stage)
+        segment_routes = _v56_collect_segment_route_details(self.plan.get("segments", []) or [])
+        chunk_routes = _v56_collect_chunk_route_details(groups, chunk_reports)
+        backend_payload = _v56_backend_report_payload(self.backend_execution)
+        diagnostics = _v56_render_diagnostics(renderer, groups, chunk_reports, force_chunk_audio_track, timings)
         report = {
             "engine_version": ENGINE_VERSION,
             "status": "failed",
@@ -7945,7 +8024,7 @@ class V56StableRenderer:
             "failure": failure,
             "output_path": str(final_output),
             "selected_backend": self.backend_execution.selected_backend_name,
-            "backend": _v56_backend_report_payload(self.backend_execution),
+            "backend": backend_payload,
             "chunk_dir": str(self.chunk_dir),
             "chunks": chunk_reports,
             "photo_segment_cache": renderer._photo_segment_cache_summary(),
@@ -7954,8 +8033,8 @@ class V56StableRenderer:
             "proxy_media": renderer._proxy_media_summary(),
             "cache_cleanup": renderer.cache_cleanup_stats,
             "render_scheduler": renderer.render_scheduler_summary,
-            "segment_routes": _v56_collect_segment_route_details(self.plan.get("segments", []) or []),
-            "chunk_routes": _v56_collect_chunk_route_details(groups, chunk_reports),
+            "segment_routes": segment_routes,
+            "chunk_routes": chunk_routes,
             "timings": dict(timings),
             "recovery": _v56_build_recovery_summary(
                 manifest,
@@ -7971,7 +8050,8 @@ class V56StableRenderer:
                 "route_counts": chunk_route_counts,
                 "total_chunks": len(groups),
             },
-            "diagnostics": _v56_render_diagnostics(renderer, groups, chunk_reports, force_chunk_audio_track, timings),
+            "diagnostics": diagnostics,
+            **_v56_report_summary_fields(backend_payload, diagnostics, render_intent="final"),
             "created_at": datetime.now().isoformat(),
         }
         _v56_write_build_report(self.report_path, report)
@@ -8265,13 +8345,15 @@ class V56StableRenderer:
         manifest["last_completed_at"] = datetime.now().isoformat()
         manifest["last_failure"] = None
         self._save_manifest(manifest)
+        backend_payload = _v56_backend_report_payload(self.backend_execution)
+        diagnostics = _v56_render_diagnostics(renderer, groups, chunk_reports, force_chunk_audio_track, timings)
         report = {
             "engine_version": ENGINE_VERSION,
             "status": "done",
             "render_mode": "v5.6_long_video_stable",
             "output_path": str(final_output),
             "selected_backend": self.backend_execution.selected_backend_name,
-            "backend": _v56_backend_report_payload(self.backend_execution),
+            "backend": backend_payload,
             "output_size_bytes": final_output.stat().st_size if final_output.exists() else None,
             "duration_seconds": final_duration,
             "elapsed_seconds": elapsed,
@@ -8300,7 +8382,8 @@ class V56StableRenderer:
                 "route_counts": chunk_route_counts,
                 "total_chunks": len(groups),
             },
-            "diagnostics": _v56_render_diagnostics(renderer, groups, chunk_reports, force_chunk_audio_track, timings),
+            "diagnostics": diagnostics,
+            **_v56_report_summary_fields(backend_payload, diagnostics, render_intent="final"),
             "created_at": datetime.now().isoformat(),
         }
         _v56_write_build_report(self.report_path, report)
@@ -8315,32 +8398,78 @@ def _v56_run_render_backend(
     plan_path: Optional[str] = None,
 ) -> BackendExecutionResult:
     resolved_decision = coerce_backend_decision(decision)
-    initial_execution = BackendExecutionResult.from_decision(resolved_decision)
-    backend_name = resolved_decision.backend_name
-    effective_params = dict(params or {})
-    effective_params["_backend_decision"] = resolved_decision.to_dict()
-    effective_params["_backend_execution"] = initial_execution.to_dict()
+    fallback_chain = list(resolved_decision.fallback_chain or [resolved_decision.backend_name])
+    ordered_candidates: List[str] = []
+    for backend_name in [resolved_decision.backend_name, *fallback_chain]:
+        normalized = str(backend_name or "").strip()
+        if normalized and normalized not in ordered_candidates:
+            ordered_candidates.append(normalized)
 
-    if backend_name == "ffmpeg_stable_backend":
-        return run_ffmpeg_stable_backend(
-            sys.modules[__name__],
+    failed_reasons: List[str] = []
+    last_error: Optional[Exception] = None
+    for backend_name in ordered_candidates:
+        initial_execution = BackendExecutionResult.from_decision(
             resolved_decision,
-            plan,
-            output,
-            effective_params,
-            plan_path=plan_path,
+            fallback_used=(backend_name if backend_name != resolved_decision.backend_name else None),
+            fallback_reason=merge_backend_reason_tags(failed_reasons) if failed_reasons else None,
+        )
+        effective_params = dict(params or {})
+        effective_params["_backend_decision"] = resolved_decision.to_dict()
+        effective_params["_backend_execution"] = initial_execution.to_dict()
+
+        try:
+            if backend_name == "ffmpeg_stable_backend":
+                result = run_ffmpeg_stable_backend(
+                    sys.modules[__name__],
+                    resolved_decision,
+                    plan,
+                    output,
+                    effective_params,
+                    plan_path=plan_path,
+                )
+            elif backend_name == "legacy_moviepy_backend":
+                result = run_legacy_moviepy_backend(
+                    sys.modules[__name__],
+                    resolved_decision,
+                    plan,
+                    output,
+                    effective_params,
+                )
+            elif backend_name == "mlt_backend":
+                result = run_mlt_backend(
+                    sys.modules[__name__],
+                    resolved_decision,
+                    plan,
+                    output,
+                    effective_params,
+                    plan_path=plan_path,
+                )
+            else:
+                raise RuntimeError(f"Unknown render backend: {backend_name}")
+        except Exception as exc:
+            last_error = exc
+            failed_reasons.append(
+                str(
+                    getattr(exc, "reason", None)
+                    or str(exc)
+                    or backend_name
+                    or exc.__class__.__name__
+                )
+            )
+            continue
+
+        if backend_name == resolved_decision.backend_name:
+            return result
+        return BackendExecutionResult.from_decision(
+            resolved_decision,
+            actual_backend_name=result.actual_backend_name,
+            fallback_used=result.actual_backend_name,
+            fallback_reason=merge_backend_reason_tags(failed_reasons) if failed_reasons else None,
         )
 
-    if backend_name == "legacy_moviepy_backend":
-        return run_legacy_moviepy_backend(
-            sys.modules[__name__],
-            resolved_decision,
-            plan,
-            output,
-            effective_params,
-        )
-
-    raise RuntimeError(f"Unknown render backend: {backend_name}")
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError(f"Unable to execute render backend: {resolved_decision.backend_name}")
 
 
 def render_with_v56_stability(plan_path: str, output: str, params: Dict[str, Any]) -> None:

@@ -128,11 +128,22 @@ struct BuildReportSummary {
     report_path: String,
     manifest_path: Option<String>,
     status: Option<String>,
+    render_intent: Option<String>,
     render_mode: Option<String>,
     failed_stage: Option<String>,
     output_path: Option<String>,
     selected_backend: Option<String>,
+    actual_backend: Option<String>,
+    backend_reason: Option<String>,
+    fallback_chain: Vec<String>,
+    fallback_used: Option<String>,
+    fallback_reason: Option<String>,
+    fallback_applied: bool,
     chunk_count: Option<usize>,
+    segment_fast_path_rate: Option<f64>,
+    chunk_fast_path_rate: Option<f64>,
+    segment_route_difference_count: usize,
+    segment_route_difference_rate: Option<f64>,
     created_at: Option<String>,
     resumable: bool,
     resumed_from_manifest: bool,
@@ -2982,6 +2993,18 @@ fn load_build_report_summary_blocking(project_dir: String) -> Result<BuildReport
 fn extract_build_report_summary(value: Value, report_path: &Path) -> BuildReportSummary {
     let recovery = value.get("recovery").and_then(|item| item.as_object());
     let failure = value.get("failure").and_then(|item| item.as_object());
+    let backend = value.get("backend").and_then(|item| item.as_object());
+    let observability = value
+        .get("diagnostics")
+        .and_then(|item| item.get("observability"))
+        .and_then(|item| item.as_object());
+    let fast_path = observability
+        .and_then(|item| item.get("fast_path_coverage"))
+        .and_then(|item| item.as_object());
+    let route_differences = observability
+        .and_then(|item| item.get("route_differences"))
+        .and_then(|item| item.get("segments"))
+        .and_then(|item| item.as_object());
 
     BuildReportSummary {
         report_path: report_path.display().to_string(),
@@ -2990,6 +3013,10 @@ fn extract_build_report_summary(value: Value, report_path: &Path) -> BuildReport
             .and_then(|item| item.as_str())
             .map(|item| item.to_string()),
         status: value.get("status").and_then(|item| item.as_str()).map(|item| item.to_string()),
+        render_intent: value
+            .get("render_intent")
+            .and_then(|item| item.as_str())
+            .map(|item| item.to_string()),
         render_mode: value
             .get("render_mode")
             .and_then(|item| item.as_str())
@@ -3005,8 +3032,72 @@ fn extract_build_report_summary(value: Value, report_path: &Path) -> BuildReport
         selected_backend: value
             .get("selected_backend")
             .and_then(|item| item.as_str())
+            .or_else(|| backend.and_then(|item| item.get("selected_backend")).and_then(|item| item.as_str()))
             .map(|item| item.to_string()),
+        actual_backend: value
+            .get("actual_backend")
+            .and_then(|item| item.as_str())
+            .or_else(|| backend.and_then(|item| item.get("actual_backend_name")).and_then(|item| item.as_str()))
+            .map(|item| item.to_string()),
+        backend_reason: value
+            .get("backend_reason")
+            .and_then(|item| item.as_str())
+            .or_else(|| backend.and_then(|item| item.get("reason")).and_then(|item| item.as_str()))
+            .map(|item| item.to_string()),
+        fallback_chain: value
+            .get("fallback_chain")
+            .and_then(|item| item.as_array())
+            .or_else(|| backend.and_then(|item| item.get("fallback_chain")).and_then(|item| item.as_array()))
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(|value| value.to_string()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
+        fallback_used: value
+            .get("fallback_used")
+            .and_then(|item| item.as_str())
+            .or_else(|| backend.and_then(|item| item.get("fallback_used")).and_then(|item| item.as_str()))
+            .map(|item| item.to_string()),
+        fallback_reason: value
+            .get("fallback_reason")
+            .and_then(|item| item.as_str())
+            .or_else(|| backend.and_then(|item| item.get("fallback_reason")).and_then(|item| item.as_str()))
+            .map(|item| item.to_string()),
+        fallback_applied: value
+            .get("fallback_applied")
+            .and_then(|item| item.as_bool())
+            .or_else(|| backend.and_then(|item| item.get("fallback_applied")).and_then(|item| item.as_bool()))
+            .unwrap_or(false),
         chunk_count: value.get("chunk_count").and_then(|item| item.as_u64()).map(|item| item as usize),
+        segment_fast_path_rate: value
+            .get("segment_fast_path_rate")
+            .and_then(|item| item.as_f64())
+            .or_else(|| {
+                fast_path
+                    .and_then(|item| item.get("segments"))
+                    .and_then(|item| item.get("fast_path_rate"))
+                    .and_then(|item| item.as_f64())
+            }),
+        chunk_fast_path_rate: value
+            .get("chunk_fast_path_rate")
+            .and_then(|item| item.as_f64())
+            .or_else(|| {
+                fast_path
+                    .and_then(|item| item.get("chunks"))
+                    .and_then(|item| item.get("fast_path_rate"))
+                    .and_then(|item| item.as_f64())
+            }),
+        segment_route_difference_count: value
+            .get("segment_route_difference_count")
+            .and_then(|item| item.as_u64())
+            .or_else(|| route_differences.and_then(|item| item.get("changed_count")).and_then(|item| item.as_u64()))
+            .unwrap_or(0) as usize,
+        segment_route_difference_rate: value
+            .get("segment_route_difference_rate")
+            .and_then(|item| item.as_f64())
+            .or_else(|| route_differences.and_then(|item| item.get("changed_rate")).and_then(|item| item.as_f64())),
         created_at: value
             .get("created_at")
             .and_then(|item| item.as_str())
@@ -3574,11 +3665,22 @@ mod tests {
             root.join("build_report.json"),
             serde_json::to_string_pretty(&json!({
                 "status": "failed",
+                "render_intent": "final",
                 "render_mode": "v5.6_long_video_stable",
                 "failed_stage": "chunk_render",
                 "output_path": root.join("final.mp4").display().to_string(),
                 "selected_backend": "stable_chunked",
+                "actual_backend": "ffmpeg_stable_backend",
+                "backend_reason": "stable_renderer_selected",
+                "fallback_chain": ["ffmpeg_stable_backend", "legacy_moviepy_backend"],
+                "fallback_used": "legacy_moviepy_backend",
+                "fallback_reason": "concat_failed",
+                "fallback_applied": true,
                 "chunk_count": 6,
+                "segment_fast_path_rate": 0.75,
+                "chunk_fast_path_rate": 0.5,
+                "segment_route_difference_count": 2,
+                "segment_route_difference_rate": 0.3333,
                 "created_at": "2026-05-27T10:30:00",
                 "failure": {
                     "code": "chunk_render_failed",
@@ -3603,7 +3705,12 @@ mod tests {
         let summary = load_build_report_summary_blocking(root.display().to_string())
             .expect("build report should load");
         assert_eq!(summary.status.as_deref(), Some("failed"));
+        assert_eq!(summary.render_intent.as_deref(), Some("final"));
         assert_eq!(summary.failed_stage.as_deref(), Some("chunk_render"));
+        assert_eq!(summary.actual_backend.as_deref(), Some("ffmpeg_stable_backend"));
+        assert_eq!(summary.fallback_used.as_deref(), Some("legacy_moviepy_backend"));
+        assert!(summary.fallback_applied);
+        assert_eq!(summary.segment_route_difference_count, 2);
         assert!(summary.resumable);
         assert!(summary.resumed_from_manifest);
         assert_eq!(summary.reused_chunk_count, 2);

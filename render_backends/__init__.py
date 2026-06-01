@@ -22,10 +22,15 @@ from .base import (
     MLT_BACKEND_CAPABILITY_FLAGS,
     MLT_BACKEND_FAMILY,
     MLT_BACKEND_NAME,
+    MLT_BACKEND_REASON_GATE_DISABLED,
+    MLT_BACKEND_REASON_MISSING_SOURCE_PATH,
     MLT_BACKEND_REASON_NOT_INSTALLED,
+    MLT_BACKEND_REASON_PREVIEW_NOT_SUPPORTED,
+    MLT_BACKEND_REASON_RENDER_FAILED,
     MLT_BACKEND_REASON_SCAFFOLD_ONLY,
     MLT_BACKEND_REASON_SELECTED,
     MLT_BACKEND_REASON_UNSUPPORTED_SEGMENT_TYPE,
+    MLT_BACKEND_REASON_UNSUPPORTED_TEXT_OVERLAY,
     MLT_BACKEND_REASON_UNSUPPORTED_TRANSITION,
     MLT_BACKEND_REASON_VALIDATION_FAILED,
     STANDARD_TIMELINE_BACKEND_FAMILY,
@@ -34,10 +39,16 @@ from .base import (
     coerce_backend_execution_result,
     merge_backend_reason_tags,
 )
-from .backend_selector import resolve_render_backend
+from .backend_selector import collect_mlt_rejection_reasons, resolve_render_backend, should_use_mlt_backend
 from .ffmpeg_stable import run_render as run_ffmpeg_stable_backend
 from .legacy_moviepy import run_render as run_legacy_moviepy_backend
-from .mlt_backend import MltBackendScaffoldError, build_mlt_project, run_render as run_mlt_backend
+from .mlt_backend import (
+    MltBackendError,
+    MltBackendScaffoldError,
+    build_mlt_project,
+    run_render as run_mlt_backend,
+)
+from .mlt_project_builder import MltProjectBuildResult
 from .mlt_probe import (
     DEFAULT_MLT_EXECUTABLE_CANDIDATES,
     MLT_PROBE_VERSION,
@@ -70,18 +81,26 @@ __all__ = [
     "MLT_BACKEND_CAPABILITY_FLAGS",
     "MLT_BACKEND_FAMILY",
     "MLT_BACKEND_NAME",
+    "MLT_BACKEND_REASON_GATE_DISABLED",
+    "MLT_BACKEND_REASON_MISSING_SOURCE_PATH",
     "MLT_BACKEND_REASON_NOT_INSTALLED",
+    "MLT_BACKEND_REASON_PREVIEW_NOT_SUPPORTED",
+    "MLT_BACKEND_REASON_RENDER_FAILED",
     "MLT_BACKEND_REASON_SCAFFOLD_ONLY",
     "MLT_BACKEND_REASON_SELECTED",
     "MLT_BACKEND_REASON_UNSUPPORTED_SEGMENT_TYPE",
+    "MLT_BACKEND_REASON_UNSUPPORTED_TEXT_OVERLAY",
     "MLT_BACKEND_REASON_UNSUPPORTED_TRANSITION",
     "MLT_BACKEND_REASON_VALIDATION_FAILED",
     "MLT_PROBE_VERSION",
+    "MltBackendError",
     "MltBackendScaffoldError",
+    "MltProjectBuildResult",
     "MltProbeResult",
     "STANDARD_TIMELINE_BACKEND_FAMILY",
     "build_backend_report_payload",
     "build_mlt_project",
+    "collect_mlt_rejection_reasons",
     "coerce_backend_decision",
     "coerce_backend_execution_result",
     "merge_backend_reason_tags",
@@ -90,4 +109,5 @@ __all__ = [
     "run_ffmpeg_stable_backend",
     "run_legacy_moviepy_backend",
     "run_mlt_backend",
+    "should_use_mlt_backend",
 ]

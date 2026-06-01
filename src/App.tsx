@@ -3301,9 +3301,21 @@ function ResultCard({
             <span>已复用 {recovery.reusedChunkCount}</span>
             <span>失败 {recovery.failedChunkCount}</span>
             {recovery.chunkCount ? <span>总分段 {recovery.chunkCount}</span> : null}
+            {typeof recovery.segmentFastPathRate === "number" ? <span>段快路径 {Math.round(recovery.segmentFastPathRate * 100)}%</span> : null}
+            {typeof recovery.chunkFastPathRate === "number" ? <span>块快路径 {Math.round(recovery.chunkFastPathRate * 100)}%</span> : null}
           </div>
-          {(recovery.failedStage || recovery.failedChunk || recovery.failureCode) ? (
+          {(recovery.selectedBackend || recovery.actualBackend || recovery.fallbackUsed || recovery.segmentRouteDifferenceCount || recovery.failedStage || recovery.failedChunk || recovery.failureCode) ? (
             <div className="result-recovery-meta">
+              {recovery.selectedBackend ? (
+                <span>
+                  后端：{recovery.actualBackend && recovery.actualBackend !== recovery.selectedBackend
+                    ? `${recovery.selectedBackend} -> ${recovery.actualBackend}`
+                    : recovery.selectedBackend}
+                </span>
+              ) : null}
+              {recovery.fallbackUsed ? <span>回退：{recovery.fallbackUsed}</span> : null}
+              {recovery.fallbackReason ? <span>回退原因：{recovery.fallbackReason}</span> : null}
+              {recovery.segmentRouteDifferenceCount ? <span>运行期路由变化：{recovery.segmentRouteDifferenceCount}</span> : null}
               {recovery.failedStage ? <span>失败阶段：{recovery.failedStage}</span> : null}
               {recovery.failedChunk ? <span>失败分段：{recovery.failedChunk}</span> : null}
               {recovery.failureCode ? <span>失败标识：{recovery.failureCode}</span> : null}
