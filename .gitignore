@@ -12,7 +12,14 @@ __pycache__/
 *$py.class
 .pytest_cache/
 tests/tmp_vcs_*/
+tests/tmp_video_geometry_probe/
 tests/.generated-diagnostic-check/
+tests/.generated-*/
+tests/**/.cache_video_create_v5/
+tests/**/.video_create_project/
+tests/**/chunks/
+tests/**/build_report.json
+tests/**/concat_list.txt
 
 # Local render/cache output
 .cache_bilibili_video/

@@ -68,6 +68,8 @@ def test_low_res_preview_plan_and_render() -> None:
     library = engine.Scanner(str(root), recursive=True).scan()
     manifest = library.get("proxy_media_manifest") or {}
     assert (manifest.get("summary") or {}).get("ready", 0) >= 2
+    cached_library = engine.Scanner(str(root), recursive=True).scan()
+    assert (cached_library.get("scan_metadata_cache") or {}).get("hit", 0) >= 2
 
     output = root / "preview.mp4"
     engine.Renderer(

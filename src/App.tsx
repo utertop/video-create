@@ -29,6 +29,7 @@ import {
   Volume2,
 } from "lucide-react";
 import { useMemo, useState, useEffect, useRef } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { listen } from "@tauri-apps/api/event";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
@@ -92,11 +93,14 @@ import { BackgroundAssetPicker, shortPathName } from "./components/BackgroundAss
 import { BlueprintEditor } from "./components/BlueprintEditor";
 import { Feature, SectionTitle, StatusItem } from "./components/common";
 import { EditStrategyPreview } from "./components/EditStrategyPreview";
+import { SegmentedControl, Toggle } from "./components/FormControls";
 import { FolderSelector, OutputFolderSelector } from "./components/FolderSelector";
 import { MaterialGallery, PreviewModal } from "./components/MaterialGallery";
 import { PerformanceModeControl, PerformanceRecommendation, performanceModeLabel } from "./components/PerformanceModeControl";
+import { ProgressBar, ProgressTone } from "./components/ProgressBar";
+import { ACTIVE_RENDER_QUEUE_STATUSES, normalizeQueueStatus, RenderQueueItem, RenderQueuePanel, shortJobId } from "./components/RenderQueuePanel";
 import { normalizeTitleStyle, titleTemplateLabel, TitleStyleLab } from "./components/TitleStylePreview";
-import { StudioState, useStudio } from "./store/studio";
+import { selectStudioAppState, StudioState, useStudio } from "./store/studio";
 import { BackgroundPickerTarget, PhotoSegmentCacheStats, ProxyMediaStats, VideoEvent, VideoSegmentCacheStats } from "./types/studio";
 import { buildDiagnosticBundlePayload, buildErrorCodeStats, buildSupportCaseSummary, summarizeErrorCodes } from "./lib/diagnostics";
 import {
@@ -112,29 +116,6 @@ import {
 } from "./lib/progress";
 import "./v5-background.css";
 
-type RenderQueueStatus = "queued" | "running" | "done" | "failed" | "cancelled";
-type ProgressTone = "idle" | "running" | "done" | "failed" | "cancelled";
-
-interface RenderQueueItem {
-  id: string;
-  label: string;
-  status: RenderQueueStatus;
-  position: number;
-  progress: number;
-  message?: string;
-  planPath?: string;
-  outputPath?: string;
-  outputDir?: string;
-  commandPreview?: string;
-  params?: RenderV5Params;
-  createdAt: number;
-  startedAt?: number;
-  finishedAt?: number;
-  retryCount: number;
-  recovery?: RenderRecoverySummary | null;
-}
-
-const ACTIVE_RENDER_QUEUE_STATUSES = new Set<RenderQueueStatus>(["queued", "running"]);
 const RECENT_PROJECTS_KEY = "video-create-studio.recent-projects.v1";
 const TELEMETRY_PREFERENCE_KEY = "video-create-studio.telemetry-enabled.v1";
 
@@ -208,44 +189,8 @@ interface SessionRecoveryData {
   selectedAudioSectionId: string | null;
 }
 
-function ProgressBar({
-  percent,
-  phase,
-  isDryRun,
-  status,
-  detail,
-}: {
-  percent: number;
-  phase: string;
-  isDryRun: boolean;
-  status: ProgressTone;
-  detail?: string | null;
-}) {
-  const toneClass = status === "failed" ? "failed" : status === "cancelled" ? "cancelled" : status === "done" ? "done" : isDryRun ? "dry-run" : "rendering";
-  return (
-    <div className={`progress-container progress-container-${status}`}>
-      <div className="progress-header">
-        <div className="phase-info">
-          <div className={`phase-dot ${toneClass}`} />
-          <span>{phase}</span>
-        </div>
-        <span className="percent-number">{percent}%</span>
-      </div>
-      <div className="progress-track">
-        <div 
-          className={`progress-fill ${toneClass}`}
-          style={{ width: `${percent}%` }}
-        >
-          <div className="progress-glow" />
-        </div>
-      </div>
-      {detail ? <div className={`progress-detail progress-detail-${status}`}>{detail}</div> : null}
-    </div>
-  );
-}
-
 export function App() {
-  const state = useStudio();
+  const state = useStudio(useShallow(selectStudioAppState));
   const [result, setResult] = useState<GenerateVideoResult | null>(null);
   const [isRendering, setIsRendering] = useState(false);
   const [isPreviewRendering, setIsPreviewRendering] = useState(false);
@@ -2608,144 +2553,6 @@ export function App() {
   );
 }
 
-function RenderQueuePanel({
-  queue,
-  onCancel,
-  onRetry,
-}: {
-  queue: RenderQueueItem[];
-  onCancel: (jobId: string) => void;
-  onRetry: (item: RenderQueueItem) => void;
-}) {
-  const current = queue.find((item) => item.status === "running") || null;
-  const waiting = queue.filter((item) => item.status === "queued");
-  const history = queue
-    .filter((item) => !ACTIVE_RENDER_QUEUE_STATUSES.has(item.status))
-    .slice()
-    .reverse();
-
-  return (
-    <div className="render-queue-panel">
-      <div className="render-queue-header">
-        <div>
-          <strong>Render queue</strong>
-          <span>{waiting.length} waiting, {history.length} finished</span>
-        </div>
-      </div>
-
-      <div className="render-queue-grid">
-        <div className="render-queue-section current">
-          <div className="render-queue-section-title">
-            <Loader2 size={16} className={current ? "spin" : undefined} />
-            Current
-          </div>
-          {current ? (
-            <RenderQueueRow item={current} onCancel={onCancel} onRetry={onRetry} />
-          ) : (
-            <div className="render-queue-empty">No active render</div>
-          )}
-        </div>
-
-        <div className="render-queue-section">
-          <div className="render-queue-section-title">
-            <Clock size={16} />
-            Waiting
-          </div>
-          {waiting.length > 0 ? (
-            waiting.map((item) => <RenderQueueRow key={item.id} item={item} onCancel={onCancel} onRetry={onRetry} />)
-          ) : (
-            <div className="render-queue-empty">Queue is empty</div>
-          )}
-        </div>
-
-        <div className="render-queue-section history">
-          <div className="render-queue-section-title">
-            <History size={16} />
-            History
-          </div>
-          {history.length > 0 ? (
-            history.map((item) => <RenderQueueRow key={item.id} item={item} onCancel={onCancel} onRetry={onRetry} />)
-          ) : (
-            <div className="render-queue-empty">No completed jobs yet</div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function RenderQueueRow({
-  item,
-  onCancel,
-  onRetry,
-}: {
-  item: RenderQueueItem;
-  onCancel: (jobId: string) => void;
-  onRetry: (item: RenderQueueItem) => void;
-}) {
-  const canCancel = ACTIVE_RENDER_QUEUE_STATUSES.has(item.status);
-  const canRetry = item.status === "failed";
-  return (
-    <div className={`render-queue-row ${item.status}`}>
-      <div className="render-queue-main">
-        <div className="render-queue-name">
-          <span className={`render-queue-status-dot ${item.status}`} />
-          <strong>{item.label}</strong>
-          {item.retryCount > 0 && <span className="render-queue-retry-badge">retry {item.retryCount}</span>}
-        </div>
-        <div className="render-queue-meta">
-          <span>{queueStatusLabel(item.status)}</span>
-          <span>{shortJobId(item.id)}</span>
-          {item.position > 0 && <span>#{item.position}</span>}
-          <span>{formatQueueTime(item.finishedAt || item.startedAt || item.createdAt)}</span>
-        </div>
-        {item.message && <div className="render-queue-message">{item.message}</div>}
-        {item.status === "running" && (
-          <div className="render-queue-progress">
-            <div style={{ width: `${Math.max(2, item.progress)}%` }} />
-          </div>
-        )}
-      </div>
-      <div className="render-queue-actions">
-        {canCancel && (
-          <button className="render-queue-icon-btn danger" type="button" onClick={() => onCancel(item.id)} title="Cancel render">
-            <Square size={14} />
-          </button>
-        )}
-        {canRetry && (
-          <button className="render-queue-icon-btn" type="button" onClick={() => onRetry(item)} title="Retry failed render">
-            <RotateCcw size={14} />
-          </button>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function normalizeQueueStatus(status: string): RenderQueueStatus {
-  if (status === "running" || status === "done" || status === "failed" || status === "cancelled") return status;
-  return "queued";
-}
-
-function queueStatusLabel(status: RenderQueueStatus): string {
-  return {
-    queued: "Waiting",
-    running: "Rendering",
-    done: "Done",
-    failed: "Failed",
-    cancelled: "Cancelled",
-  }[status];
-}
-
-function shortJobId(jobId: string): string {
-  return jobId.length > 8 ? jobId.slice(0, 8) : jobId;
-}
-
-function formatQueueTime(timestamp?: number): string {
-  if (!timestamp) return "";
-  return new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-}
-
 function formatRecentProjectTime(timestamp: number): string {
   const date = new Date(timestamp);
   const now = Date.now();
@@ -4772,45 +4579,6 @@ function recommendPerformanceMode(
     summary: "当前项目规模较小，可以优先保留更完整的画面、动效和混音细节。",
     reason: "素材规模较小，质感优先的性能风险较低。",
   };
-}
-function SegmentedControl({
-  label,
-  value,
-  options,
-  onChange,
-}: {
-  label: string;
-  value: string;
-  options: [string, string][];
-  onChange: (value: string) => void;
-}) {
-  return (
-    <div className="segmented-group">
-      <span>{label}</span>
-      <div className="segmented-control">
-        {options.map(([optionValue, optionLabel]) => (
-          <button
-            className={value === optionValue ? "selected" : ""}
-            key={optionValue}
-            onClick={() => onChange(optionValue)}
-            type="button"
-          >
-            {optionLabel}
-          </button>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function Toggle({ checked, label, onChange }: { checked: boolean; label: string; onChange: (value: boolean) => void }) {
-  return (
-    <label className="toggle">
-      <input checked={checked} type="checkbox" onChange={(event) => onChange(event.target.checked)} />
-      <span />
-      {label}
-    </label>
-  );
 }
 function qualityLabel(quality: Quality): string {
   return {

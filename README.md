@@ -1,6 +1,6 @@
 # Video Create Studio
 
-Video Create Studio 是一个基于 `Tauri + React + Python V5` 的视频生成桌面应用。
+Video Create Studio 是一个基于 `Tauri + React + Python V5` 的桌面视频生成应用。
 
 当前版本：`V5.6.2`  
 当前 V5 Schema：`5.5`
@@ -17,20 +17,22 @@ render -> final mp4
 ## 项目结构
 
 ```text
-src/                 React 前端
-src/lib/engine.ts    前端到 Tauri 的调用封装
-src-tauri/           Tauri / Rust 桌面壳
-video_engine_v5.py   Python V5 引擎
-video_engine_worker.py
-tests/               冒烟测试
-scripts/             构建与打包脚本
+src/                       React 前端
+src/lib/engine.ts          前端到 Tauri 命令的调用封装
+src-tauri/                 Tauri / Rust 桌面壳
+video_engine_v5.py         Python V5 渲染引擎
+video_engine_worker.py     本地 JSON-line worker
+render_backends/           可选渲染后端
+tests/                     冒烟测试和少量固定夹具
+scripts/                   检查、清理、打包脚本
+docs/                      设计、发布、迁移和性能文档
 ```
 
 ## 环境要求
 
 - Node.js 20+
 - Rust stable
-- Python 3.11（推荐）
+- Python 3.11 推荐
 - `requirements.txt` 中的 Python 依赖
 
 安装依赖：
@@ -46,65 +48,23 @@ python -m pip install -r .\requirements.txt
 python -m pip install -r .\requirements-worker-build.txt
 ```
 
-## 开发模式
+## 开发
 
-开发联调时仍然使用：
+桌面联调：
 
 ```powershell
 npm run dev:desktop
 ```
 
-这等价于 `npm run tauri dev`，适合改前端、改 Tauri 命令、看实时日志。
+这等价于 `npm run tauri dev`，适合调前端、Tauri 命令和本地 worker 日志。
 
-## 桌面分发
-
-如果目标是不再每次都跑 `tauri dev`，而是产出可直接安装/启动的桌面应用，请使用：
+只构建前端：
 
 ```powershell
-npm run build:desktop
+npm run build:web
 ```
 
-这个流程会自动完成：
-
-1. 构建前端静态资源
-2. 打包 Python worker 到 `src-tauri/bin/`
-3. 执行 `tauri build`
-4. 生成当前平台的桌面安装包
-
-常用相关命令：
-
-```powershell
-npm run build:worker
-npm run verify:worker-packaged
-npm run build:desktop
-npm run build:desktop:msi
-```
-
-发布前请同时查看：
-
-- `CHANGELOG.md`
-- `docs/INSTALLER_TEST_CHECKLIST.md`
-
-说明：
-
-- `npm run build:desktop` 会按平台自动选更稳的默认 bundler
-- Windows 默认走 `NSIS`，避免被本机 `WiX/MSI` 环境卡住
-- 如果你明确需要 `MSI`，再手动使用 `npm run build:desktop:msi`
-
-## 当前跨平台结论
-
-- `Windows`：支持桌面打包
-- `macOS`：支持桌面打包，worker 现在会自动生成无扩展名可执行文件
-- `iOS`：当前架构暂不支持直接落地
-
-原因很直接：现在桌面端依赖 `Tauri/Rust` 启动本地 Python worker 子进程，而 iOS 不适合这种本地子进程执行模型。要上 iOS，下一步需要在下面两条路里选一条：
-
-1. 把渲染核心改成原生 Rust / Swift 可调用模块
-2. 把 Python 渲染能力迁到远端服务，由 iOS 只负责项目编辑和任务提交
-
-所以这版代码的合理“下一步”是先把 `Windows/macOS` 桌面分发做稳，再单独规划 iOS 架构。
-
-## 常用检查命令
+## 检查与测试
 
 成熟产品基线检查：
 
@@ -123,9 +83,88 @@ npm run check:full
 ```powershell
 npm run build
 cargo check --manifest-path .\src-tauri\Cargo.toml
-python -m py_compile .\video_engine_v5.py
+python -m py_compile .\video_engine_v5.py .\video_engine_worker.py
 python .\video_engine_v5.py --help
-python .\tests\smoke_v5_6_long_video_stability.py
 ```
 
-如果 Windows PowerShell 拦截了 `npm.ps1`，请改用 `npm.cmd`。
+清理测试运行产物：
+
+```powershell
+npm run clean:test-artifacts
+```
+
+预览将删除哪些目录：
+
+```powershell
+npm run clean:test-artifacts -- --dry-run
+```
+
+说明：
+
+- `tests/tmp_vcs_*` 默认视为测试运行产物。
+- `tests/tmp_vcs_p3_render_smoke` 内有少量历史固定夹具，清理脚本默认保留。
+- 扫描、预览和渲染生成的 `.cache_video_create_v5`、`.video_create_project`、`chunks`、`build_report.json` 不应提交。
+
+## 渲染性能
+
+引擎会复用多层缓存来减少重复工作：
+
+- scan metadata cache：重复扫描未变化素材时复用尺寸、时长、缩略图等元数据。
+- scan proxy cache：为预览生成低清代理素材。
+- render cache：复用图片段、视频 fitted 段、卡片段和 visual base chunks。
+- audio cache：复用归一化音频和音乐床。
+
+缓存 key 绑定源文件路径、大小、mtime、引擎版本和关键渲染参数。素材或策略变化后会自动失效。
+
+## 桌面分发
+
+默认桌面打包：
+
+```powershell
+npm run build:desktop
+```
+
+该流程会：
+
+1. 构建前端静态资源。
+2. 打包 Python worker 到 `src-tauri/bin/`。
+3. 执行 `tauri build`。
+4. 生成当前平台的桌面安装包。
+
+常用发布命令：
+
+```powershell
+npm run build:worker
+npm run verify:worker-packaged
+npm run build:desktop
+npm run build:desktop:msi
+```
+
+Windows 默认使用 `NSIS`，避免普通发布流程被本机 `WiX/MSI` 环境卡住。明确需要 MSI 时再运行 `npm run build:desktop:msi`。
+
+发布前请同时查看：
+
+- `CHANGELOG.md`
+- `docs/INSTALLER_TEST_CHECKLIST.md`
+- `docs/PYTHON_WORKER_PACKAGING.md`
+
+## 跨平台结论
+
+- Windows：支持桌面打包。
+- macOS：支持桌面打包，worker 会生成无扩展名可执行文件。
+- iOS：当前架构不支持直接落地。
+
+iOS 不适合当前“桌面端启动本地 Python worker 子进程”的模型。后续如果要支持 iOS，需要选择：
+
+1. 将渲染核心迁移为原生 Rust / Swift 可调用模块。
+2. 将 Python 渲染能力迁移到远端服务，iOS 只负责项目编辑和任务提交。
+
+因此当前合理路线是先把 Windows/macOS 桌面分发做稳，再单独规划 iOS 架构。
+
+## PowerShell 提示
+
+如果 Windows PowerShell 拦截 `npm.ps1`，请改用：
+
+```powershell
+npm.cmd run check
+```

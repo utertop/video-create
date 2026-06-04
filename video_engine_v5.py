@@ -30,7 +30,7 @@ import subprocess
 import tempfile
 import gc
 from collections import Counter
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from time import perf_counter
@@ -52,6 +52,19 @@ from render_backends import (
     run_legacy_moviepy_backend,
     run_mlt_backend,
 )
+from video_engine.cache import CACHE_CLEANUP_DEFAULTS_MB, _cleanup_cache_buckets, file_hash_light, safe_id
+from video_engine.constants import (
+    ALL_EXTS,
+    AUDIO_EXTS,
+    ENGINE_VERSION,
+    IGNORED_DIRS,
+    IGNORED_FILES,
+    IMAGE_EXTS,
+    SCHEMA_VERSION,
+    VIDEO_EXTS,
+)
+from video_engine.models import Asset, AssetRef, DirectoryNode, RenderSegment, StorySection, TitleStyle
+from video_engine.scan_utils import is_ignored_file as scan_is_ignored_file, natural_sort_key, orientation_from_size, section_to_dict
 
 
 # V5.3.2 early help guard
@@ -141,14 +154,6 @@ except Exception as exc:
 # Constants
 # =========================
 
-SCHEMA_VERSION = "5.5"
-ENGINE_VERSION = "video-create-engine-v5.6.3"
-
-IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
-VIDEO_EXTS = (".mp4", ".mov", ".avi", ".mkv", ".m4v")
-AUDIO_EXTS = (".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg")
-ALL_EXTS = IMAGE_EXTS + VIDEO_EXTS + AUDIO_EXTS
-
 AUDIO_PREFERRED_EXT_SCORE = {
     ".wav": 6,
     ".m4a": 5,
@@ -205,20 +210,6 @@ DATE_PATTERNS = [
     re.compile(r"^第?\d+天$"),
 ]
 
-IGNORED_DIRS = {
-    "__pycache__",
-    "node_modules",
-    "dist",
-    "target",
-    "output",
-    "outputs",
-    ".git",
-    ".cache_video_create_v5",
-    ".thumbnails",
-}
-IGNORED_FILES = {"thumbs.db", ".ds_store"}
-
-
 # =========================
 # Event / logging
 # =========================
@@ -270,21 +261,6 @@ class JsonMoviePyLogger(ProgressBarLogger):  # type: ignore[misc]
 # =========================
 # Utility functions
 # =========================
-
-def natural_sort_key(value: str) -> List[Any]:
-    return [int(x) if x.isdigit() else x.lower() for x in re.split(r"(\d+)", value)]
-
-
-def safe_id(text: str) -> str:
-    normalized = text.replace("\\", "/")
-    return hashlib.sha1(normalized.encode("utf-8", errors="ignore")).hexdigest()[:12]
-
-
-def file_hash_light(path: Path, extra: str = "") -> str:
-    stat = path.stat()
-    raw = f"{path.resolve()}|{stat.st_size}|{int(stat.st_mtime)}|{ENGINE_VERSION}|{extra}"
-    return hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()
-
 
 def get_resolution(aspect_ratio: str) -> Tuple[int, int]:
     if aspect_ratio == "9:16":
@@ -348,6 +324,7 @@ def draw_text_with_emoji(draw: ImageDraw.ImageDraw, xy: Tuple[int, int], text: s
 
 
 def is_ignored_file(path: Path) -> bool:
+    return scan_is_ignored_file(path)
     lower = path.name.lower()
     if lower in IGNORED_FILES:
         return True
@@ -467,22 +444,6 @@ def get_exif_date(img: Image.Image) -> Optional[str]:
     except Exception:
         return None
     return None
-
-
-def orientation_from_size(size: Iterable[int]) -> str:
-    w, h = list(size)[:2]
-    if w > h:
-        return "landscape"
-    if h > w:
-        return "portrait"
-    return "square"
-
-
-def section_to_dict(section: "StorySection") -> Dict[str, Any]:
-    data = asdict(section)
-    data["asset_refs"] = [asdict(ref) for ref in section.asset_refs]
-    data["children"] = [section_to_dict(child) for child in section.children]
-    return data
 
 
 def quality_to_crf(quality: Any) -> str:
@@ -1412,15 +1373,6 @@ def _guess_sibling_library_path(plan_path: Optional[str]) -> Optional[Path]:
     return candidate if candidate.is_file() else None
 
 
-CACHE_CLEANUP_DEFAULTS_MB = {
-    "render_cache": 2048,
-    "audio_cache": 768,
-    "proxies": 1024,
-    "chunks": 4096,
-    "scan_proxies": 1024,
-    "thumbnails": 256,
-}
-
 STABLE_RENDER_DEFAULTS = {
     "seconds": 360.0,
     "segments": 48,
@@ -1570,212 +1522,9 @@ def _v56_chunk_route_family(
     return "timeline"
 
 
-def _cache_cleanup_limit_bytes(config: Dict[str, Any], bucket_name: str, default_mb: int) -> int:
-    raw_limits = config.get("cache_cleanup_limits_mb")
-    if isinstance(raw_limits, dict) and bucket_name in raw_limits:
-        raw_value = raw_limits.get(bucket_name)
-    else:
-        raw_value = config.get(f"{bucket_name}_cache_max_mb")
-    try:
-        return max(0, int(float(raw_value if raw_value is not None else default_mb) * 1024 * 1024))
-    except Exception:
-        return max(0, int(default_mb * 1024 * 1024))
-
-
-def _iter_cache_files(root: Path) -> List[Path]:
-    if not root.exists():
-        return []
-    files: List[Path] = []
-    for path in root.rglob("*"):
-        if not path.is_file():
-            continue
-        if path.name.endswith((".tmp", ".part")) or ".rendering.tmp." in path.name:
-            continue
-        files.append(path)
-    return files
-
-
-def _cleanup_cache_bucket(root: Path, limit_bytes: int, bucket_name: str) -> Dict[str, Any]:
-    files = _iter_cache_files(root)
-    entries: List[Tuple[int, int, Path]] = []
-    bytes_before = 0
-    for path in files:
-        try:
-            stat = path.stat()
-        except Exception:
-            continue
-        size = int(stat.st_size)
-        mtime_ns = int(getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000)))
-        entries.append((mtime_ns, size, path))
-        bytes_before += size
-
-    deleted_files = 0
-    deleted_bytes = 0
-    for _mtime_ns, size, path in sorted(entries, key=lambda item: item[0]):
-        if bytes_before - deleted_bytes <= limit_bytes:
-            break
-        try:
-            path.unlink()
-            deleted_files += 1
-            deleted_bytes += size
-        except Exception:
-            continue
-
-    for directory in sorted((path for path in root.rglob("*") if path.is_dir()), key=lambda item: len(item.parts), reverse=True):
-        try:
-            directory.rmdir()
-        except Exception:
-            pass
-
-    bytes_after = max(0, bytes_before - deleted_bytes)
-    return {
-        "bucket": bucket_name,
-        "path": str(root),
-        "limit_bytes": int(limit_bytes),
-        "bytes_before": int(bytes_before),
-        "bytes_after": int(bytes_after),
-        "deleted_bytes": int(deleted_bytes),
-        "deleted_files": int(deleted_files),
-        "kept_files": max(0, len(entries) - deleted_files),
-    }
-
-
-def _cleanup_cache_buckets(
-    specs: List[Tuple[str, Path, int]],
-    config: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    config = config or {}
-    if config.get("cache_cleanup_enabled", True) is False:
-        return {"enabled": False, "buckets": {}, "deleted_files": 0, "deleted_bytes": 0}
-
-    buckets: Dict[str, Any] = {}
-    deleted_files = 0
-    deleted_bytes = 0
-    for bucket_name, root, default_mb in specs:
-        limit_bytes = _cache_cleanup_limit_bytes(config, bucket_name, default_mb)
-        summary = _cleanup_cache_bucket(root, limit_bytes, bucket_name)
-        buckets[bucket_name] = summary
-        deleted_files += int(summary.get("deleted_files") or 0)
-        deleted_bytes += int(summary.get("deleted_bytes") or 0)
-
-    return {
-        "enabled": True,
-        "buckets": buckets,
-        "deleted_files": int(deleted_files),
-        "deleted_bytes": int(deleted_bytes),
-    }
-
-
 # =========================
 # Data models
 # =========================
-
-@dataclass
-class TitleStyle:
-    preset: str = "cinematic_bold"
-    motion: str = "fade_slide_up"
-    color_theme: str = "auto"
-    position: str = "center"
-    user_overridden: bool = False
-
-
-@dataclass
-class DirectoryNode:
-    node_id: str
-    name: str
-    relative_path: str
-    depth: int
-    parent_id: Optional[str]
-    detected_type: str
-    confidence: float
-    reason: str
-    display_title: str
-    raw_detected_type: Optional[str] = None
-    signals: Dict[str, Any] = field(default_factory=dict)
-    user_override_fields: List[str] = field(default_factory=list)
-    asset_count: int = 0
-    children: List[str] = field(default_factory=list)
-    title_style: Optional[TitleStyle] = None
-    auto_detected: bool = True
-    user_overridden: bool = False
-
-
-@dataclass
-class Asset:
-    asset_id: str
-    type: str
-    relative_path: str
-    absolute_path: str
-    thumbnail_path: Optional[str]
-    file: Dict[str, Any]
-    media: Dict[str, Any]
-    classification: Dict[str, Any]
-    status: str = "ready"
-    cache: Optional[Dict[str, Any]] = None
-
-
-@dataclass
-class AssetRef:
-    asset_id: str
-    enabled: bool = True
-    role: str = "normal"
-    duration_policy: str = "auto"
-    custom_duration: Optional[float] = None
-    keep_audio: bool = True
-    user_overridden: bool = False
-
-
-@dataclass
-class StorySection:
-    section_id: str
-    section_type: str
-    title: str
-    subtitle: Optional[str]
-    enabled: bool
-    source_node_id: Optional[str]
-    asset_refs: List[AssetRef]
-    children: List["StorySection"]
-    auto_detected: bool = True
-    user_overridden: bool = False
-    rhythm: str = "standard"
-    title_mode: str = "full_card"
-    background: Optional[Dict[str, Any]] = None
-    title_style: Optional[TitleStyle] = None
-
-
-@dataclass
-class RenderSegment:
-    segment_id: str
-    type: str
-    source_path: Optional[str]
-    duration: float
-    text: Optional[str]
-    subtitle: Optional[str]
-    start_time: float
-    end_time: float
-    section_id: Optional[str] = None
-    asset_id: Optional[str] = None
-    transition: str = "none"
-    transition_config: Optional[Dict[str, Any]] = None
-    motion_config: Optional[Dict[str, Any]] = None
-    rhythm_config: Optional[Dict[str, Any]] = None
-    background: str = "blur"
-    background_mode: Optional[str] = None
-    background_source_path: Optional[str] = None
-    background_source_position: Optional[str] = None
-    background_source_path_2: Optional[str] = None
-    background_source_position_2: Optional[str] = None
-    overlay_text: Optional[str] = None
-    overlay_subtitle: Optional[str] = None
-    overlay_duration: Optional[float] = None
-    overlay_title_style: Optional[Dict[str, Any]] = None
-    title_style: Optional[Dict[str, Any]] = None
-    keep_audio: bool = True
-    cache_key: Optional[str] = None
-    render_route: Optional[str] = None
-    render_route_reason: Optional[str] = None
-    render_route_tags: Optional[List[str]] = None
-
 
 # =========================
 # scan -> media_library.json
@@ -1790,8 +1539,10 @@ class Scanner:
         self.cache_root = self.root / ".cache_video_create_v5"
         self.thumb_dir = self.cache_root / "thumbnails"
         self.proxy_dir = self.cache_root / "proxies"
+        self.metadata_dir = self.cache_root / "metadata"
         self.thumb_dir.mkdir(parents=True, exist_ok=True)
         self.proxy_dir.mkdir(parents=True, exist_ok=True)
+        self.metadata_dir.mkdir(parents=True, exist_ok=True)
         self.proxy_manifest: Dict[str, Any] = {
             "version": 1,
             "profile": dict(SCAN_PROXY_PROFILE),
@@ -1804,6 +1555,7 @@ class Scanner:
             },
         }
         self.cache_cleanup_stats: Dict[str, Any] = {"enabled": True, "buckets": {}, "deleted_files": 0, "deleted_bytes": 0}
+        self.metadata_cache_stats: Dict[str, int] = {"hit": 0, "miss": 0, "error": 0}
         self.skipped_count = 0
 
     def scan(self) -> Dict[str, Any]:
@@ -1816,6 +1568,16 @@ class Scanner:
         self._refresh_asset_classification_context()
         self.proxy_manifest["generated_at"] = datetime.now().isoformat()
         self.cache_cleanup_stats = self._cleanup_scan_cache_dirs()
+        if self.metadata_cache_stats["hit"] > 0:
+            emit_event(
+                "log",
+                message=(
+                    "Scan metadata cache summary: "
+                    f"hit={self.metadata_cache_stats['hit']}, "
+                    f"miss={self.metadata_cache_stats['miss']}, "
+                    f"error={self.metadata_cache_stats['error']}"
+                ),
+            )
         emit_event("phase", phase="scan", message="素材扫描完成", percent=100)
         content_profile = self._build_scan_content_profile()
 
@@ -1830,6 +1592,7 @@ class Scanner:
             "directory_nodes": [asdict(x) for x in self.nodes.values()],
             "assets": [asdict(x) for x in self.assets],
             "proxy_media_manifest": self.proxy_manifest,
+            "scan_metadata_cache": dict(self.metadata_cache_stats),
             "cache_cleanup": self.cache_cleanup_stats,
             "summary": {
                 "total_assets": len(self.assets),
@@ -1916,6 +1679,7 @@ class Scanner:
             [
                 ("scan_proxies", self.proxy_dir, CACHE_CLEANUP_DEFAULTS_MB["scan_proxies"]),
                 ("thumbnails", self.thumb_dir, CACHE_CLEANUP_DEFAULTS_MB["thumbnails"]),
+                ("scan_metadata", self.metadata_dir, 128),
             ],
             {},
         )
@@ -2157,6 +1921,65 @@ class Scanner:
             asset.classification["scenic_spot"] = context.get("scenic_spot")
 
 
+    def _metadata_cache_path(self, asset_id: str, cache_key: str) -> Path:
+        return self.metadata_dir / f"{asset_id}_{cache_key[:12]}.json"
+
+    def _load_scan_metadata_cache(self, asset_id: str, cache_key: str, kind: str) -> Optional[Dict[str, Any]]:
+        cache_path = self._metadata_cache_path(asset_id, cache_key)
+        if not cache_path.exists():
+            self.metadata_cache_stats["miss"] += 1
+            return None
+
+        try:
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+            if cached.get("engine_version") != ENGINE_VERSION:
+                self.metadata_cache_stats["miss"] += 1
+                return None
+            if cached.get("cache_key") != cache_key or cached.get("kind") != kind:
+                self.metadata_cache_stats["miss"] += 1
+                return None
+            thumb = cached.get("thumbnail_path")
+            if kind in {"image", "video"} and (not thumb or not Path(str(thumb)).exists()):
+                self.metadata_cache_stats["miss"] += 1
+                return None
+            media = cached.get("media")
+            if not isinstance(media, dict):
+                self.metadata_cache_stats["miss"] += 1
+                return None
+            self.metadata_cache_stats["hit"] += 1
+            return cached
+        except Exception:
+            self.metadata_cache_stats["error"] += 1
+            return None
+
+    def _write_scan_metadata_cache(
+        self,
+        asset_id: str,
+        cache_key: str,
+        kind: str,
+        media: Dict[str, Any],
+        thumbnail_path: Optional[str],
+        status: str,
+    ) -> None:
+        if status != "ready":
+            return
+        cache_path = self._metadata_cache_path(asset_id, cache_key)
+        payload = {
+            "version": 1,
+            "engine_version": ENGINE_VERSION,
+            "cache_key": cache_key,
+            "kind": kind,
+            "media": media,
+            "thumbnail_path": thumbnail_path,
+            "generated_at": datetime.now().isoformat(),
+        }
+        try:
+            tmp_path = cache_path.with_suffix(".tmp.json")
+            tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(str(tmp_path), str(cache_path))
+        except Exception:
+            self.metadata_cache_stats["error"] += 1
+
     def _scan_asset(self, path: Path, node_id: str, context: Dict[str, Optional[str]]) -> Asset:
         ext = path.suffix.lower()
         if ext in IMAGE_EXTS:
@@ -2181,6 +2004,44 @@ class Scanner:
         }
         thumb: Optional[str] = None
         status = "ready"
+        cached = self._load_scan_metadata_cache(asset_id, cache_key, kind)
+        if cached:
+            media.update(dict(cached.get("media") or {}))
+            thumb = cached.get("thumbnail_path") or None
+            proxy_entry = self._build_scan_proxy_entry(path, kind, media, cache_key)
+            if proxy_entry:
+                self.proxy_manifest["assets"][str(path)] = proxy_entry
+            return Asset(
+                asset_id=asset_id,
+                type=kind,
+                relative_path=rel,
+                absolute_path=str(path),
+                thumbnail_path=thumb,
+                file={
+                    "name": path.name,
+                    "extension": ext,
+                    "size_bytes": stat.st_size,
+                    "modified_time": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                    "content_hash": cache_key,
+                },
+                media=media,
+                classification={
+                    "directory_node_id": node_id,
+                    "city": context.get("city"),
+                    "date": context.get("date"),
+                    "scenic_spot": context.get("scenic_spot"),
+                    "detected_role": "normal",
+                    "confidence": 0.85,
+                },
+                status=status,
+                cache={
+                    "cache_key": cache_key,
+                    "thumbnail_path": thumb,
+                    "proxy_profiles": proxy_entry.get("profiles") if proxy_entry else {},
+                    "generated_at": datetime.now().isoformat(),
+                    "metadata_cache": "hit",
+                },
+            )
 
         try:
             if kind == "image":
@@ -2204,6 +2065,7 @@ class Scanner:
             status = "error"
             emit_event("log", message=f"素材分析失败: {path.name}: {exc}")
 
+        self._write_scan_metadata_cache(asset_id, cache_key, kind, media, thumb, status)
         proxy_entry = self._build_scan_proxy_entry(path, kind, media, cache_key)
         if proxy_entry:
             self.proxy_manifest["assets"][str(path)] = proxy_entry

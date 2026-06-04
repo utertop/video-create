@@ -88,16 +88,7 @@ for (const [index, step] of steps.entries()) {
   console.log(`\n${title}`);
   console.log(`> ${[step.command, ...step.args].join(" ")}`);
 
-  const result = spawnSync(step.command, step.args, {
-    cwd: process.cwd(),
-    env: {
-      ...process.env,
-      PYTHONUTF8: "1",
-      PYTHONIOENCODING: "utf-8",
-    },
-    stdio: "inherit",
-    shell: process.platform === "win32" && step.command.endsWith(".cmd"),
-  });
+  const result = spawnStep(step);
 
   if (result.error) {
     console.error(`\n${title} failed to start: ${result.error.message}`);
@@ -111,6 +102,28 @@ for (const [index, step] of steps.entries()) {
 }
 
 console.log(`\nProduct check passed (${full ? "full" : "core"} suite).`);
+
+function spawnStep(step) {
+  const env = {
+    ...process.env,
+    PYTHONUTF8: "1",
+    PYTHONIOENCODING: "utf-8",
+  };
+
+  if (process.platform === "win32" && step.command.endsWith(".cmd")) {
+    return spawnSync(process.env.ComSpec || "cmd.exe", ["/d", "/c", step.command, ...step.args], {
+      cwd: process.cwd(),
+      env,
+      stdio: "inherit",
+    });
+  }
+
+  return spawnSync(step.command, step.args, {
+    cwd: process.cwd(),
+    env,
+    stdio: "inherit",
+  });
+}
 
 function smokeTestSteps(files) {
   return files.map((file) => ({

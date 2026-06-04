@@ -47,6 +47,7 @@ function trackedInputFiles() {
     path.join(repoRoot, "video_engine_v5.py"),
     path.join(repoRoot, "requirements.txt"),
     path.join(repoRoot, "requirements-worker-build.txt"),
+    ...walkFiles(path.join(repoRoot, "video_engine")).filter((filePath) => filePath.endsWith(".py")),
     ...walkFiles(path.join(repoRoot, "render_backends")).filter((filePath) => filePath.endsWith(".py")),
   ]
     .filter((filePath) => existsSync(filePath))

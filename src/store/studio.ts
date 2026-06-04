@@ -60,6 +60,51 @@ export interface StudioState {
   patch: (data: Partial<StudioState>) => void;
 }
 
+export type StudioAppState = StudioState;
+
+export const selectStudioAppState = (state: StudioState): StudioAppState => ({
+  inputFolder: state.inputFolder,
+  outputFolder: state.outputFolder,
+  title: state.title,
+  titleSubtitle: state.titleSubtitle,
+  endText: state.endText,
+  titleStyle: state.titleStyle,
+  endStyle: state.endStyle,
+  titleBackgroundPath: state.titleBackgroundPath,
+  endBackgroundPath: state.endBackgroundPath,
+  chapterBackgroundMode: state.chapterBackgroundMode,
+  outputName: state.outputName,
+  aspectRatio: state.aspectRatio,
+  quality: state.quality,
+  watermark: state.watermark,
+  recursive: state.recursive,
+  chaptersFromDirs: state.chaptersFromDirs,
+  cover: state.cover,
+  editStrategy: state.editStrategy,
+  performanceMode: state.performanceMode,
+  renderEngine: state.renderEngine,
+  musicMode: state.musicMode,
+  musicPath: state.musicPath,
+  musicPlaylistMode: state.musicPlaylistMode,
+  musicPlaylistPaths: state.musicPlaylistPaths,
+  musicFitStrategy: state.musicFitStrategy,
+  bgmVolume: state.bgmVolume,
+  sourceAudioVolume: state.sourceAudioVolume,
+  keepSourceAudio: state.keepSourceAudio,
+  autoDucking: state.autoDucking,
+  musicFadeInSeconds: state.musicFadeInSeconds,
+  musicFadeOutSeconds: state.musicFadeOutSeconds,
+  isDryRun: state.isDryRun,
+  telemetryEnabled: state.telemetryEnabled,
+  v5Stage: state.v5Stage,
+  v5Library: state.v5Library,
+  v5Blueprint: state.v5Blueprint,
+  v5RenderPlan: state.v5RenderPlan,
+  setInputFolder: state.setInputFolder,
+  setOutputFolder: state.setOutputFolder,
+  patch: state.patch,
+});
+
 export const useStudio = create<StudioState>((set) => ({
   inputFolder: null,
   outputFolder: null,
