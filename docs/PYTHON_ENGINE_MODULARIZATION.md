@@ -18,6 +18,7 @@
   - `TitleStyle`, `DirectoryNode`, `Asset`, `AssetRef`, `StorySection`, `RenderSegment`
 - `video_engine/scan_utils.py`
   - scan-adjacent pure helpers
+  - directory recognition constants and `detect_directory_type()`
   - natural sorting, ignored-file checks, orientation labels, section serialization
 
 ## Rules
@@ -29,8 +30,7 @@
 
 ## Next Safe Steps
 
-1. Move directory recognition constants and `detect_directory_type()` into `video_engine/scan_utils.py`.
-2. Move audio-only helpers into `video_engine/audio.py`.
-3. Move `Scanner` into `video_engine/scan.py` after scan helpers are isolated.
-4. Move `Planner` and compile helpers after shared models/constants are stable.
-5. Move render cache key builders and FFmpeg command builders before moving the `Renderer` class.
+1. Move audio-only helpers into `video_engine/audio.py`.
+2. Move `Scanner` into `video_engine/scan.py` after scan helpers are isolated.
+3. Move `Planner` and compile helpers after shared models/constants are stable.
+4. Move render cache key builders and FFmpeg command builders before moving the `Renderer` class.
