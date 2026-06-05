@@ -90,6 +90,7 @@ from video_engine.plan import (
     set_plan_event_emitter,
 )
 from video_engine.compile import Compiler, set_compile_event_emitter
+from video_engine import render_diagnostics as render_diagnostics_helpers
 from video_engine import render_ffmpeg as render_ffmpeg_helpers
 from video_engine.render_routes import (
     _is_image_heavy_visual_mix,
@@ -246,7 +247,7 @@ class JsonMoviePyLogger(ProgressBarLogger):  # type: ignore[misc]
             percent = max(self.base_percent, min(99, percent))
 
             # Avoid flooding the frontend with too many identical events.
-            message = f"正在导出最终视频 {bar_name}: {index}/{total}"
+            message = f"Export progress {bar_name}: {index}/{total}"
             if percent != self.last_percent or message != self.last_message:
                 self.last_percent = percent
                 self.last_message = message
@@ -1697,11 +1698,11 @@ class Renderer:
         if not clips:
             raise RuntimeError("No valid clips generated")
 
-        emit_event("phase", phase="render", message="正在合成最终视频画面", percent=91)
+        emit_event("phase", phase="render", message="Composing final video timeline", percent=91)
         final = self._compose_timeline(clips, rendered_segments)
 
         if self.params.get("watermark"):
-            emit_event("phase", phase="render", message="正在添加水印", percent=92)
+            emit_event("phase", phase="render", message="Applying watermark", percent=92)
             final = self._add_watermark(final, str(self.params.get("watermark")))
 
         return final, rendered_segments
@@ -1871,7 +1872,7 @@ class Renderer:
             finalize_summary["audio_mix_seconds"] = round(perf_counter() - audio_mix_started, 4)
             ok, reason, validated_duration = _v56_validate_video(mixed_output, min_size=512)
             if not ok:
-                raise RuntimeError(f"éˆâ‚¬ç¼å £î‹æ£°æˆ¦ç…¶æ£°æˆžè´©éšå æ‚—éï¿ ç™æ¾¶è¾«è§¦é”›å±¼ç¬‰ç‘•å—™æ´ŠéƒÑ„æžƒæµ ? {reason}")
+                raise RuntimeError(f"visual base validation failed: {reason}")
             _v56_atomic_replace(mixed_output, output_path)
             finalize_summary["total_finalize_seconds"] = round(perf_counter() - finalize_started, 4)
             self.last_visual_finalize_summary = finalize_summary
@@ -1888,7 +1889,7 @@ class Renderer:
         finalize_summary["copy_through_seconds"] = round(perf_counter() - copy_started, 4)
         ok, reason, validated_duration = _v56_validate_video(output_path, min_size=512)
         if not ok:
-            raise RuntimeError(f"éˆâ‚¬ç¼å £î‹æ£°æˆžç‰Žæ¥ å±½ã‘ç’ãƒ¯ç´æ¶“å¶ˆî›«é©æ ¨æ£«é‚å›¦æ¬¢: {reason}")
+            raise RuntimeError(f"visual base final validation failed: {reason}")
         finalize_summary["total_finalize_seconds"] = round(perf_counter() - finalize_started, 4)
         self.last_visual_finalize_summary = finalize_summary
         return float(validated_duration or final_duration)
@@ -2150,16 +2151,16 @@ class Renderer:
             if not clips:
                 raise RuntimeError("No valid clips generated")
 
-            emit_event("phase", phase="render", message="正在合成最终时间线", percent=91)
+            emit_event("phase", phase="render", message="Composing final video timeline", percent=91)
             final = self._compose_timeline(clips, rendered_segments)
 
             if self.params.get("watermark"):
-                emit_event("phase", phase="render", message="正在添加水印", percent=92)
+                emit_event("phase", phase="render", message="Applying watermark", percent=92)
                 final = self._add_watermark(final, str(self.params.get("watermark")))
 
             final = self._apply_audio_mix(final)
 
-            emit_event("phase", phase="render", message="正在导出最终视频", percent=92)
+            emit_event("phase", phase="render", message="Exporting final video", percent=92)
 
             logger = JsonMoviePyLogger(base_percent=92, span_percent=7)
             final.write_videofile(
@@ -2219,8 +2220,8 @@ class Renderer:
             except Exception as exc:
                 emit_event("log", message=f"build_report write skipped for standard render: {exc}")
 
-            emit_event("artifact", artifact="video", path=str(self.output_path), message="最终视频已生成")
-            emit_event("phase", phase="complete", message="视频导出成功", percent=100)
+            emit_event("artifact", artifact="video", path=str(self.output_path), message="video exported")
+            emit_event("phase", phase="complete", message="Render complete", percent=100)
 
         finally:
             if final is not None:
@@ -2370,12 +2371,12 @@ class Renderer:
 
         path = self._prepare_music_bed(duration) or self._prepare_music_path() or Path(str(music_path))
         if not path.exists():
-            emit_event("log", message=f"BGM 文件不存在，已跳过背景音乐: {path}")
+            emit_event("log", message=f"BGM file missing, skipped: {path}")
             return video.set_audio(source_audio) if source_audio is not getattr(video, "audio", None) else video
 
         bgm = None
         try:
-            emit_event("phase", phase="audio", message="正在混合背景音乐与视频原声", percent=92)
+            emit_event("phase", phase="audio", message="Finalizing audio mix", percent=92)
             bgm = AudioFileClip(str(path))
             if float(getattr(bgm, "duration", 0.0) or 0.0) < duration:
                 bgm = self._loop_audio_to_duration(bgm, duration)
@@ -2403,7 +2404,7 @@ class Renderer:
         except Exception as exc:
             if bgm is not None:
                 close_clip(bgm)
-            emit_event("log", message=f"BGM 混音失败，已保留视频原声继续渲染: {exc}")
+            emit_event("log", message=f"BGM preparation failed: {exc}")
             return video.set_audio(source_audio) if source_audio is not None else video
 
     def _loop_audio_to_duration(self, audio: Any, duration: float):
@@ -2491,7 +2492,7 @@ class Renderer:
 
         source = Path(str(source_path))
         if not source.exists():
-            emit_event("log", message=f"文案背景源不存在，已回退为纯色背景: {source}")
+            emit_event("log", message=f"Preview background source missing, using fallback: {source}")
             return None
 
         suffix = source.suffix.lower()
@@ -2522,7 +2523,7 @@ class Renderer:
                 finally:
                     clip.close()
         except Exception as exc:
-            emit_event("log", message=f"生成文案背景帧失败，已回退为纯色背景: {source.name}: {exc}")
+            emit_event("log", message=f"Fixed image cache failed for {source.name}: {exc}")
 
         return None
 
@@ -2722,7 +2723,7 @@ class Renderer:
             self.proxy_media_stats["hit"] += 1
             return proxy_path
 
-        emit_event("log", message=f"正在生成极速预览代理: {source.name}")
+        emit_event("log", message=f"Creating preview proxy: {source.name}")
         try:
             if is_video:
                 import imageio_ffmpeg
@@ -2744,7 +2745,7 @@ class Renderer:
             return proxy_path
         except Exception as e:
             self.proxy_media_stats["fallback"] += 1
-            emit_event("log", message=f"预览代理生成失败，回退原图: {e}")
+            emit_event("log", message=f"Display normalization probe failed: {e}")
             return source
 
     def _image_clip(
@@ -2876,7 +2877,7 @@ class Renderer:
                 "+faststart",
                 str(normalized),
             ]
-            emit_event("log", message=f"检测到视频显示比例元数据，正在归一化以避免画面拉伸: {source.name}")
+            emit_event("log", message=f"Display normalization required; creating normalized proxy: {source.name}")
             completed = subprocess.run(
                 cmd,
                 capture_output=True,
@@ -2886,9 +2887,9 @@ class Renderer:
             )
             if completed.returncode == 0 and normalized.exists() and normalized.stat().st_size > 1024:
                 return normalized
-            emit_event("log", message=f"视频显示比例归一化失败，回退原始文件: {source.name}: {completed.stderr[-600:]}")
+            emit_event("log", message=f"FFmpeg display normalization failed, falling back to source: {source.name}: {completed.stderr[-600:]}")
         except Exception as exc:
-            emit_event("log", message=f"视频显示比例归一化异常，回退原始文件: {source.name}: {exc}")
+            emit_event("log", message=f"FFmpeg display normalization raised, falling back to source: {source.name}: {exc}")
 
         return source
 
@@ -3069,7 +3070,7 @@ class Renderer:
 
             completed = subprocess.run(build_cmd(selected_encoder, encoder_args), capture_output=True, text=True, encoding="utf-8", errors="replace")
             if completed.returncode != 0 and selected_encoder != "libx264":
-                emit_event("log", message=f"硬件编码 {selected_encoder} 不可用，回退 libx264: {completed.stderr[-600:]}")
+                emit_event("log", message=f"Selected encoder {selected_encoder} failed, falling back to libx264: {completed.stderr[-600:]}")
                 completed = subprocess.run(
                     build_cmd("libx264", ["-preset", "veryfast"]),
                     capture_output=True,
@@ -3084,11 +3085,11 @@ class Renderer:
                 return out
             if track_stats:
                 self.video_segment_cache_stats["fallback"] += 1
-                emit_event("log", message=f"FFmpeg 视频段预适配失败，回退 MoviePy: {source.name}: {completed.stderr[-600:]}")
+                emit_event("log", message=f"FFmpeg fitted segment failed, falling back to MoviePy: {source.name}: {completed.stderr[-600:]}")
         except Exception as exc:
             if track_stats:
                 self.video_segment_cache_stats["fallback"] += 1
-                emit_event("log", message=f"FFmpeg 视频段预适配异常，回退 MoviePy: {source.name}: {exc}")
+                emit_event("log", message=f"FFmpeg fitted segment raised, falling back to MoviePy: {source.name}: {exc}")
 
         try:
             if out.exists():
@@ -3125,7 +3126,7 @@ class Renderer:
         if not base or not base.exists():
             self.video_segment_cache_stats["fallback"] += 1
             self.video_segment_cache_stats["motion_fallback"] += 1
-            emit_event("log", message=f"FFmpeg 视频 motion 预适配失败，回退 MoviePy: {source.name}: base fit unavailable")
+            emit_event("log", message=f"FFmpeg motion fit fallback to MoviePy: {source.name}: base fit unavailable")
             return None
 
         tw, th = self.target_size
@@ -3180,11 +3181,11 @@ class Renderer:
                 return out
             self.video_segment_cache_stats["fallback"] += 1
             self.video_segment_cache_stats["motion_fallback"] += 1
-            emit_event("log", message=f"FFmpeg 视频 motion 预适配失败，回退 MoviePy: {source.name}: {completed.stderr[-600:]}")
+            emit_event("log", message=f"FFmpeg motion fit failed, falling back to MoviePy: {source.name}: {completed.stderr[-600:]}")
         except Exception as exc:
             self.video_segment_cache_stats["fallback"] += 1
             self.video_segment_cache_stats["motion_fallback"] += 1
-            emit_event("log", message=f"FFmpeg 视频 motion 预适配异常，回退 MoviePy: {source.name}: {exc}")
+            emit_event("log", message=f"FFmpeg motion fit raised, falling back to MoviePy: {source.name}: {exc}")
 
         try:
             if out.exists():
@@ -3404,7 +3405,7 @@ def command_scan(args: argparse.Namespace) -> None:
     result = scanner.scan()
     write_json(args.output, result)
     if args.output:
-        emit_event("artifact", artifact="media_library", path=args.output, message="素材库已保存")
+        emit_event("artifact", artifact="media_library", path=args.output, message="media library generated")
 
 
 def command_plan(args: argparse.Namespace) -> None:
@@ -3415,14 +3416,14 @@ def command_plan(args: argparse.Namespace) -> None:
     )
     write_json(args.output, result)
     if args.output:
-        emit_event("artifact", artifact="story_blueprint", path=args.output, message="故事蓝图已保存")
+        emit_event("artifact", artifact="story_blueprint", path=args.output, message="story blueprint generated")
 
 
 def command_compile(args: argparse.Namespace) -> None:
     result = Compiler(read_json(args.blueprint), read_json(args.library)).compile()
     write_json(args.output, result)
     if args.output:
-        emit_event("artifact", artifact="render_plan", path=args.output, message="渲染计划已保存")
+        emit_event("artifact", artifact="render_plan", path=args.output, message="render plan generated")
 
 
 
@@ -3432,22 +3433,22 @@ def command_compile(args: argparse.Namespace) -> None:
 
 def _v56_validate_video(path: Path, min_size: int = 1024) -> Tuple[bool, str, Optional[float]]:
     if not path.exists():
-        return False, "文件不存在", None
+        return False, "video file does not exist", None
     if path.stat().st_size < min_size:
-        return False, f"文件过小: {path.stat().st_size} bytes", None
+        return False, f"video file is too small: {path.stat().st_size} bytes", None
 
     if not HAS_MOVIEPY:
-        return True, "MoviePy 不可用，仅完成大小校验", None
+        return True, "MoviePy unavailable; size check passed", None
 
     clip = None
     try:
         clip = VideoFileClip(str(path))
         duration = float(clip.duration or 0.0)
         if duration <= 0:
-            return False, "视频时长无效", duration
-        return True, "校验通过", duration
+            return False, "video duration is invalid", duration
+        return True, "validation passed", duration
     except Exception as exc:
-        return False, f"视频读取校验失败: {exc}", None
+        return False, f"video validation failed: {exc}", None
     finally:
         if clip is not None:
             close_clip(clip)
@@ -3594,53 +3595,15 @@ def _v56_ensure_silent_audio_track(video_path: Path, duration: Optional[float] =
     )
 
 def _v56_stable_should_force_chunk_audio_track(renderer: Any, segments: List[Dict[str, Any]]) -> bool:
-    settings = getattr(renderer, "audio_settings", {}) or {}
-    if not bool(settings.get("keep_source_audio", True)):
-        return False
-    try:
-        if float(settings.get("source_audio_volume", 1.0)) <= 0:
-            return False
-    except Exception:
-        return False
-
-    for seg in segments:
-        if seg.get("type") != "video" or not renderer._segment_keep_audio(seg):
-            continue
-        source_path = seg.get("source_path")
-        if source_path and video_has_audio_stream(Path(str(source_path))):
-            return True
-    return False
+    return render_diagnostics_helpers._v56_stable_should_force_chunk_audio_track(
+        renderer,
+        segments,
+        video_has_audio_stream_fn=video_has_audio_stream,
+    )
 
 
 def _v56_collect_segment_route_details(segments: List[Dict[str, Any]], limit: int = 200) -> List[Dict[str, Any]]:
-    details: List[Dict[str, Any]] = []
-    for seg in segments[:limit]:
-        static_route = seg.get("render_route")
-        static_reason = seg.get("render_route_reason")
-        static_tags = list(seg.get("render_route_tags") or [])
-        runtime_route = seg.get("runtime_render_route") or static_route
-        runtime_reason = seg.get("runtime_render_route_reason") or static_reason
-        runtime_tags = list(seg.get("runtime_render_route_tags") or static_tags)
-        details.append({
-            "segment_id": seg.get("segment_id"),
-            "type": seg.get("type"),
-            "start_time": seg.get("start_time"),
-            "end_time": seg.get("end_time"),
-            "duration": seg.get("duration"),
-            "route": runtime_route,
-            "reason": runtime_reason,
-            "tags": runtime_tags,
-            "static_route": static_route,
-            "static_reason": static_reason,
-            "static_tags": static_tags,
-            "runtime_route": runtime_route,
-            "runtime_reason": runtime_reason,
-            "runtime_tags": runtime_tags,
-            "has_overlay": bool(seg.get("overlay_text") or seg.get("overlay_subtitle")),
-            "transition": ((seg.get("transition_config") or {}).get("type") or seg.get("transition")),
-            "motion": ((seg.get("motion_config") or {}).get("type") or "none"),
-        })
-    return details
+    return render_diagnostics_helpers._v56_collect_segment_route_details(segments, limit=limit)
 
 
 def _v56_collect_chunk_route_details(
@@ -3648,78 +3611,19 @@ def _v56_collect_chunk_route_details(
     chunk_reports: List[Dict[str, Any]],
     limit: int = 200,
 ) -> List[Dict[str, Any]]:
-    report_by_name = {str(item.get("name") or ""): item for item in chunk_reports}
-    details: List[Dict[str, Any]] = []
-    for group in groups[:limit]:
-        chunk_name = f"chunk_{int(group.get('index') or 0):03d}.mp4"
-        report = report_by_name.get(chunk_name, {})
-        details.append({
-            "name": chunk_name,
-            "index": group.get("index"),
-            "cache_key": group.get("cache_key"),
-            "status": report.get("status"),
-            "duration": report.get("duration"),
-            "route": group.get("runtime_chunk_route"),
-            "reason": group.get("runtime_chunk_route_reason"),
-            "tags": list(group.get("runtime_chunk_route_tags") or []),
-            "route_counts": dict(group.get("runtime_chunk_route_counts") or {}),
-            "segment_count": len(group.get("segments") or []),
-        })
-    return details
+    return render_diagnostics_helpers._v56_collect_chunk_route_details(groups, chunk_reports, limit=limit)
 
 
 def _v56_route_reason_summary(items: List[Dict[str, Any]], route_key: str, reason_key: str) -> Dict[str, Any]:
-    route_counts: Dict[str, int] = {}
-    reason_counts: Dict[str, int] = {}
-    by_route: Dict[str, Dict[str, int]] = {}
-    for item in items:
-        route = str(item.get(route_key) or item.get("route") or "")
-        reason = str(item.get(reason_key) or item.get("reason") or "")
-        if route:
-            route_counts[route] = route_counts.get(route, 0) + 1
-        if reason:
-            reason_counts[reason] = reason_counts.get(reason, 0) + 1
-        if route and reason:
-            route_bucket = by_route.setdefault(route, {})
-            route_bucket[reason] = route_bucket.get(reason, 0) + 1
-    return {
-        "route_counts": route_counts,
-        "reason_counts": reason_counts,
-        "reasons_by_route": by_route,
-    }
+    return render_diagnostics_helpers._v56_route_reason_summary(items, route_key, reason_key)
 
 
 def _v56_top_named_counts(counts: Dict[str, int], limit: int = 5) -> List[Dict[str, Any]]:
-    ranked = sorted(
-        ((str(name), int(count)) for name, count in (counts or {}).items() if count),
-        key=lambda item: (-item[1], item[0]),
-    )
-    return [{"name": name, "count": count} for name, count in ranked[: max(1, int(limit or 5))]]
+    return render_diagnostics_helpers._v56_top_named_counts(counts, limit=limit)
 
 
 def _v56_timing_highlights(timings: Optional[Dict[str, Any]], limit: int = 3) -> Dict[str, Any]:
-    timings = dict(timings or {})
-    numeric_steps: List[Tuple[str, float]] = []
-    for key, value in timings.items():
-        if key == "total_render_seconds":
-            continue
-        if isinstance(value, bool):
-            continue
-        if isinstance(value, (int, float)) and key.endswith("_seconds"):
-            numeric_steps.append((key, round(float(value), 4)))
-    numeric_steps.sort(key=lambda item: (-item[1], item[0]))
-    accounted_seconds = round(sum(seconds for _, seconds in numeric_steps), 4)
-    total_render_seconds = round(float(timings.get("total_render_seconds") or 0.0), 4)
-    return {
-        "top_steps": [
-            {"name": name, "seconds": seconds}
-            for name, seconds in numeric_steps[: max(1, int(limit or 3))]
-        ],
-        "measured_step_count": len(numeric_steps),
-        "accounted_seconds": accounted_seconds,
-        "total_render_seconds": total_render_seconds,
-        "unaccounted_seconds": round(max(0.0, total_render_seconds - accounted_seconds), 4),
-    }
+    return render_diagnostics_helpers._v56_timing_highlights(timings, limit=limit)
 
 
 def _v56_cache_efficiency_entry(
@@ -3729,27 +3633,12 @@ def _v56_cache_efficiency_entry(
     created_keys: Tuple[str, ...] = ("created",),
     fallback_keys: Tuple[str, ...] = ("fallback",),
 ) -> Dict[str, Any]:
-    raw = dict(stats or {})
-    eligible = int(raw.get("eligible") or 0)
-    hits = sum(int(raw.get(key) or 0) for key in hit_keys)
-    created = sum(int(raw.get(key) or 0) for key in created_keys)
-    fallback = sum(int(raw.get(key) or 0) for key in fallback_keys)
-    payload: Dict[str, Any] = {
-        "eligible": eligible,
-        "hit_count": hits,
-        "created_count": created,
-        "fallback_count": fallback,
-        "raw": raw,
-    }
-    if eligible > 0:
-        payload["hit_rate"] = round(hits / float(eligible), 4)
-        payload["created_rate"] = round(created / float(eligible), 4)
-        payload["fallback_rate"] = round(fallback / float(eligible), 4)
-    else:
-        payload["hit_rate"] = None
-        payload["created_rate"] = None
-        payload["fallback_rate"] = None
-    return payload
+    return render_diagnostics_helpers._v56_cache_efficiency_entry(
+        stats,
+        hit_keys=hit_keys,
+        created_keys=created_keys,
+        fallback_keys=fallback_keys,
+    )
 
 
 def _v56_fast_path_coverage(
@@ -3760,56 +3649,17 @@ def _v56_fast_path_coverage(
     reason_key: str = "reason",
     limit: int = 5,
 ) -> Dict[str, Any]:
-    fast_route_set = set(str(route) for route in fast_routes)
-    total = len(items)
-    fast_path_count = 0
-    slow_reason_counts: Dict[str, int] = {}
-    slow_route_counts: Dict[str, int] = {}
-    for item in items:
-        route = str(item.get(route_key) or item.get("route") or "")
-        if route in fast_route_set:
-            fast_path_count += 1
-            continue
-        if route:
-            slow_route_counts[route] = slow_route_counts.get(route, 0) + 1
-        reason = str(item.get(reason_key) or item.get("reason") or "")
-        if reason:
-            slow_reason_counts[reason] = slow_reason_counts.get(reason, 0) + 1
-    non_fast_path_count = max(0, total - fast_path_count)
-    return {
-        "total": total,
-        "fast_path_count": fast_path_count,
-        "non_fast_path_count": non_fast_path_count,
-        "fast_path_rate": round(fast_path_count / float(total), 4) if total > 0 else None,
-        "top_non_fast_path_routes": _v56_top_named_counts(slow_route_counts, limit=limit),
-        "top_non_fast_path_reasons": _v56_top_named_counts(slow_reason_counts, limit=limit),
-    }
+    return render_diagnostics_helpers._v56_fast_path_coverage(
+        items,
+        fast_routes=fast_routes,
+        route_key=route_key,
+        reason_key=reason_key,
+        limit=limit,
+    )
 
 
 def _v56_route_difference_summary(items: List[Dict[str, Any]], limit: int = 5) -> Dict[str, Any]:
-    total = len(items)
-    changed_count = 0
-    change_counts: Dict[str, int] = {}
-    runtime_reason_counts: Dict[str, int] = {}
-    for item in items:
-        static_route = str(item.get("static_route") or "")
-        runtime_route = str(item.get("runtime_route") or item.get("route") or "")
-        if not static_route or not runtime_route or static_route == runtime_route:
-            continue
-        changed_count += 1
-        change_key = f"{static_route}->{runtime_route}"
-        change_counts[change_key] = change_counts.get(change_key, 0) + 1
-        runtime_reason = str(item.get("runtime_reason") or item.get("reason") or "")
-        if runtime_reason:
-            runtime_reason_counts[runtime_reason] = runtime_reason_counts.get(runtime_reason, 0) + 1
-    return {
-        "total": total,
-        "changed_count": changed_count,
-        "unchanged_count": max(0, total - changed_count),
-        "changed_rate": round(changed_count / float(total), 4) if total > 0 else None,
-        "top_changes": _v56_top_named_counts(change_counts, limit=limit),
-        "top_runtime_reasons": _v56_top_named_counts(runtime_reason_counts, limit=limit),
-    }
+    return render_diagnostics_helpers._v56_route_difference_summary(items, limit=limit)
 
 
 def _v56_observability_summary(
@@ -3819,52 +3669,12 @@ def _v56_observability_summary(
     chunk_route_details: List[Dict[str, Any]],
     timings: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    params = getattr(renderer, "params", {}) or {}
-    render_settings = getattr(renderer, "plan", {}).get("render_settings", {}) or {}
-    backend_payload = _v56_backend_report_payload(
-        getattr(renderer, "backend_execution", None) or getattr(renderer, "backend_decision", None)
+    return render_diagnostics_helpers._v56_observability_summary(
+        renderer,
+        segment_route_details=segment_route_details,
+        chunk_route_details=chunk_route_details,
+        timings=timings,
     )
-    return {
-        "backend_resolution": {
-            **backend_payload,
-            "render_mode": params.get("render_mode") or render_settings.get("render_mode") or "auto",
-            "performance_mode": params.get("performance_mode") or render_settings.get("performance_mode"),
-            "preview": bool(params.get("preview")),
-        },
-        "timing_highlights": _v56_timing_highlights(timings or getattr(renderer, "last_render_timings", {}) or {}),
-        "cache_efficiency": {
-            "visual_base_cache": _v56_cache_efficiency_entry(
-                getattr(renderer, "visual_base_cache_stats", {}) or {},
-                hit_keys=("hit", "chunk_hit"),
-            ),
-            "photo_segment_cache": _v56_cache_efficiency_entry(
-                renderer._photo_segment_cache_summary() if hasattr(renderer, "_photo_segment_cache_summary") else {}
-            ),
-            "card_segment_cache": _v56_cache_efficiency_entry(
-                renderer._card_segment_cache_summary() if hasattr(renderer, "_card_segment_cache_summary") else {}
-            ),
-            "video_segment_cache": _v56_cache_efficiency_entry(
-                renderer._video_segment_cache_summary() if hasattr(renderer, "_video_segment_cache_summary") else {}
-            ),
-            "proxy_media": _v56_cache_efficiency_entry(
-                renderer._proxy_media_summary() if hasattr(renderer, "_proxy_media_summary") else {},
-                hit_keys=("hit", "manifest_hit"),
-            ),
-        },
-        "fast_path_coverage": {
-            "segments": _v56_fast_path_coverage(
-                segment_route_details,
-                fast_routes=("photo_prerender", "direct_chunk_candidate", "video_fit", "video_motion_fit"),
-            ),
-            "chunks": _v56_fast_path_coverage(
-                chunk_route_details,
-                fast_routes=("ffmpeg_direct_chunk", "ffmpeg_fitted_video_chunk", "ffmpeg_card_chunk", "ffmpeg_image_chunk"),
-            ),
-        },
-        "route_differences": {
-            "segments": _v56_route_difference_summary(segment_route_details),
-        },
-    }
 
 
 def _v56_report_summary_fields(
@@ -3873,53 +3683,15 @@ def _v56_report_summary_fields(
     *,
     render_intent: str,
 ) -> Dict[str, Any]:
-    observability = dict((diagnostics or {}).get("observability") or {})
-    fast_path_coverage = dict(observability.get("fast_path_coverage") or {})
-    segment_fast_path = dict(fast_path_coverage.get("segments") or {})
-    chunk_fast_path = dict(fast_path_coverage.get("chunks") or {})
-    route_differences = dict((observability.get("route_differences") or {}).get("segments") or {})
-    return {
-        "render_intent": render_intent,
-        "actual_backend": backend_payload.get("actual_backend_name"),
-        "backend_reason": backend_payload.get("reason"),
-        "fallback_chain": list(backend_payload.get("fallback_chain") or []),
-        "fallback_used": backend_payload.get("fallback_used"),
-        "fallback_reason": backend_payload.get("fallback_reason"),
-        "fallback_applied": bool(backend_payload.get("fallback_applied")),
-        "segment_fast_path_rate": segment_fast_path.get("fast_path_rate"),
-        "chunk_fast_path_rate": chunk_fast_path.get("fast_path_rate"),
-        "segment_route_difference_count": int(route_differences.get("changed_count") or 0),
-        "segment_route_difference_rate": route_differences.get("changed_rate"),
-    }
+    return render_diagnostics_helpers._v56_report_summary_fields(
+        backend_payload,
+        diagnostics,
+        render_intent=render_intent,
+    )
 
 
 def _v56_classify_render_failure(error: Any, stage: str) -> Dict[str, Any]:
-    message = str(error or "")
-    lowered = message.lower()
-    code = f"{stage}_failed"
-    if "concat" in lowered:
-        code = "concat_failed"
-    elif "audio" in lowered or "混合" in message:
-        code = "audio_mix_failed"
-    elif "validate" in lowered or "校验" in message:
-        code = "output_validation_failed"
-    elif "moviepy" in lowered and ("not installed" in lowered or "不可用" in message):
-        code = "missing_moviepy_dependency"
-    elif "ffmpeg" in lowered:
-        code = "ffmpeg_failed"
-    elif "unknown render backend" in lowered:
-        code = "unknown_backend"
-
-    retryable = stage in {"chunk_render", "concat", "audio_mix", "finalize", "output_validate"}
-    if code in {"missing_moviepy_dependency", "unknown_backend"}:
-        retryable = False
-
-    return {
-        "stage": stage,
-        "code": code,
-        "retryable": retryable,
-        "message": message,
-    }
+    return render_diagnostics_helpers._v56_classify_render_failure(error, stage)
 
 
 def _v56_build_recovery_summary(
@@ -3932,21 +3704,15 @@ def _v56_build_recovery_summary(
     resumed_from_manifest: bool = False,
     reused_chunk_count: int = 0,
 ) -> Dict[str, Any]:
-    manifest_chunks = ((manifest or {}).get("chunks") or {}) if isinstance(manifest, dict) else {}
-    done_chunks = sum(1 for item in manifest_chunks.values() if item.get("status") == "done")
-    failed_chunks = sum(1 for item in manifest_chunks.values() if item.get("status") == "failed")
-    return {
-        "resumable": True,
-        "resumed_from_manifest": bool(resumed_from_manifest or failed_chunks or reused_chunk_count),
-        "manifest_path": str(manifest_path) if manifest_path else None,
-        "reused_chunk_count": reused_chunk_count,
-        "completed_chunk_count": done_chunks,
-        "failed_chunk_count": failed_chunks,
-        "reported_chunk_count": len(chunk_reports),
-        "failed_chunk": failed_chunk,
-        "failure": dict(failure or {}),
-    }
-
+    return render_diagnostics_helpers._v56_build_recovery_summary(
+        manifest,
+        chunk_reports=chunk_reports,
+        failed_chunk=failed_chunk,
+        failure=failure,
+        manifest_path=manifest_path,
+        resumed_from_manifest=resumed_from_manifest,
+        reused_chunk_count=reused_chunk_count,
+    )
 
 def _v56_safe_apply_final_bgm_mix(*args: Any, **kwargs: Any) -> Tuple[bool, Optional[Exception]]:
     try:
@@ -3962,64 +3728,15 @@ def _v56_render_diagnostics(
     force_chunk_audio_track: bool,
     timings: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    settings = getattr(renderer, "audio_settings", {}) or {}
-    selected_encoder, encoder_args = select_ffmpeg_video_encoder(getattr(renderer, "params", {}) or {})
-    cached = sum(1 for item in chunk_reports if item.get("status") == "cached")
-    rendered = sum(1 for item in chunk_reports if item.get("status") == "rendered")
-    segments = getattr(renderer, "plan", {}).get("segments", []) or []
-    source_paths = []
-    for seg in segments:
-        source_path = seg.get("source_path")
-        if source_path:
-            source_paths.append(source_path)
-    segment_route_details = _v56_collect_segment_route_details(segments)
-    chunk_route_details = _v56_collect_chunk_route_details(groups, chunk_reports)
-    return {
-        "strategy_version": "render_diagnostics_v2",
-        "backend": _v56_backend_report_payload(
-            getattr(renderer, "backend_execution", None) or getattr(renderer, "backend_decision", None)
-        ),
-        "chunk_reuse": {
-            "cached": cached,
-            "rendered": rendered,
-            "total": len(groups),
-        },
-        "smart_invalidation": {
-            "enabled": True,
-            "keys": ["engine_version", "render_params", "source_path", "file_size", "mtime_ns"],
-            "fingerprinted_source_count": len(set(source_paths)),
-        },
-        "audio_mix": {
-            "music_mode": settings.get("music_mode"),
-            "keep_source_audio": bool(settings.get("keep_source_audio", True)),
-            "source_audio_volume": settings.get("source_audio_volume"),
-            "bgm_volume": settings.get("bgm_volume"),
-            "auto_ducking": bool(settings.get("auto_ducking", True)),
-            "normalize_audio": bool(settings.get("normalize_audio", False)),
-            "target_lufs": settings.get("target_lufs"),
-            "force_chunk_audio_track": bool(force_chunk_audio_track),
-        },
-        "encoding": {
-            "selected_video_encoder": selected_encoder,
-            "selected_video_encoder_args": encoder_args,
-            "default_hardware_auto": _should_default_to_hardware_encoding(getattr(renderer, "params", {}) or {}),
-        },
-        "proxy_media": renderer._proxy_media_summary() if hasattr(renderer, "_proxy_media_summary") else {},
-        "routing": {
-            "segments": _v56_route_reason_summary(segment_route_details, "route", "reason"),
-            "chunks": _v56_route_reason_summary(chunk_route_details, "route", "reason"),
-            "segment_details": segment_route_details,
-            "chunk_details": chunk_route_details,
-        },
-        "timings": dict(timings or getattr(renderer, "last_render_timings", {}) or {}),
-        "observability": _v56_observability_summary(
-            renderer,
-            segment_route_details=segment_route_details,
-            chunk_route_details=chunk_route_details,
-            timings=timings,
-        ),
-    }
-
+    return render_diagnostics_helpers._v56_render_diagnostics(
+        renderer,
+        groups,
+        chunk_reports,
+        force_chunk_audio_track,
+        timings,
+        select_video_encoder_fn=select_ffmpeg_video_encoder,
+        should_default_to_hardware_encoding_fn=_should_default_to_hardware_encoding,
+    )
 
 def _v56_write_chunk_video(
     renderer: Any,
@@ -4069,7 +3786,7 @@ def _v56_write_chunk_video(
             emit_event(
                 "phase",
                 phase="render",
-                message=f"渲染分段 {chunk['index'] + 1}: {seg.get('type')} {seg.get('text') or ''}",
+                message=f"Rendering chunk {chunk['index'] + 1}: {seg.get('type')} {seg.get('text') or ''}",
                 percent=min(94, 10 + chunk["index"]),
             )
             clip = renderer._segment(seg)
@@ -4078,7 +3795,7 @@ def _v56_write_chunk_video(
                 rendered_segments.append(seg)
 
         if not clips:
-            raise RuntimeError(f"chunk_{chunk['index']:03d} 没有可渲染 clip")
+            raise RuntimeError(f"chunk_{chunk['index']:03d} has no renderable clip")
 
         combined = renderer._compose_timeline(clips, rendered_segments)
         crf = quality_to_crf(params.get("quality") or params.get("python_quality") or "high")
@@ -4094,7 +3811,7 @@ def _v56_write_chunk_video(
 
         ok, reason, _duration = _v56_validate_video(tmp_chunk)
         if not ok:
-            raise RuntimeError(f"chunk 校验失败: {reason}")
+            raise RuntimeError(f"chunk validation failed: {reason}")
 
         if ensure_audio_track and not _v56_ensure_silent_audio_track(tmp_chunk, _duration):
             raise RuntimeError("failed to ensure audio-ready stable chunk")
@@ -4149,7 +3866,11 @@ def _v56_backend_report_payload(
     fallback_used: Optional[str] = None,
     fallback_reason: Optional[str] = None,
 ) -> Dict[str, Any]:
-    return backend_report_payload(decision, fallback_used=fallback_used, fallback_reason=fallback_reason)
+    return render_diagnostics_helpers._v56_backend_report_payload(
+        decision,
+        fallback_used=fallback_used,
+        fallback_reason=fallback_reason,
+    )
 
 
 class V56StableRenderer:
@@ -4257,7 +3978,7 @@ class V56StableRenderer:
 
     def render(self) -> None:
         if not HAS_MOVIEPY:
-            raise RuntimeError("MoviePy 不可用，无法渲染视频")
+            raise RuntimeError("MoviePy unavailable; stable renderer cannot render video")
 
         started_at = datetime.now()
         tmp_output = self.output.with_suffix(".rendering.tmp.mp4")
@@ -4297,7 +4018,7 @@ class V56StableRenderer:
         emit_event(
             "phase",
             phase="render",
-            message=f"启用 V5.6 长视频稳定模式：{len(groups)} 个分段，每段约 {int(self.chunk_seconds)} 秒",
+            message=f"Using V5.6 stable render mode: {len(groups)} chunks, {int(self.chunk_seconds)} seconds each",
             percent=8,
         )
 
@@ -4315,7 +4036,7 @@ class V56StableRenderer:
             ok, reason, duration = _v56_validate_video(chunk_path)
             if existing.get("cache_key") == key and existing.get("status") == "done" and ok:
                 reused_chunk_count += 1
-                emit_event("phase", phase="render", message=f"复用已完成分段 {chunk_name}", percent=min(94, 10 + int((idx / max(len(groups), 1)) * 80)))
+                emit_event("phase", phase="render", message=f"Reusing cached chunk {chunk_name}", percent=min(94, 10 + int((idx / max(len(groups), 1)) * 80)))
                 rendered_chunks.append(chunk_path)
                 chunk_reports.append({
                     "name": chunk_name,
@@ -4395,7 +4116,7 @@ class V56StableRenderer:
                 raise
 
         if False and not rendered_chunks:
-            raise RuntimeError("没有成功渲染任何分段")
+            raise RuntimeError("stable render produced no successful chunks")
 
         if not rendered_chunks:
             exc = RuntimeError("stable render produced no successful chunks")
@@ -4469,7 +4190,7 @@ class V56StableRenderer:
                 reused_chunk_count=reused_chunk_count,
             )
             raise exc
-            raise RuntimeError(f"最终视频校验失败，不覆盖旧文件: {reason}")
+            raise RuntimeError(f"chunk validation failed after render: {reason}")
 
         mixed_output = tmp_output.with_suffix(".audio.tmp.mp4")
         final_mix_started = perf_counter()
@@ -4527,7 +4248,7 @@ class V56StableRenderer:
                     reused_chunk_count=reused_chunk_count,
                 )
                 raise exc
-                raise RuntimeError(f"最终视频音频混合后校验失败，不覆盖旧文件: {reason}")
+                raise RuntimeError(f"final output validation failed after concat: {reason}")
 
         timings["final_audio_mix_seconds"] = round(perf_counter() - final_mix_started, 4)
         timings["final_audio_mix_applied"] = audio_mix_applied
@@ -4586,7 +4307,7 @@ class V56StableRenderer:
             "created_at": datetime.now().isoformat(),
         }
         _v56_write_build_report(self.report_path, report)
-        emit_event("phase", phase="done", message="长视频稳定渲染完成", percent=100)
+        emit_event("phase", phase="done", message="Stable render complete", percent=100)
 
 
 def _v56_run_render_backend(
@@ -4815,7 +4536,7 @@ def command_preview_title(args: argparse.Namespace) -> None:
 
     renderer = TitleStyleRenderer(target_size)
     bg = preview_background(target_size, args.background or "travel")
-    text_img = renderer.render_layer(args.title or "章节标题", args.subtitle or None, style, is_full_card=True)
+    text_img = renderer.render_layer(args.title or "Title preview", args.subtitle or None, style, is_full_card=True)
     bg_clip = ImageClip(np.array(bg)).set_duration(duration)
     text_clip = ImageClip(np.array(text_img), ismask=False).set_duration(duration)
     text_clip = renderer.animate(text_clip, style.get("motion", "fade_slide_up"), duration)

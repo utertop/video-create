@@ -44,6 +44,10 @@
   - FFmpeg concat/re-encode helpers
   - stable chunk fast-path writers for direct/video/card/image routes
   - final BGM muxing and silent audio-track muxing helpers
+- `video_engine/render_diagnostics.py`
+  - render diagnostics and observability summaries
+  - route detail collection and fast-path coverage summaries
+  - failure classification and resumable recovery report helpers
 - `video_engine/audio.py`
   - audio probing and normalized-audio cache helpers
   - auto music scoring and playlist selection
@@ -58,6 +62,6 @@
 
 ## Next Safe Steps
 
-1. Split render diagnostics/report helpers after route/cache/FFmpeg helpers are isolated.
-2. Move scan proxy manifest helpers into a small proxy/cache module if render reuse grows.
-3. Start shrinking `Renderer` by moving small, hook-light methods before moving the class itself.
+1. Move scan proxy manifest helpers into a small proxy/cache module if render reuse grows.
+2. Start shrinking `Renderer` by moving small, hook-light methods before moving the class itself.
+3. Split image/video prerender cache methods once proxy boundaries are clearer.
