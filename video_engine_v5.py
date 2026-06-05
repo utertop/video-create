@@ -19,7 +19,6 @@ Design goals:
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import math
 import os
@@ -92,6 +91,7 @@ from video_engine.plan import (
 from video_engine.compile import Compiler, set_compile_event_emitter
 from video_engine import render_diagnostics as render_diagnostics_helpers
 from video_engine import render_ffmpeg as render_ffmpeg_helpers
+from video_engine import render_proxy as render_proxy_helpers
 from video_engine.render_routes import (
     _is_image_heavy_visual_mix,
     _should_auto_use_stable_renderer,
@@ -448,30 +448,7 @@ def close_clip(clip: Any) -> None:
 
 
 def video_needs_display_normalization(source: Path) -> bool:
-    """Detect mp4 files whose encoded size differs from display geometry.
-
-    MoviePy 1.0.x often trusts encoded width/height and can miss sample aspect
-    ratio or rotation metadata. Those files need an FFmpeg normalization pass
-    before composition, otherwise they can look stretched in the final timeline.
-    """
-    try:
-        import imageio_ffmpeg
-
-        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
-        completed = subprocess.run(
-            [ffmpeg, "-hide_banner", "-i", str(source)],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
-        probe_text = completed.stderr or ""
-        lower = probe_text.lower()
-        if "displaymatrix" in lower or "rotate" in lower or "rotation of" in lower:
-            return True
-        return bool(re.search(r"\bSAR\s+(?!1:1\b)\d+:\d+", probe_text))
-    except Exception:
-        return False
+    return render_proxy_helpers.video_needs_display_normalization(source)
 
 
 def video_has_audio_stream(source: Path) -> bool:
@@ -508,33 +485,14 @@ def write_json(path: Optional[str], data: Dict[str, Any]) -> None:
 
 
 def _normalize_proxy_manifest(source: Any) -> Dict[str, Dict[str, Any]]:
-    if not isinstance(source, dict):
-        return {}
-    assets = source.get("assets")
-    if not isinstance(assets, dict):
-        return {}
-    normalized: Dict[str, Dict[str, Any]] = {}
-    for key, entry in assets.items():
-        if not isinstance(entry, dict):
-            continue
-        abs_path = str(entry.get("source_path") or key or "")
-        if not abs_path:
-            continue
-        normalized[abs_path] = entry
-    return normalized
+    return render_proxy_helpers.normalize_proxy_manifest(source)
 
 
 def _load_proxy_manifest_from_library_path(library_path: Optional[str]) -> Dict[str, Dict[str, Any]]:
-    if not library_path:
-        return {}
-    path = Path(str(library_path))
-    if not path.is_file():
-        return {}
-    try:
-        library = read_json(str(path))
-    except Exception:
-        return {}
-    return _normalize_proxy_manifest(library.get("proxy_media_manifest"))
+    return render_proxy_helpers.load_proxy_manifest_from_library_path(
+        library_path,
+        read_json_fn=read_json,
+    )
 
 
 def _guess_sibling_library_path(plan_path: Optional[str]) -> Optional[Path]:
@@ -1917,24 +1875,10 @@ class Renderer:
         emit_event("video_cache", **video_cache)
 
     def _proxy_media_summary(self) -> Dict[str, int]:
-        return dict(self.proxy_media_stats)
+        return render_proxy_helpers.proxy_media_summary(self)
 
     def _emit_proxy_media_summary(self) -> None:
-        proxy_cache = self._proxy_media_summary()
-        if proxy_cache["eligible"] <= 0:
-            return
-        emit_event(
-            "log",
-            message=(
-                "Proxy media summary: "
-                f"eligible={proxy_cache['eligible']}, "
-                f"hit={proxy_cache['hit']}, "
-                f"manifest_hit={proxy_cache['manifest_hit']}, "
-                f"created={proxy_cache['created']}, "
-                f"fallback={proxy_cache['fallback']}"
-            ),
-        )
-        emit_event("proxy_cache", **proxy_cache)
+        render_proxy_helpers.emit_proxy_media_summary(self, emit_event_fn=emit_event)
 
     def _prepare_music_path(self) -> Optional[Path]:
         paths = self._prepare_music_paths()
@@ -2687,66 +2631,16 @@ class Renderer:
         return _v56_image_overlay_cache_spec(seg, duration)
 
     def _get_proxy_source(self, source: Path, is_video: bool) -> Path:
-        use_proxy = bool(
-            self.params.get("preview")
-            or self.params.get("proxy_media")
-            or self.params.get("use_proxy_media")
-            or self.params.get("optimized_media") == "proxy"
+        return render_proxy_helpers.get_proxy_source(
+            self,
+            source,
+            is_video,
+            engine_version=ENGINE_VERSION,
+            scan_proxy_profile=SCAN_PROXY_PROFILE,
+            emit_event_fn=emit_event,
+            image_cls=Image,
+            image_ops=ImageOps,
         )
-        if not use_proxy:
-            return source
-
-        proxy_dir = self.render_cache_dir.parent / "proxies"
-        proxy_dir.mkdir(parents=True, exist_ok=True)
-
-        tw, th = self.target_size
-        self.proxy_media_stats["eligible"] += 1
-        manifest_entry = self.proxy_media_manifest.get(str(source.resolve())) or self.proxy_media_manifest.get(str(source))
-        if manifest_entry:
-            profiles = manifest_entry.get("profiles") or {}
-            profile = profiles.get(str(SCAN_PROXY_PROFILE["name"])) if isinstance(profiles, dict) else None
-            proxy_path_value = profile.get("path") if isinstance(profile, dict) else None
-            if proxy_path_value:
-                manifest_proxy_path = Path(str(proxy_path_value))
-                if manifest_proxy_path.is_file():
-                    self.proxy_media_stats["manifest_hit"] += 1
-                    self.proxy_media_stats["hit"] += 1
-                    return manifest_proxy_path
-
-        proxy_key = f"{ENGINE_VERSION}|{source.resolve()}|{source.stat().st_mtime_ns}|{source.stat().st_size}|{tw}x{th}|video={is_video}"
-        proxy_hash = hashlib.md5(proxy_key.encode()).hexdigest()
-
-        ext = ".mp4" if is_video else ".jpg"
-        proxy_path = proxy_dir / f"proxy_{proxy_hash}{ext}"
-
-        if proxy_path.exists():
-            self.proxy_media_stats["hit"] += 1
-            return proxy_path
-
-        emit_event("log", message=f"Creating preview proxy: {source.name}")
-        try:
-            if is_video:
-                import imageio_ffmpeg
-
-                cmd = [
-                    imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-i", str(source),
-                    "-vf", f"scale='min({tw},iw)':'min({th},ih)':force_original_aspect_ratio=decrease",
-                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
-                    "-c:a", "copy",
-                    str(proxy_path)
-                ]
-                subprocess.run(cmd, check=True, capture_output=True)
-            else:
-                with Image.open(source) as img:
-                    img = ImageOps.exif_transpose(img).convert("RGB")
-                    img.thumbnail((tw, th), Image.Resampling.LANCZOS)
-                    img.save(proxy_path, quality=85)
-            self.proxy_media_stats["created"] += 1
-            return proxy_path
-        except Exception as e:
-            self.proxy_media_stats["fallback"] += 1
-            emit_event("log", message=f"Display normalization probe failed: {e}")
-            return source
 
     def _image_clip(
         self,
@@ -2839,59 +2733,12 @@ class Renderer:
         return final
 
     def _normalize_video_display_geometry(self, source: Path) -> Path:
-        if not video_needs_display_normalization(source):
-            return source
-
-        normalized = self._cache_path("normalized_videos", source, ".mp4", "display_geometry_v1")
-        if normalized.exists():
-            return normalized
-
-        try:
-            import imageio_ffmpeg
-
-            ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
-            cmd = [
-                ffmpeg,
-                "-y",
-                "-i",
-                str(source),
-                "-vf",
-                "scale=trunc(iw*sar/2)*2:trunc(ih/2)*2,setsar=1",
-                "-map",
-                "0:v:0",
-                "-map",
-                "0:a?",
-                "-c:v",
-                "libx264",
-                "-preset",
-                "veryfast",
-                "-crf",
-                "18",
-                "-pix_fmt",
-                "yuv420p",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "160k",
-                "-movflags",
-                "+faststart",
-                str(normalized),
-            ]
-            emit_event("log", message=f"Display normalization required; creating normalized proxy: {source.name}")
-            completed = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-            )
-            if completed.returncode == 0 and normalized.exists() and normalized.stat().st_size > 1024:
-                return normalized
-            emit_event("log", message=f"FFmpeg display normalization failed, falling back to source: {source.name}: {completed.stderr[-600:]}")
-        except Exception as exc:
-            emit_event("log", message=f"FFmpeg display normalization raised, falling back to source: {source.name}: {exc}")
-
-        return source
+        return render_proxy_helpers.normalize_video_display_geometry(
+            self,
+            source,
+            emit_event_fn=emit_event,
+            needs_display_normalization_fn=video_needs_display_normalization,
+        )
 
     def _video_overlay_fitted_safe(self, seg: Dict[str, Any]) -> bool:
         text = seg.get("overlay_text")
