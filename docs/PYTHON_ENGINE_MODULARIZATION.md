@@ -32,6 +32,18 @@
   - `Compiler` class for `compile -> render_plan.json`
   - render scheduler hints and segment route assignment
   - audio blueprint timeline adoption into render settings
+- `video_engine/render_routes.py`
+  - pure render route classifiers
+  - stable-render auto-selection helpers
+  - FFmpeg image/card/video chunk candidate checks
+- `video_engine/render_cache.py`
+  - stable render cache key builders
+  - source fingerprint and chunk grouping helpers
+  - atomic replace and build report writing
+- `video_engine/render_ffmpeg.py`
+  - FFmpeg concat/re-encode helpers
+  - stable chunk fast-path writers for direct/video/card/image routes
+  - final BGM muxing and silent audio-track muxing helpers
 - `video_engine/audio.py`
   - audio probing and normalized-audio cache helpers
   - auto music scoring and playlist selection
@@ -46,6 +58,6 @@
 
 ## Next Safe Steps
 
-1. Move render route/helper functions into `video_engine/render_routes.py`.
-2. Move render cache key builders and FFmpeg command builders before moving the `Renderer` class.
-3. Move scan proxy manifest helpers into a small proxy/cache module if render reuse grows.
+1. Split render diagnostics/report helpers after route/cache/FFmpeg helpers are isolated.
+2. Move scan proxy manifest helpers into a small proxy/cache module if render reuse grows.
+3. Start shrinking `Renderer` by moving small, hook-light methods before moving the class itself.

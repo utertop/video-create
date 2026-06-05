@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 Video Create Studio V5 Engine
 
@@ -90,6 +90,29 @@ from video_engine.plan import (
     set_plan_event_emitter,
 )
 from video_engine.compile import Compiler, set_compile_event_emitter
+from video_engine import render_ffmpeg as render_ffmpeg_helpers
+from video_engine.render_routes import (
+    _is_image_heavy_visual_mix,
+    _should_auto_use_stable_renderer,
+    _visual_segment_mix,
+    _v56_chunk_route_family,
+    _v56_image_overlay_cache_spec,
+    _v56_is_ffmpeg_card_chunk_candidate,
+    _v56_is_ffmpeg_fitted_video_chunk_route,
+    _v56_is_ffmpeg_image_chunk_candidate,
+    _v56_resolved_card_style,
+)
+from video_engine.render_cache import (
+    _v56_atomic_replace,
+    _v56_build_chunk_groups,
+    _v56_chunk_visual_audio_payload,
+    _v56_segment_cache_key,
+    _v56_segment_source_fingerprints,
+    _v56_source_fingerprint,
+    _v56_stable_json_hash,
+    _v56_write_build_report,
+    set_render_cache_event_emitter,
+)
 
 
 # V5.3.2 early help guard
@@ -189,6 +212,7 @@ set_audio_event_emitter(emit_event)
 set_scan_event_emitter(emit_event)
 set_plan_event_emitter(emit_event)
 set_compile_event_emitter(emit_event)
+set_render_cache_event_emitter(emit_event)
 
 
 class JsonMoviePyLogger(ProgressBarLogger):  # type: ignore[misc]
@@ -522,158 +546,6 @@ def _guess_sibling_library_path(plan_path: Optional[str]) -> Optional[Path]:
     candidate = parent / "media_library.json"
     return candidate if candidate.is_file() else None
 
-
-def _visual_segment_mix(segments: List[Dict[str, Any]]) -> Dict[str, int]:
-    visual_segments = [seg for seg in segments if str(seg.get("type") or "") in {"image", "video"}]
-    image_count = sum(1 for seg in visual_segments if str(seg.get("type") or "") == "image")
-    video_count = sum(1 for seg in visual_segments if str(seg.get("type") or "") == "video")
-    return {
-        "visual_count": len(visual_segments),
-        "image_count": image_count,
-        "video_count": video_count,
-    }
-
-
-def _is_image_heavy_visual_mix(segments: List[Dict[str, Any]], min_visual_count: int = 12) -> bool:
-    mix = _visual_segment_mix(segments)
-    visual_count = int(mix["visual_count"])
-    if visual_count < min_visual_count:
-        return False
-    image_ratio = float(mix["image_count"]) / float(max(1, visual_count))
-    return image_ratio >= float(STABLE_RENDER_DEFAULTS["image_heavy_ratio"])
-
-
-def _should_auto_use_stable_renderer(
-    total_duration: float,
-    segments: List[Dict[str, Any]],
-    params: Dict[str, Any],
-) -> bool:
-    segment_count = len(segments)
-    stable_threshold_seconds = float(params.get("stable_threshold_seconds", STABLE_RENDER_DEFAULTS["seconds"]))
-    stable_threshold_segments = int(params.get("stable_threshold_segments", STABLE_RENDER_DEFAULTS["segments"]))
-    image_heavy_seconds = float(
-        params.get("stable_image_heavy_threshold_seconds", STABLE_RENDER_DEFAULTS["image_heavy_seconds"])
-    )
-    image_heavy_segments = int(
-        params.get("stable_image_heavy_threshold_segments", STABLE_RENDER_DEFAULTS["image_heavy_segments"])
-    )
-    if _is_image_heavy_visual_mix(segments) and (
-        total_duration >= image_heavy_seconds or segment_count >= image_heavy_segments
-    ):
-        return True
-    return total_duration >= stable_threshold_seconds or segment_count >= stable_threshold_segments
-
-
-def _v56_image_overlay_cache_spec(seg: Dict[str, Any], duration: float) -> Optional[Dict[str, Any]]:
-    text = seg.get("overlay_text")
-    if not text:
-        return None
-    subtitle = seg.get("overlay_subtitle")
-    overlay_duration = min(float(seg.get("overlay_duration") or 1.8), float(duration or 1.8))
-    style = dict(seg.get("overlay_title_style") or {})
-    motion = str(style.get("motion") or "fade_slide_up")
-    position = str(style.get("position") or "lower_left")
-    if motion not in {"fade_slide_up", "editorial_fade", "static_hold", "lower_third_slide", "cinematic_reveal", "postcard_drift"}:
-        return None
-    if position not in {"lower_left", "lower_center", "center"}:
-        return None
-    if len(str(text)) > 42 or len(str(subtitle or "")) > 64:
-        return None
-    if overlay_duration > min(3.2, float(duration or 0.0)):
-        return None
-    return {
-        "text": str(text),
-        "subtitle": str(subtitle) if subtitle else None,
-        "duration": round(overlay_duration, 3),
-        "style": style,
-    }
-
-
-def _v56_is_ffmpeg_image_chunk_candidate(
-    seg: Dict[str, Any],
-    params: Optional[Dict[str, Any]] = None,
-) -> bool:
-    params = params or {}
-    if bool(params.get("preview")):
-        return False
-    if str(seg.get("type") or "") != "image":
-        return False
-    if not seg.get("source_path"):
-        return False
-    transition = seg.get("transition_config") or {}
-    transition_type = str(transition.get("type") or seg.get("transition") or "none")
-    transition_duration = float(transition.get("duration") or 0.0)
-    if transition_type not in {"none", "cut"} or transition_duration > 0.05:
-        return False
-    motion_type = str((seg.get("motion_config") or {}).get("type") or "none")
-    if motion_type not in {"none", "still_hold", "gentle_push", "slow_push"}:
-        return False
-    if seg.get("overlay_text"):
-        return _v56_image_overlay_cache_spec(seg, float(seg.get("duration") or 0.0)) is not None
-    return True
-
-
-def _v56_resolved_card_style(seg: Dict[str, Any], params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    params = params or {}
-    stype = str(seg.get("type") or "")
-    if stype == "title":
-        style = params.get("title_style") or seg.get("title_style") or {}
-        return dict(style)
-    if stype == "end":
-        style = params.get("end_title_style") or seg.get("title_style") or {}
-        return dict(style)
-    return dict(seg.get("title_style") or {})
-
-
-def _v56_is_ffmpeg_card_chunk_candidate(
-    seg: Dict[str, Any],
-    params: Optional[Dict[str, Any]] = None,
-) -> bool:
-    params = params or {}
-    if bool(params.get("preview")):
-        return False
-    if str(seg.get("type") or "") not in {"title", "chapter", "end"}:
-        return False
-    transition = seg.get("transition_config") or {}
-    transition_type = str(transition.get("type") or seg.get("transition") or "none")
-    transition_duration = float(transition.get("duration") or 0.0)
-    if transition_type not in {"none", "cut"} or transition_duration > 0.05:
-        return False
-    motion = str(_v56_resolved_card_style(seg, params).get("motion") or "fade_slide_up")
-    return motion == "static_hold"
-
-
-def _v56_is_ffmpeg_fitted_video_chunk_route(route: str) -> bool:
-    return str(route or "") in {"video_fit", "video_motion_fit"}
-
-
-def _v56_chunk_route_family(
-    seg: Dict[str, Any],
-    params: Optional[Dict[str, Any]] = None,
-) -> str:
-    route = str(seg.get("runtime_render_route") or seg.get("render_route") or "moviepy_required")
-    if route == "direct_chunk_candidate":
-        return "direct"
-    if _v56_is_ffmpeg_fitted_video_chunk_route(route):
-        return "video"
-    if _v56_is_ffmpeg_card_chunk_candidate(seg, params):
-        return "card"
-    if _v56_is_ffmpeg_image_chunk_candidate(seg, params):
-        return "image"
-    return "timeline"
-
-
-# =========================
-# Data models
-# =========================
-
-# =========================
-# scan -> media_library.json
-# =========================
-
-# =========================
-# plan -> story_blueprint.json
-# =========================
 
 class TitleStyleRenderer:
     """V5.5 Template-driven Text Animation Engine."""
@@ -3558,185 +3430,6 @@ def command_compile(args: argparse.Namespace) -> None:
 # V5.6 long-video stability renderer
 # =========================
 
-def _v56_stable_json_hash(data: Any) -> str:
-    raw = json.dumps(data, ensure_ascii=False, sort_keys=True, default=str)
-    return hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()
-
-
-def _v56_source_fingerprint(path_value: Any) -> Optional[Dict[str, Any]]:
-    if not path_value:
-        return None
-    path = Path(str(path_value))
-    payload: Dict[str, Any] = {
-        "path": str(path.resolve()) if path.exists() else str(path),
-        "exists": path.exists(),
-    }
-    if path.exists():
-        try:
-            stat = path.stat()
-            payload.update({
-                "size": int(stat.st_size),
-                "mtime_ns": int(stat.st_mtime_ns),
-            })
-        except Exception as exc:
-            payload["stat_error"] = str(exc)
-    return payload
-
-
-def _v56_segment_source_fingerprints(seg: Dict[str, Any]) -> Dict[str, Any]:
-    paths = {
-        "source_path": seg.get("source_path"),
-        "background_source_path": seg.get("background_source_path"),
-        "background_source_path_2": seg.get("background_source_path_2"),
-    }
-    return {
-        name: fingerprint
-        for name, value in paths.items()
-        for fingerprint in [_v56_source_fingerprint(value)]
-        if fingerprint is not None
-    }
-
-
-def _v56_chunk_visual_audio_payload(params: Dict[str, Any]) -> Dict[str, Any]:
-    audio = params.get("audio")
-    if not isinstance(audio, dict):
-        audio = {}
-    return {
-        "keep_source_audio": bool(audio.get("keep_source_audio", True)),
-        "source_audio_volume": audio.get("source_audio_volume"),
-        "normalize_audio": bool(audio.get("normalize_audio", False)),
-        "target_lufs": audio.get("target_lufs"),
-    }
-
-
-def _v56_segment_cache_key(seg: Dict[str, Any], params: Dict[str, Any]) -> str:
-    stable = {
-        "engine_version": ENGINE_VERSION,
-        "segment_id": seg.get("segment_id"),
-        "type": seg.get("type"),
-        "source_path": seg.get("source_path"),
-        "asset_id": seg.get("asset_id"),
-        "duration": seg.get("duration"),
-        "text": seg.get("text"),
-        "subtitle": seg.get("subtitle"),
-        "background_mode": seg.get("background_mode"),
-        "background_source_path": seg.get("background_source_path"),
-        "background_source_path_2": seg.get("background_source_path_2"),
-        "source_fingerprints": _v56_segment_source_fingerprints(seg),
-        "overlay_text": seg.get("overlay_text"),
-        "title_style": seg.get("title_style"),
-        "overlay_title_style": seg.get("overlay_title_style"),
-        "params_title_style": params.get("title_style") if seg.get("type") == "title" else None,
-        "params_end_title_style": params.get("end_title_style") if seg.get("type") == "end" else None,
-        "transition_config": seg.get("transition_config"),
-        "motion_config": seg.get("motion_config"),
-        "rhythm_config": seg.get("rhythm_config"),
-        "keep_audio": seg.get("keep_audio"),
-        "audio_visual": _v56_chunk_visual_audio_payload(params),
-        "aspect_ratio": params.get("aspect_ratio"),
-        "fps": params.get("fps"),
-        "quality": params.get("quality"),
-        "python_quality": params.get("python_quality"),
-    }
-    return _v56_stable_json_hash(stable)
-
-
-def _v56_build_chunk_groups(
-    segments: List[Dict[str, Any]],
-    chunk_seconds: float,
-    params: Optional[Dict[str, Any]] = None,
-) -> List[Dict[str, Any]]:
-    params = params or {}
-    chunk_seconds = max(float(chunk_seconds or 120), 30.0)
-
-    groups: List[Dict[str, Any]] = []
-    current: List[Dict[str, Any]] = []
-    current_duration = 0.0
-    current_keys: List[str] = []
-
-    def chunk_route_payload(items: List[Dict[str, Any]]) -> Dict[str, Any]:
-        routes = [str(seg.get("runtime_render_route") or seg.get("render_route") or "moviepy_required") for seg in items]
-        route_counts: Dict[str, int] = {}
-        for route in routes:
-            route_counts[route] = route_counts.get(route, 0) + 1
-        if items and all(route == "direct_chunk_candidate" for route in routes):
-            return {
-                "runtime_chunk_route": "ffmpeg_direct_chunk",
-                "runtime_chunk_route_reason": "all_segments_direct_chunk_safe",
-                "runtime_chunk_route_tags": ["ffmpeg", "chunk", "direct"],
-                "runtime_chunk_route_counts": route_counts,
-            }
-        if items and all(_v56_is_ffmpeg_fitted_video_chunk_route(route) for route in routes):
-            return {
-                "runtime_chunk_route": "ffmpeg_fitted_video_chunk",
-                "runtime_chunk_route_reason": "all_segments_ffmpeg_fitted_video_safe",
-                "runtime_chunk_route_tags": ["ffmpeg", "chunk", "video_fit"],
-                "runtime_chunk_route_counts": route_counts,
-            }
-        if items and all(_v56_is_ffmpeg_card_chunk_candidate(seg, params) for seg in items):
-            return {
-                "runtime_chunk_route": "ffmpeg_card_chunk",
-                "runtime_chunk_route_reason": "all_segments_ffmpeg_card_chunk_safe",
-                "runtime_chunk_route_tags": ["ffmpeg", "chunk", "card"],
-                "runtime_chunk_route_counts": route_counts,
-            }
-        if items and all(_v56_is_ffmpeg_image_chunk_candidate(seg, params) for seg in items):
-            return {
-                "runtime_chunk_route": "ffmpeg_image_chunk",
-                "runtime_chunk_route_reason": "all_segments_ffmpeg_image_chunk_safe",
-                "runtime_chunk_route_tags": ["ffmpeg", "chunk", "image"],
-                "runtime_chunk_route_counts": route_counts,
-            }
-        if any(route in {"moviepy_required", "image_live_compose", "photo_prerender"} for route in routes):
-            reason = "contains_timeline_or_image_segments"
-        elif any(route in {"video_fit", "video_motion_fit"} for route in routes):
-            reason = "contains_video_timeline_segments"
-        else:
-            reason = "default_timeline_chunk"
-        return {
-            "runtime_chunk_route": "moviepy_chunk",
-            "runtime_chunk_route_reason": reason,
-            "runtime_chunk_route_tags": ["moviepy", "chunk", "timeline"],
-            "runtime_chunk_route_counts": route_counts,
-        }
-
-    for seg in segments:
-        duration = float(seg.get("duration") or 0.0)
-        route_family = _v56_chunk_route_family(seg, params)
-        
-        if current:
-            current_family = _v56_chunk_route_family(current[0], params)
-            time_exceeded = (current_duration + duration > chunk_seconds)
-            route_changed = (current_family != route_family)
-            
-            if time_exceeded or route_changed:
-                groups.append({
-                    "index": len(groups),
-                    "segments": current,
-                    "duration": round(current_duration, 3),
-                    "cache_key": _v56_stable_json_hash(current_keys),
-                    **chunk_route_payload(current),
-                })
-                current = []
-                current_duration = 0.0
-                current_keys = []
-
-        current.append(seg)
-        current_duration += duration
-        current_keys.append(_v56_segment_cache_key(seg, params))
-
-    if current:
-        groups.append({
-            "index": len(groups),
-            "segments": current,
-            "duration": round(current_duration, 3),
-            "cache_key": _v56_stable_json_hash(current_keys),
-            **chunk_route_payload(current),
-        })
-
-    return groups
-
-
 def _v56_validate_video(path: Path, min_size: int = 1024) -> Tuple[bool, str, Optional[float]]:
     if not path.exists():
         return False, "文件不存在", None
@@ -3760,56 +3453,13 @@ def _v56_validate_video(path: Path, min_size: int = 1024) -> Tuple[bool, str, Op
             close_clip(clip)
 
 
-def _v56_atomic_replace(tmp_path: Path, final_path: Path) -> None:
-    ensure_parent(final_path)
-    if final_path.exists():
-        final_path.unlink()
-    os.replace(str(tmp_path), str(final_path))
-
-
-def _v56_write_build_report(report_path: Path, report: Dict[str, Any]) -> None:
-    try:
-        ensure_parent(report_path)
-        with report_path.open("w", encoding="utf-8") as f:
-            json.dump(report, f, ensure_ascii=False, indent=2)
-    except Exception as exc:
-        emit_event("log", message=f"写入 build_report.json 失败: {exc}")
-
-
 def _v56_concat_chunks_ffmpeg(chunks: List[Path], tmp_output: Path, project_dir: Path) -> bool:
-    if not chunks:
-        raise RuntimeError("没有可拼接的 chunk 文件")
-
-    concat_list = project_dir / "concat_list.txt"
-    resolved_output = tmp_output.resolve()
-    with concat_list.open("w", encoding="utf-8", newline="\n") as f:
-        for chunk in chunks:
-            escaped = chunk.resolve().as_posix().replace("'", r"'\''")
-            f.write(f"file '{escaped}'\n")
-
-    try:
-        import subprocess
-        import imageio_ffmpeg
-
-        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
-        cmd = [
-            ffmpeg,
-            "-y",
-            "-f", "concat",
-            "-safe", "0",
-            "-i", str(concat_list.resolve()),
-            "-c", "copy",
-            str(resolved_output),
-        ]
-        emit_event("phase", phase="concat", message="使用 FFmpeg 快速拼接分段视频", percent=96)
-        completed = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
-        if completed.returncode == 0 and resolved_output.exists() and resolved_output.stat().st_size > 1024:
-            return True
-        emit_event("log", message=f"FFmpeg concat copy 失败，准备回退 MoviePy: {completed.stderr[-800:]}")
-        return False
-    except Exception as exc:
-        emit_event("log", message=f"FFmpeg concat 不可用，准备回退 MoviePy: {exc}")
-        return False
+    return render_ffmpeg_helpers._v56_concat_chunks_ffmpeg(
+        chunks,
+        tmp_output,
+        project_dir,
+        emit_event_fn=emit_event,
+    )
 
 
 def _v56_concat_chunks_ffmpeg_reencode(
@@ -3819,95 +3469,34 @@ def _v56_concat_chunks_ffmpeg_reencode(
     fps: int,
     params: Dict[str, Any],
 ) -> bool:
-    if not chunks:
-        raise RuntimeError("missing chunks for ffmpeg reencode concat")
-
-    concat_list = project_dir / "concat_reencode_list.txt"
-    resolved_output = tmp_output.resolve()
-    with concat_list.open("w", encoding="utf-8", newline="\n") as f:
-        for chunk in chunks:
-            escaped = chunk.resolve().as_posix().replace("'", r"'\''")
-            f.write(f"file '{escaped}'\n")
-
-    try:
-        import imageio_ffmpeg
-
-        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
-        selected_encoder, encoder_args = select_ffmpeg_video_encoder(params)
-        cmd = [
-            ffmpeg,
-            "-y",
-            "-f",
-            "concat",
-            "-safe",
-            "0",
-            "-i",
-            str(concat_list.resolve()),
-            "-r",
-            str(int(fps or 30)),
-            "-pix_fmt",
-            "yuv420p",
-            "-movflags",
-            "+faststart",
-            "-c:v",
-            selected_encoder,
-        ]
-        cmd += encoder_args
-        if selected_encoder == "libx264":
-            cmd += ["-crf", quality_to_crf(params.get("quality") or params.get("python_quality") or "high")]
-        else:
-            cmd += ["-b:v", "8M"]
-        cmd += [
-            "-c:a",
-            "aac",
-            "-b:a",
-            "160k",
-            "-ar",
-            "48000",
-            "-ac",
-            "2",
-            str(resolved_output),
-        ]
-        emit_event("phase", phase="concat", message="ä½¿ç”¨ FFmpeg é‡ç¼–ç åˆå¹¶åˆ†æ®µè§†é¢‘", percent=96)
-        completed = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
-        if completed.returncode == 0 and resolved_output.exists() and resolved_output.stat().st_size > 1024:
-            return True
-        emit_event("log", message=f"FFmpeg concat reencode failed, fallback to MoviePy: {completed.stderr[-800:]}")
-        return False
-    except Exception as exc:
-        emit_event("log", message=f"FFmpeg concat reencode raised, fallback to MoviePy: {exc}")
-        return False
-    finally:
-        try:
-            if concat_list.exists():
-                concat_list.unlink()
-        except Exception:
-            pass
+    return render_ffmpeg_helpers._v56_concat_chunks_ffmpeg_reencode(
+        chunks,
+        tmp_output,
+        project_dir,
+        fps,
+        params,
+        emit_event_fn=emit_event,
+        quality_to_crf_fn=quality_to_crf,
+        select_video_encoder_fn=select_ffmpeg_video_encoder,
+    )
 
 
 def _v56_concat_chunks_moviepy(chunks: List[Path], tmp_output: Path, fps: int, params: Dict[str, Any]) -> None:
-    emit_event("phase", phase="concat", message="使用 MoviePy 回退拼接分段视频", percent=96)
-    clips = []
-    final = None
-    try:
-        for chunk in chunks:
-            clips.append(VideoFileClip(str(chunk)))
-        final = concatenate_videoclips(clips, method="compose")
-        crf = quality_to_crf(params.get("quality") or params.get("python_quality") or "high")
-        final.write_videofile(
-            str(tmp_output),
-            fps=fps,
-            codec="libx264",
-            audio_codec="aac",
-            preset="veryfast",
-            ffmpeg_params=["-crf", crf, "-pix_fmt", "yuv420p", "-movflags", "+faststart"],
-            logger=JsonMoviePyLogger(base_percent=96, span_percent=3),
-        )
-    finally:
-        if final is not None:
-            close_clip(final)
-        for clip in clips:
-            close_clip(clip)
+    return render_ffmpeg_helpers._v56_concat_chunks_moviepy(
+        chunks,
+        tmp_output,
+        fps,
+        params,
+        emit_event_fn=emit_event,
+        quality_to_crf_fn=quality_to_crf,
+        close_clip_fn=close_clip,
+        video_file_clip_cls=VideoFileClip,
+        concatenate_videoclips_fn=concatenate_videoclips,
+        logger_factory=lambda base_percent, span_percent: JsonMoviePyLogger(
+            base_percent=base_percent,
+            span_percent=span_percent,
+        ),
+    )
 
 
 def _v56_apply_final_bgm_mix(
@@ -3918,95 +3507,16 @@ def _v56_apply_final_bgm_mix(
     prepared_bgm_path: Optional[Path] = None,
     prepared_bgm_is_bed: bool = False,
 ) -> bool:
-    music_mode = str(audio_settings.get("music_mode") or "off")
-    music_path = audio_settings.get("music_path")
-    if music_mode == "off" or not music_path:
-        return False
-
-    bgm_path = prepared_bgm_path or Path(str(music_path))
-    if not bgm_path.exists():
-        emit_event("log", message=f"BGM 文件不存在，稳定模式已跳过背景音乐: {bgm_path}")
-        return False
-
-    video_duration = max(0.1, float(duration or 0.0))
-    bgm_volume = float(audio_settings.get("bgm_volume", 0.28))
-    if bgm_volume <= 0:
-        return False
-
-    keep_source = bool(audio_settings.get("keep_source_audio", True))
-    source_has_audio = keep_source and video_has_audio_stream(input_video)
-    if bool(audio_settings.get("auto_ducking", True)) and source_has_audio:
-        bgm_volume = min(bgm_volume, float(audio_settings.get("duck_bgm_volume", 0.16)))
-
-    fade_in = min(float(audio_settings.get("fade_in_seconds", 0.0)), video_duration / 2.0)
-    fade_out = min(float(audio_settings.get("fade_out_seconds", 0.0)), video_duration / 2.0)
-
-    bgm_filters = [f"volume={bgm_volume:.4f}"]
-    if fade_in > 0:
-        bgm_filters.append(f"afade=t=in:st=0:d={fade_in:.3f}")
-    if fade_out > 0:
-        fade_start = max(0.0, video_duration - fade_out)
-        bgm_filters.append(f"afade=t=out:st={fade_start:.3f}:d={fade_out:.3f}")
-    bgm_filters.extend([
-        "aresample=48000",
-        f"atrim=0:{video_duration:.3f}",
-        "asetpts=N/SR/TB",
-    ])
-
-    if source_has_audio:
-        filter_complex = (
-            f"[1:a]{','.join(bgm_filters)}[bgm];"
-            "[0:a:0]aresample=48000[src];"
-            "[src][bgm]amix=inputs=2:duration=first:dropout_transition=0[mix]"
-        )
-    else:
-        filter_complex = f"[1:a]{','.join(bgm_filters)}[mix]"
-
-    try:
-        import imageio_ffmpeg
-
-        cmd = [
-            imageio_ffmpeg.get_ffmpeg_exe(),
-            "-y",
-            "-i",
-            str(input_video),
-        ]
-        if not prepared_bgm_is_bed:
-            cmd.extend(["-stream_loop", "-1"])
-        cmd.extend([
-            "-i",
-            str(bgm_path),
-            "-filter_complex",
-            filter_complex,
-            "-map",
-            "0:v:0",
-            "-map",
-            "[mix]",
-            "-c:v",
-            "copy",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "160k",
-            "-shortest",
-            "-movflags",
-            "+faststart",
-            str(output_video),
-        ])
-        emit_event("phase", phase="audio", message="稳定模式：使用 FFmpeg 流式混合背景音乐", percent=97)
-        completed = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
-        if completed.returncode == 0 and output_video.exists() and output_video.stat().st_size > 1024:
-            return True
-        emit_event("log", message=f"稳定模式 BGM 混音失败，保留无 BGM 结果: {completed.stderr[-800:]}")
-    except Exception as exc:
-        emit_event("log", message=f"稳定模式 BGM 混音异常，保留无 BGM 结果: {exc}")
-
-    try:
-        if output_video.exists():
-            output_video.unlink()
-    except Exception:
-        pass
-    return False
+    return render_ffmpeg_helpers._v56_apply_final_bgm_mix(
+        input_video,
+        output_video,
+        audio_settings,
+        duration,
+        prepared_bgm_path=prepared_bgm_path,
+        prepared_bgm_is_bed=prepared_bgm_is_bed,
+        emit_event_fn=emit_event,
+        video_has_audio_stream_fn=video_has_audio_stream,
+    )
 
 
 def _v56_try_write_ffmpeg_direct_chunk(
@@ -4015,85 +3525,14 @@ def _v56_try_write_ffmpeg_direct_chunk(
     tmp_chunk: Path,
     params: Dict[str, Any],
 ) -> bool:
-    segments = chunk.get("segments") or []
-    if not segments:
-        return False
-    if str(chunk.get("runtime_chunk_route") or "") not in {"", "ffmpeg_direct_chunk"}:
-        return False
-
-    sources: List[Path] = []
-    for seg in segments:
-        source_path = seg.get("source_path")
-        if not source_path:
-            return False
-        source = Path(source_path)
-        seg_route = str(seg.get("runtime_render_route") or seg.get("render_route") or "")
-        if seg_route and seg_route != "direct_chunk_candidate":
-            return False
-        if not source.exists() or not renderer._can_use_ffmpeg_direct_chunk_segment(seg):
-            return False
-        sources.append(source)
-
-    if hasattr(renderer, "_segment_keep_audio"):
-        keep_audio_flags = [bool(renderer._segment_keep_audio(seg)) for seg in segments]
-    else:
-        keep_audio_flags = [bool(seg.get("keep_audio", True)) for seg in segments]
-    needs_audio_track = any(keep_audio_flags)
-    fitted_segments: List[Path] = []
-    for seg, source, keep_audio in zip(segments, sources, keep_audio_flags):
-        fitted = renderer._ffmpeg_fit_video_segment(
-            source,
-            float(seg.get("duration") or 0.1),
-            keep_audio=keep_audio,
-            force_audio_track=needs_audio_track,
-        )
-        if not fitted or not fitted.exists():
-            return False
-        fitted_segments.append(fitted)
-
-    concat_list = tmp_chunk.with_suffix(".concat.txt")
-    try:
-        with concat_list.open("w", encoding="utf-8", newline="\n") as f:
-            for fitted in fitted_segments:
-                escaped = fitted.resolve().as_posix().replace("'", r"'\''")
-                f.write(f"file '{escaped}'\n")
-
-        import imageio_ffmpeg
-
-        cmd = [
-            imageio_ffmpeg.get_ffmpeg_exe(),
-            "-y",
-            "-f",
-            "concat",
-            "-safe",
-            "0",
-            "-i",
-            str(concat_list),
-            "-c",
-            "copy",
-            "-movflags",
-            "+faststart",
-            str(tmp_chunk),
-        ]
-        emit_event("phase", phase="render", message=f"使用 FFmpeg 直出轻量分段 {chunk['index'] + 1}", percent=min(94, 10 + chunk["index"]))
-        completed = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
-        if completed.returncode != 0:
-            emit_event("log", message=f"FFmpeg chunk 直出失败，回退 MoviePy: {completed.stderr[-800:]}")
-            return False
-        ok, reason, _duration = _v56_validate_video(tmp_chunk)
-        if not ok:
-            emit_event("log", message=f"FFmpeg chunk 直出校验失败，回退 MoviePy: {reason}")
-            return False
-        return True
-    except Exception as exc:
-        emit_event("log", message=f"FFmpeg chunk 直出异常，回退 MoviePy: {exc}")
-        return False
-    finally:
-        try:
-            if concat_list.exists():
-                concat_list.unlink()
-        except Exception:
-            pass
+    return render_ffmpeg_helpers._v56_try_write_ffmpeg_direct_chunk(
+        renderer,
+        chunk,
+        tmp_chunk,
+        params,
+        emit_event_fn=emit_event,
+        validate_video_fn=_v56_validate_video,
+    )
 
 
 def _v56_try_write_ffmpeg_image_chunk(
@@ -4102,90 +3541,16 @@ def _v56_try_write_ffmpeg_image_chunk(
     tmp_chunk: Path,
     params: Dict[str, Any],
 ) -> bool:
-    segments = chunk.get("segments") or []
-    if not segments:
-        return False
-    if str(chunk.get("runtime_chunk_route") or "") not in {"", "ffmpeg_image_chunk"}:
-        return False
-
-    rendered_segments: List[Path] = []
-    for seg in segments:
-        source_path = seg.get("source_path")
-        if not source_path:
-            return False
-        source = Path(str(source_path))
-        if not source.exists() or not renderer._can_use_ffmpeg_image_chunk_segment(seg):
-            return False
-        render_source = renderer._get_proxy_source(source, is_video=False)
-        fixed = renderer._cache_path("fixed_images", render_source, ".jpg", "exif_rgb_v1")
-        if not fixed.exists():
-            with Image.open(render_source) as img:
-                img = ImageOps.exif_transpose(img).convert("RGB")
-                img.save(fixed, quality=95)
-        duration = float(seg.get("duration") or 0.1)
-        overlay_spec = renderer._image_overlay_cache_spec(seg, duration)
-        if overlay_spec:
-            prerendered = renderer._prerender_image_segment(
-                render_source,
-                fixed,
-                duration,
-                seg.get("motion_config"),
-                overlay_spec=overlay_spec,
-            )
-        else:
-            prerendered = renderer._ffmpeg_prerender_image_segment(
-                render_source,
-                fixed,
-                duration,
-                seg.get("motion_config"),
-            )
-        if not prerendered or not prerendered.exists():
-            return False
-        rendered_segments.append(prerendered)
-
-    concat_list = tmp_chunk.with_suffix(".concat.txt")
-    try:
-        with concat_list.open("w", encoding="utf-8", newline="\n") as f:
-            for rendered in rendered_segments:
-                escaped = rendered.resolve().as_posix().replace("'", r"'\''")
-                f.write(f"file '{escaped}'\n")
-
-        import imageio_ffmpeg
-
-        cmd = [
-            imageio_ffmpeg.get_ffmpeg_exe(),
-            "-y",
-            "-f",
-            "concat",
-            "-safe",
-            "0",
-            "-i",
-            str(concat_list),
-            "-c",
-            "copy",
-            "-movflags",
-            "+faststart",
-            str(tmp_chunk),
-        ]
-        emit_event("phase", phase="render", message=f"FFmpeg image chunk {chunk['index'] + 1}", percent=min(94, 10 + chunk["index"]))
-        completed = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
-        if completed.returncode != 0:
-            emit_event("log", message=f"FFmpeg image chunk fallback to MoviePy: {completed.stderr[-800:]}")
-            return False
-        ok, reason, _duration = _v56_validate_video(tmp_chunk)
-        if not ok:
-            emit_event("log", message=f"FFmpeg image chunk validation fallback to MoviePy: {reason}")
-            return False
-        return True
-    except Exception as exc:
-        emit_event("log", message=f"FFmpeg image chunk raised, fallback to MoviePy: {exc}")
-        return False
-    finally:
-        try:
-            if concat_list.exists():
-                concat_list.unlink()
-        except Exception:
-            pass
+    return render_ffmpeg_helpers._v56_try_write_ffmpeg_image_chunk(
+        renderer,
+        chunk,
+        tmp_chunk,
+        params,
+        emit_event_fn=emit_event,
+        validate_video_fn=_v56_validate_video,
+        image_cls=Image,
+        image_ops=ImageOps,
+    )
 
 
 def _v56_try_write_ffmpeg_fitted_video_chunk(
@@ -4194,77 +3559,14 @@ def _v56_try_write_ffmpeg_fitted_video_chunk(
     tmp_chunk: Path,
     params: Dict[str, Any],
 ) -> bool:
-    segments = chunk.get("segments") or []
-    if not segments:
-        return False
-    if str(chunk.get("runtime_chunk_route") or "") not in {"", "ffmpeg_fitted_video_chunk"}:
-        return False
-
-    rendered_segments: List[Path] = []
-    for seg in segments:
-        source_path = seg.get("source_path")
-        if not source_path:
-            return False
-        source = Path(str(source_path))
-        if not source.exists() or not renderer._can_use_ffmpeg_fitted_video(seg):
-            return False
-        duration = float(seg.get("duration") or 0.1)
-        keep_audio = renderer._segment_keep_audio(seg) if hasattr(renderer, "_segment_keep_audio") else bool(seg.get("keep_audio", True))
-        motion_spec = renderer._ffmpeg_video_motion_cache_spec(seg.get("motion_config"))
-        if motion_spec is not None:
-            base = renderer._ffmpeg_fit_motion_video_segment(source, duration, motion_spec, keep_audio=keep_audio)
-        else:
-            base = renderer._ffmpeg_fit_video_segment(source, duration, keep_audio=keep_audio)
-        if not base or not base.exists():
-            return False
-        prepared = renderer._prerender_safe_video_overlay_segment(base, seg, duration)
-        if not prepared or not prepared.exists():
-            return False
-        rendered_segments.append(prepared)
-
-    concat_list = tmp_chunk.with_suffix(".concat.txt")
-    try:
-        with concat_list.open("w", encoding="utf-8", newline="\n") as f:
-            for rendered in rendered_segments:
-                escaped = rendered.resolve().as_posix().replace("'", r"'\''")
-                f.write(f"file '{escaped}'\n")
-
-        import imageio_ffmpeg
-
-        cmd = [
-            imageio_ffmpeg.get_ffmpeg_exe(),
-            "-y",
-            "-f",
-            "concat",
-            "-safe",
-            "0",
-            "-i",
-            str(concat_list),
-            "-c",
-            "copy",
-            "-movflags",
-            "+faststart",
-            str(tmp_chunk),
-        ]
-        emit_event("phase", phase="render", message=f"使用 FFmpeg 拼接轻量视频分段 {chunk['index'] + 1}", percent=min(94, 10 + chunk["index"]))
-        completed = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
-        if completed.returncode != 0:
-            emit_event("log", message=f"FFmpeg 轻量视频分段拼接失败，回退 MoviePy: {completed.stderr[-800:]}")
-            return False
-        ok, reason, _duration = _v56_validate_video(tmp_chunk)
-        if not ok:
-            emit_event("log", message=f"FFmpeg 轻量视频分段校验失败，回退 MoviePy: {reason}")
-            return False
-        return True
-    except Exception as exc:
-        emit_event("log", message=f"FFmpeg 轻量视频分段异常，回退 MoviePy: {exc}")
-        return False
-    finally:
-        try:
-            if concat_list.exists():
-                concat_list.unlink()
-        except Exception:
-            pass
+    return render_ffmpeg_helpers._v56_try_write_ffmpeg_fitted_video_chunk(
+        renderer,
+        chunk,
+        tmp_chunk,
+        params,
+        emit_event_fn=emit_event,
+        validate_video_fn=_v56_validate_video,
+    )
 
 
 def _v56_try_write_ffmpeg_card_chunk(
@@ -4273,117 +3575,23 @@ def _v56_try_write_ffmpeg_card_chunk(
     tmp_chunk: Path,
     params: Dict[str, Any],
 ) -> bool:
-    segments = chunk.get("segments") or []
-    if not segments:
-        return False
-    if str(chunk.get("runtime_chunk_route") or "") not in {"", "ffmpeg_card_chunk"}:
-        return False
-
-    rendered_segments: List[Path] = []
-    for seg in segments:
-        if not renderer._can_use_ffmpeg_card_chunk_segment(seg):
-            return False
-        prerendered = renderer._prerender_card_segment(seg, float(seg.get("duration") or 0.1))
-        if not prerendered or not prerendered.exists():
-            return False
-        rendered_segments.append(prerendered)
-
-    concat_list = tmp_chunk.with_suffix(".concat.txt")
-    try:
-        with concat_list.open("w", encoding="utf-8", newline="\n") as f:
-            for rendered in rendered_segments:
-                escaped = rendered.resolve().as_posix().replace("'", r"'\''")
-                f.write(f"file '{escaped}'\n")
-
-        import imageio_ffmpeg
-
-        cmd = [
-            imageio_ffmpeg.get_ffmpeg_exe(),
-            "-y",
-            "-f",
-            "concat",
-            "-safe",
-            "0",
-            "-i",
-            str(concat_list),
-            "-c",
-            "copy",
-            "-movflags",
-            "+faststart",
-            str(tmp_chunk),
-        ]
-        emit_event("phase", phase="render", message=f"FFmpeg card chunk {chunk['index'] + 1}", percent=min(94, 10 + chunk["index"]))
-        completed = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
-        if completed.returncode != 0:
-            emit_event("log", message=f"FFmpeg card chunk fallback to MoviePy: {completed.stderr[-800:]}")
-            return False
-        ok, reason, _duration = _v56_validate_video(tmp_chunk)
-        if not ok:
-            emit_event("log", message=f"FFmpeg card chunk validation fallback to MoviePy: {reason}")
-            return False
-        return True
-    except Exception as exc:
-        emit_event("log", message=f"FFmpeg card chunk raised, fallback to MoviePy: {exc}")
-        return False
-    finally:
-        try:
-            if concat_list.exists():
-                concat_list.unlink()
-        except Exception:
-            pass
+    return render_ffmpeg_helpers._v56_try_write_ffmpeg_card_chunk(
+        renderer,
+        chunk,
+        tmp_chunk,
+        params,
+        emit_event_fn=emit_event,
+        validate_video_fn=_v56_validate_video,
+    )
 
 
 def _v56_ensure_silent_audio_track(video_path: Path, duration: Optional[float] = None) -> bool:
-    """Ensure chunk files all expose an AAC track so FFmpeg concat keeps audio streams."""
-    if not video_path.exists() or video_has_audio_stream(video_path):
-        return True
-
-    audio_tmp = video_path.with_suffix(".audio-track.tmp.mp4")
-    video_duration = max(0.1, float(duration or 0.0))
-    try:
-        import imageio_ffmpeg
-
-        cmd = [
-            imageio_ffmpeg.get_ffmpeg_exe(),
-            "-y",
-            "-i",
-            str(video_path),
-            "-f",
-            "lavfi",
-            "-t",
-            f"{video_duration:.3f}",
-            "-i",
-            "anullsrc=channel_layout=stereo:sample_rate=48000",
-            "-map",
-            "0:v:0",
-            "-map",
-            "1:a:0",
-            "-c:v",
-            "copy",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "160k",
-            "-shortest",
-            "-movflags",
-            "+faststart",
-            str(audio_tmp),
-        ]
-        completed = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
-        if completed.returncode == 0 and audio_tmp.exists() and audio_tmp.stat().st_size > 1024:
-            os.replace(str(audio_tmp), str(video_path))
-            return video_has_audio_stream(video_path)
-        emit_event("log", message=f"Stable chunk silent audio mux failed: {completed.stderr[-800:]}")
-    except Exception as exc:
-        emit_event("log", message=f"Stable chunk silent audio mux raised: {exc}")
-    finally:
-        try:
-            if audio_tmp.exists():
-                audio_tmp.unlink()
-        except Exception:
-            pass
-    return False
-
+    return render_ffmpeg_helpers._v56_ensure_silent_audio_track(
+        video_path,
+        duration,
+        emit_event_fn=emit_event,
+        video_has_audio_stream_fn=video_has_audio_stream,
+    )
 
 def _v56_stable_should_force_chunk_audio_track(renderer: Any, segments: List[Dict[str, Any]]) -> bool:
     settings = getattr(renderer, "audio_settings", {}) or {}
