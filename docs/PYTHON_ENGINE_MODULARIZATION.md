@@ -20,6 +20,22 @@
   - scan-adjacent pure helpers
   - directory recognition constants and `detect_directory_type()`
   - natural sorting, ignored-file checks, orientation labels, section serialization
+- `video_engine/scan.py`
+  - `Scanner` class for `scan -> media_library.json`
+  - scan proxy profile and scan-time EXIF helper
+  - scan cache cleanup, metadata cache, thumbnails, and proxy generation
+- `video_engine/plan.py`
+  - `Planner` class for `plan -> story_blueprint.json`
+  - template matching profiles and scoring
+  - audio blueprint recommendations
+- `video_engine/compile.py`
+  - `Compiler` class for `compile -> render_plan.json`
+  - render scheduler hints and segment route assignment
+  - audio blueprint timeline adoption into render settings
+- `video_engine/audio.py`
+  - audio probing and normalized-audio cache helpers
+  - auto music scoring and playlist selection
+  - music bed and chapter-restart bed builders
 
 ## Rules
 
@@ -30,7 +46,6 @@
 
 ## Next Safe Steps
 
-1. Move audio-only helpers into `video_engine/audio.py`.
-2. Move `Scanner` into `video_engine/scan.py` after scan helpers are isolated.
-3. Move `Planner` and compile helpers after shared models/constants are stable.
-4. Move render cache key builders and FFmpeg command builders before moving the `Renderer` class.
+1. Move render route/helper functions into `video_engine/render_routes.py`.
+2. Move render cache key builders and FFmpeg command builders before moving the `Renderer` class.
+3. Move scan proxy manifest helpers into a small proxy/cache module if render reuse grows.

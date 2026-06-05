@@ -28,3 +28,10 @@ CACHE_CLEANUP_DEFAULTS_MB = {
     "thumbnails": 256,
 }
 
+STABLE_RENDER_DEFAULTS = {
+    "seconds": 360.0,
+    "segments": 48,
+    "image_heavy_seconds": 240.0,
+    "image_heavy_segments": 30,
+    "image_heavy_ratio": 0.7,
+}
