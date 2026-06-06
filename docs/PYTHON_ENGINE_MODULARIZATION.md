@@ -68,6 +68,18 @@
   - stable chunk write orchestration
   - FFmpeg chunk fast-path wrappers and MoviePy fallback chunk export
   - chunk concat wrappers and silent audio-track enforcement
+- `video_engine/render_finalize.py`
+  - final video validation
+  - final BGM mix wrappers and safe final-mix execution
+  - visual-base copy-through/audio-mix finalize helper
+- `video_engine/render_visual_base.py`
+  - standard visual-base cache keying and summaries
+  - visual timeline materialization and chunked visual-base assembly
+  - transition-aware visual chunk grouping
+- `video_engine/render_cards.py`
+  - title style layer renderer and title animation helpers
+  - title/chapter/end card rendering helpers
+  - overlay title, cover, and title-preview background helpers
 - `video_engine/audio.py`
   - audio probing and normalized-audio cache helpers
   - auto music scoring and playlist selection
@@ -82,6 +94,6 @@
 
 ## Next Safe Steps
 
-1. Move final export/finalize helpers into `render_finalize.py`.
-2. Split stable audio final-mix wrappers once finalize boundaries are stable.
-3. Consider extracting pure visual composition helpers after render cache surfaces settle.
+1. Split image/video clip composition helpers into `render_media_clips.py`.
+2. Move watermark and blur-background helpers once media clip boundaries are stable.
+3. Keep `Renderer.render()` and CLI wrappers in `video_engine_v5.py` until media composition is smaller.

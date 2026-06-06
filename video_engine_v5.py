@@ -90,10 +90,12 @@ from video_engine.plan import (
 from video_engine.compile import Compiler, set_compile_event_emitter
 from video_engine import render_diagnostics as render_diagnostics_helpers
 from video_engine import render_chunks as render_chunks_helpers
-from video_engine import render_ffmpeg as render_ffmpeg_helpers
+from video_engine import render_finalize as render_finalize_helpers
+from video_engine import render_cards as render_cards_helpers
 from video_engine import render_image_cache as render_image_cache_helpers
 from video_engine import render_proxy as render_proxy_helpers
 from video_engine import render_stable as render_stable_helpers
+from video_engine import render_visual_base as render_visual_base_helpers
 from video_engine import render_video_cache as render_video_cache_helpers
 from video_engine.render_routes import (
     _is_image_heavy_visual_mix,
@@ -509,271 +511,18 @@ def _guess_sibling_library_path(plan_path: Optional[str]) -> Optional[Path]:
     return candidate if candidate.is_file() else None
 
 
-class TitleStyleRenderer:
-    """V5.5 Template-driven Text Animation Engine."""
-
+class TitleStyleRenderer(render_cards_helpers.TitleStyleRenderer):
     def __init__(self, target_size: Tuple[int, int]):
-        self.target_size = target_size
-
-    def render_layer(
-        self,
-        title: str,
-        subtitle: Optional[str],
-        style: Dict[str, Any],
-        is_full_card: bool = True
-    ) -> Image.Image:
-        w, h = self.target_size
-        preset = style.get("preset", "cinematic_bold")
-        preset_aliases = {
-            "nature_documentary": "documentary_lower_third",
-            "romantic_soft": "handwritten_note",
-            "tech_future": "neon_night",
-        }
-        preset = preset_aliases.get(preset, preset)
-        
-        # Base transparent layer
-        img = Image.new("RGBA", self.target_size, (0, 0, 0, 0))
-        draw = ImageDraw.Draw(img)
-
-        # Style definitions
-        if preset == "playful_pop":
-            # Round box + bright green text
-            box_w = min(int(w * 0.5), 800)
-            box_h = 160 if subtitle else 100
-            bx, by = (w - box_w) // 2, (h - box_h) // 2
-            draw.rounded_rectangle((bx, by, bx + box_w, by + box_h), radius=40, fill=(255, 255, 255, 200))
-            title_font = load_font(64)
-            sub_font = load_font(32)
-            tw, th = text_size(draw, title, title_font)
-            draw_text_with_emoji(draw, ((w - tw) // 2, by + 20), title, font=title_font, fill=(52, 211, 153, 255))
-            if subtitle:
-                sw, sh = text_size(draw, subtitle, sub_font)
-                draw_text_with_emoji(draw, ((w - sw) // 2, by + 90), subtitle, font=sub_font, fill=(30, 41, 59, 200))
-
-        elif preset == "travel_postcard":
-            # Bordered card effect
-            if is_full_card:
-                draw.rectangle((40, 40, w - 40, h - 40), outline=(255, 255, 255, 180), width=3)
-                draw.rectangle((56, 56, w - 56, h - 56), outline=(251, 191, 36, 120), width=2)
-            title_font = load_font(72)
-            sub_font = load_font(36)
-            tw, th = text_size(draw, title, title_font)
-            draw_text_with_emoji(draw, ((w - tw) // 2 + 3, (h - th) // 2 - 17), title, font=title_font, fill=(35, 24, 18, 190))
-            draw_text_with_emoji(draw, ((w - tw) // 2, (h - th) // 2 - 20), title, font=title_font, fill=(255, 245, 210, 255))
-            if subtitle:
-                sw, sh = text_size(draw, subtitle, sub_font)
-                draw_text_with_emoji(draw, ((w - sw) // 2, (h - sh) // 2 + 60), subtitle, font=sub_font, fill=(251, 191, 36, 230))
-
-        elif preset == "impact_flash":
-            title_font = load_font(92)
-            sub_font = load_font(38)
-            tw, th = text_size(draw, title, title_font)
-            x, y = (w - tw) // 2, (h - th) // 2 - 26
-            for offset in [(6, 6), (-5, 4), (4, -5), (-4, -4)]:
-                draw_text_with_emoji(draw, (x + offset[0], y + offset[1]), title, font=title_font, fill=(17, 24, 39, 240))
-            draw_text_with_emoji(draw, (x + 2, y + 2), title, font=title_font, fill=(239, 68, 68, 210))
-            draw_text_with_emoji(draw, (x, y), title, font=title_font, fill=(255, 255, 255, 255))
-            if subtitle:
-                sw, sh = text_size(draw, subtitle, sub_font)
-                draw.rounded_rectangle(((w - sw) // 2 - 18, y + th + 16, (w + sw) // 2 + 18, y + th + 62), radius=8, fill=(15, 23, 42, 210))
-                draw_text_with_emoji(draw, ((w - sw) // 2, y + th + 22), subtitle, font=sub_font, fill=(255, 255, 255, 235))
-
-        elif preset == "documentary_lower_third":
-            band_h = 170 if subtitle else 126
-            y0 = h - band_h - int(h * 0.08) if not is_full_card else int(h * 0.62)
-            draw.rectangle((0, y0, w, y0 + band_h), fill=(10, 14, 12, 190))
-            draw.rectangle((0, y0, 12, y0 + band_h), fill=(214, 182, 107, 255))
-            title_font = load_font(60)
-            sub_font = load_font(30)
-            draw_text_with_emoji(draw, (56, y0 + 28), title, font=title_font, fill=(250, 246, 235, 255))
-            if subtitle:
-                draw_text_with_emoji(draw, (58, y0 + 98), subtitle, font=sub_font, fill=(214, 182, 107, 230))
-
-        elif preset == "minimal_editorial":
-            title_font = load_font(56)
-            sub_font = load_font(28)
-            tw, th = text_size(draw, title, title_font)
-            x = int(w * 0.12) if is_full_card else int(w * 0.07)
-            y = (h - th) // 2 - 10
-            draw.rectangle((x, y - 28, x + 2, y + th + 80), fill=(255, 255, 255, 190))
-            draw_text_with_emoji(draw, (x + 28, y), title, font=title_font, fill=(255, 255, 255, 235))
-            if subtitle:
-                draw_text_with_emoji(draw, (x + 30, y + th + 24), subtitle, font=sub_font, fill=(255, 255, 255, 170))
-
-        elif preset == "handwritten_note":
-            box_w = min(int(w * 0.62), 980)
-            box_h = 190 if subtitle else 136
-            bx, by = (w - box_w) // 2, (h - box_h) // 2
-            draw.rounded_rectangle((bx, by, bx + box_w, by + box_h), radius=34, fill=(255, 251, 235, 225), outline=(255, 255, 255, 240), width=5)
-            title_font = load_font(66)
-            sub_font = load_font(32)
-            tw, th = text_size(draw, title, title_font)
-            draw_text_with_emoji(draw, ((w - tw) // 2 + 3, by + 28 + 3), title, font=title_font, fill=(14, 165, 233, 110))
-            draw_text_with_emoji(draw, ((w - tw) // 2, by + 28), title, font=title_font, fill=(31, 41, 55, 255))
-            if subtitle:
-                sw, sh = text_size(draw, subtitle, sub_font)
-                draw_text_with_emoji(draw, ((w - sw) // 2, by + 106), subtitle, font=sub_font, fill=(234, 88, 12, 220))
-
-        elif preset == "neon_night":
-            title_font = load_font(74)
-            sub_font = load_font(32)
-            tw, th = text_size(draw, title, title_font)
-            x, y = (w - tw) // 2, (h - th) // 2 - 22
-            for radius, alpha in [(10, 70), (5, 120), (2, 210)]:
-                glow = Image.new("RGBA", self.target_size, (0, 0, 0, 0))
-                glow_draw = ImageDraw.Draw(glow)
-                draw_text_with_emoji(glow_draw, (x, y), title, font=title_font, fill=(244, 114, 182, alpha))
-                img.alpha_composite(glow.filter(ImageFilter.GaussianBlur(radius)))
-            draw_text_with_emoji(draw, (x, y), title, font=title_font, fill=(255, 240, 252, 255))
-            if subtitle:
-                sw, sh = text_size(draw, subtitle, sub_font)
-                draw_text_with_emoji(draw, ((w - sw) // 2, y + th + 32), subtitle, font=sub_font, fill=(125, 211, 252, 230))
-
-        elif preset == "film_subtitle":
-            title_font = load_font(56)
-            sub_font = load_font(28)
-            tw, th = text_size(draw, title, title_font)
-            y = int(h * 0.68) if is_full_card else int(h * 0.72)
-            draw.rectangle((0, y - 34, w, y + 116), fill=(0, 0, 0, 115))
-            draw_text_with_emoji(draw, ((w - tw) // 2, y), title, font=title_font, fill=(248, 240, 220, 245))
-            if subtitle:
-                sw, sh = text_size(draw, subtitle, sub_font)
-                draw_text_with_emoji(draw, ((w - sw) // 2, y + 62), subtitle, font=sub_font, fill=(248, 240, 220, 190))
-            if not is_full_card:
-                draw.rectangle((28, 36, 30, h - 36), fill=(248, 240, 220, 42))
-
-        elif preset == "route_marker":
-            title_font = load_font(64)
-            sub_font = load_font(30)
-            x0, y0 = int(w * 0.22), int(h * 0.58)
-            x1, y1 = int(w * 0.72), int(h * 0.38)
-            draw.line((x0, y0, int(w * 0.44), y0 - 70, x1, y1), fill=(47, 111, 143, 220), width=5)
-            draw.ellipse((x1 - 18, y1 - 18, x1 + 18, y1 + 18), fill=(37, 99, 235, 240))
-            draw.ellipse((x1 - 7, y1 - 7, x1 + 7, y1 + 7), fill=(255, 255, 255, 240))
-            tw, th = text_size(draw, title, title_font)
-            draw.rounded_rectangle(((w - tw) // 2 - 32, y0 + 28, (w + tw) // 2 + 32, y0 + 118), radius=18, fill=(255, 251, 235, 220))
-            draw_text_with_emoji(draw, ((w - tw) // 2, y0 + 42), title, font=title_font, fill=(23, 32, 26, 255))
-            if subtitle:
-                sw, sh = text_size(draw, subtitle, sub_font)
-                draw_text_with_emoji(draw, ((w - sw) // 2, y0 + 112), subtitle, font=sub_font, fill=(47, 111, 143, 230))
-
-        else: # cinematic_bold (default)
-            title_font = load_font(78)
-            sub_font = load_font(34)
-            tw, th = text_size(draw, title, title_font)
-            draw_text_with_emoji(draw, ((w - tw) // 2, (h - th) // 2 - 40), title, font=title_font, fill=(255, 255, 255, 255))
-            if subtitle:
-                sw, sh = text_size(draw, subtitle, sub_font)
-                draw_text_with_emoji(draw, ((w - sw) // 2, (h - sh) // 2 + 55), subtitle, font=sub_font, fill=(52, 211, 153, 255))
-
-        return img
-
-    def _with_dynamic_opacity(self, clip: Any, opacity_fn: Any) -> Any:
-        # Apply time-varying opacity using a MoviePy mask.
-        # MoviePy 1.0.x set_opacity() only accepts numeric opacity.
-        try:
-            base_mask = getattr(clip, "mask", None)
-            if base_mask is None:
-                base_mask = ColorClip(clip.size, color=1, ismask=True).set_duration(clip.duration)
-
-            def mask_filter(get_frame: Any, t: float) -> Any:
-                try:
-                    alpha = float(opacity_fn(t))
-                except Exception:
-                    alpha = 1.0
-                alpha = max(0.0, min(1.0, alpha))
-                return get_frame(t) * alpha
-
-            return clip.set_mask(base_mask.fl(mask_filter))
-        except Exception:
-            return clip.set_opacity(1.0)
-
-    def _safe_resize(self, clip: Any, scale_fn: Any) -> Any:
-        try:
-            return clip.resize(scale_fn)
-        except Exception:
-            return clip
-
-    def _pop_scale(self, t: float) -> float:
-        if t < 0.18:
-            return 0.82 + (t / 0.18) * 0.28
-        if t < 0.36:
-            return 1.10 - ((t - 0.18) / 0.18) * 0.10
-        return 1.0
-
-    def _punch_scale(self, t: float) -> float:
-        if t < 0.16:
-            return 1.16 - (t / 0.16) * 0.16
-        return 1.0
-
-    def _soft_zoom_scale(self, t: float, duration: float) -> float:
-        span = max(min(duration, 1.2), 0.4)
-        ratio = max(0.0, min(1.0, t / span))
-        return 0.96 + ratio * 0.04
-
-    def animate(self, clip: Any, motion: str, duration: float) -> Any:
-        motion = motion or "fade_slide_up"
-        motion_aliases = {
-            "fade_slide_up": "cinematic_reveal",
-            "soft_zoom_in": "postcard_drift",
-            "pop_bounce": "playful_bounce",
-            "quick_zoom_punch": "impact_slam",
-            "slow_fade_zoom": "film_burn",
-            "fade_only": "editorial_fade",
-        }
-        motion = motion_aliases.get(motion, motion)
-        duration = max(float(duration or 0.1), 0.1)
-
-        animated = clip
-
-        if motion == "static_hold":
-            return animated.set_position(("center", "center"))
-
-        if motion in {"soft_zoom_in", "slow_fade_zoom", "cinematic_reveal", "postcard_drift", "film_burn"}:
-            animated = self._safe_resize(animated, lambda t: self._soft_zoom_scale(t, duration))
-        elif motion in {"pop_bounce", "playful_bounce"}:
-            animated = self._safe_resize(animated, lambda t: self._pop_scale(t))
-        elif motion in {"quick_zoom_punch", "impact_slam"}:
-            animated = self._safe_resize(animated, lambda t: self._punch_scale(t))
-
-        # Dynamic opacity must be mask-based, not set_opacity(lambda...).
-        if motion == "neon_flicker":
-            animated = self._with_dynamic_opacity(animated, lambda t: self._neon_flicker_curve(t, duration))
-        else:
-            animated = self._with_dynamic_opacity(animated, lambda t: self._fade_curve(t, duration))
-
-        try:
-            return animated.set_position(("center", "center"))
-        except Exception:
-            return animated
-
-    def _fade_curve(self, t: float, duration: float) -> float:
-        in_t, out_t = 0.5, 0.4
-        if t < in_t: return t / in_t
-        if t > duration - out_t: return max(0, (duration - t) / out_t)
-        return 1.0
-
-    def _neon_flicker_curve(self, t: float, duration: float) -> float:
-        if t < 0.08:
-            return 0.25
-        if t < 0.14:
-            return 1.0
-        if t < 0.20:
-            return 0.48
-        if t > duration - 0.35:
-            return max(0.0, (duration - t) / 0.35)
-        return 1.0
-
-    def _slide_up(self, t: float, duration: float) -> int:
-        h = self.target_size[1]
-        center_y = h // 2
-        offset = 20 * (1.0 - (t / duration))
-        return int(center_y - offset)
-
-    def _bounce(self, t: float, duration: float) -> float:
-        if t < 0.2: return 0.8 + (t / 0.2) * 0.28 # 0.8 -> 1.08
-        if t < 0.35: return 1.08 - ((t - 0.2) / 0.15) * 0.08 # 1.08 -> 1.0
-        return 1.0
+        super().__init__(
+            target_size,
+            image_cls=Image,
+            image_draw_mod=ImageDraw,
+            image_filter_mod=ImageFilter,
+            color_clip_cls=ColorClip,
+            load_font_fn=load_font,
+            text_size_fn=text_size,
+            draw_text_with_emoji_fn=draw_text_with_emoji,
+        )
 
 
 class Renderer:
@@ -1116,431 +865,77 @@ class Renderer:
         render_image_cache_helpers.emit_card_segment_cache_summary(self, emit_event_fn=emit_event)
 
     def _standard_visual_cache_path(self) -> Path:
-        fps = int(self.params.get("fps") or self.plan.get("render_settings", {}).get("fps") or 30)
-        key_payload = {
-            "version": "standard_visual_base_v1",
-            "engine_version": ENGINE_VERSION,
-            "segments": self.plan.get("segments", []) or [],
-            "aspect_ratio": self.params.get("aspect_ratio") or self.plan.get("render_settings", {}).get("aspect_ratio"),
-            "fps": fps,
-            "quality": self.params.get("quality") or self.plan.get("render_settings", {}).get("quality"),
-            "python_quality": self.params.get("python_quality"),
-            "preview": bool(self.params.get("preview")),
-            "preview_height": self.params.get("preview_height"),
-            "watermark": self.params.get("watermark"),
-            "target_size": list(self.target_size),
-            "audio_visual": self._visual_stage_audio_cache_payload(),
-        }
-        return self._cache_bucket_path(
-            "final_video_bases",
-            ".mp4",
-            json.dumps(key_payload, ensure_ascii=False, sort_keys=True),
-        )
+        return render_visual_base_helpers.standard_visual_cache_path(self)
 
     def _emit_visual_base_cache_summary(self) -> None:
-        stats = dict(self.visual_base_cache_stats)
-        if stats["eligible"] <= 0:
-            return
-        emit_event(
-            "log",
-            message=(
-                "Visual base cache summary: "
-                f"eligible={stats['eligible']}, "
-                f"hit={stats['hit']}, "
-                f"created={stats['created']}, "
-                f"fallback={stats['fallback']}, "
-                f"chunk_groups={stats['chunk_groups']}, "
-                f"chunk_hit={stats['chunk_hit']}, "
-                f"chunk_created={stats['chunk_created']}, "
-                f"saved_render_seconds={stats['saved_render_seconds']}"
-            ),
-        )
-        emit_event("visual_base_cache", **stats)
+        render_visual_base_helpers.emit_visual_base_cache_summary(self, emit_event_fn=emit_event)
 
     def _should_use_chunked_visual_base(self) -> bool:
-        if self.params.get("watermark"):
-            return False
-        segments = list(self.plan.get("segments") or [])
-        if len(segments) < 2:
-            return False
-        enabled = self.params.get("visual_base_chunk_cache")
-        if enabled is None:
-            enabled = True
-        return bool(enabled)
+        return render_visual_base_helpers.should_use_chunked_visual_base(self)
 
     def _is_safe_standard_visual_chunk_boundary(self, next_seg: Dict[str, Any]) -> bool:
-        transition = next_seg.get("transition_config") or {}
-        transition_type = str(transition.get("type") or next_seg.get("transition") or "none")
-        transition_duration = float(transition.get("duration") or 0.0)
-        return transition_type in {"none", "cut"} and transition_duration <= 0.05
+        return render_visual_base_helpers.is_safe_standard_visual_chunk_boundary(next_seg)
 
     def _standard_visual_transition_influence(self, seg: Dict[str, Any]) -> Dict[str, Any]:
-        transition = seg.get("transition_config") or {}
-        transition_type = str(transition.get("type") or seg.get("transition") or "none")
-        transition_duration = float(transition.get("duration") or 0.0)
-        if transition_type in {"none", "cut"} and transition_duration <= 0.05:
-            return {"type": transition_type, "backward": 0, "forward": 0, "safe_split": True}
-
-        transition_influence_map = {
-            "soft_crossfade": {"backward": 1, "forward": 0, "safe_split": False},
-            "quick_zoom": {"backward": 1, "forward": 0, "safe_split": False},
-            "flash_cut": {"backward": 1, "forward": 0, "safe_split": False},
-            "fade_through_dark": {"backward": 1, "forward": 1, "safe_split": False},
-            "fade_through_white": {"backward": 1, "forward": 1, "safe_split": False},
-        }
-        influence = transition_influence_map.get(
-            transition_type,
-            {"backward": 1, "forward": 1, "safe_split": False},
-        )
-        return {"type": transition_type, **influence}
+        return render_visual_base_helpers.standard_visual_transition_influence(seg)
 
     def _standard_visual_chunk_route_payload(self, items: List[Dict[str, Any]]) -> Dict[str, Any]:
-        routes = [str(seg.get("runtime_render_route") or seg.get("render_route") or "moviepy_required") for seg in items]
-        route_counts: Dict[str, int] = {}
-        for route in routes:
-            route_counts[route] = route_counts.get(route, 0) + 1
-        if items and all(route == "direct_chunk_candidate" for route in routes):
-            return {
-                "runtime_chunk_route": "ffmpeg_direct_chunk",
-                "runtime_chunk_route_reason": "all_segments_direct_chunk_safe",
-                "runtime_chunk_route_tags": ["ffmpeg", "chunk", "direct", "visual_base"],
-                "runtime_chunk_route_counts": route_counts,
-            }
-        if items and all(_v56_is_ffmpeg_fitted_video_chunk_route(route) for route in routes):
-            return {
-                "runtime_chunk_route": "ffmpeg_fitted_video_chunk",
-                "runtime_chunk_route_reason": "all_segments_ffmpeg_fitted_video_safe",
-                "runtime_chunk_route_tags": ["ffmpeg", "chunk", "video_fit", "visual_base"],
-                "runtime_chunk_route_counts": route_counts,
-            }
-        if items and all(self._can_use_ffmpeg_card_chunk_segment(seg) for seg in items):
-            return {
-                "runtime_chunk_route": "ffmpeg_card_chunk",
-                "runtime_chunk_route_reason": "all_segments_ffmpeg_card_chunk_safe",
-                "runtime_chunk_route_tags": ["ffmpeg", "chunk", "card", "visual_base"],
-                "runtime_chunk_route_counts": route_counts,
-            }
-        if items and all(self._can_use_ffmpeg_image_chunk_segment(seg) for seg in items):
-            return {
-                "runtime_chunk_route": "ffmpeg_image_chunk",
-                "runtime_chunk_route_reason": "all_segments_ffmpeg_image_chunk_safe",
-                "runtime_chunk_route_tags": ["ffmpeg", "chunk", "image", "visual_base"],
-                "runtime_chunk_route_counts": route_counts,
-            }
-        return {
-            "runtime_chunk_route": "moviepy_chunk",
-            "runtime_chunk_route_reason": "safe_cut_boundary_visual_chunk",
-            "runtime_chunk_route_tags": ["moviepy", "chunk", "timeline", "visual_base"],
-            "runtime_chunk_route_counts": route_counts,
-        }
+        return render_visual_base_helpers.standard_visual_chunk_route_payload(self, items)
 
     def _build_standard_visual_transition_units(self) -> List[List[Dict[str, Any]]]:
-        segments = list(self.plan.get("segments") or [])
-        if not segments:
-            return []
-        ranges: List[Tuple[int, int]] = []
-        for idx, seg in enumerate(segments):
-            influence = self._standard_visual_transition_influence(seg)
-            if influence.get("safe_split"):
-                continue
-            start = max(0, idx - int(influence.get("backward") or 0))
-            end = min(len(segments) - 1, idx + int(influence.get("forward") or 0))
-            ranges.append((start, end))
-
-        merged_ranges: List[Tuple[int, int]] = []
-        for start, end in ranges:
-            if not merged_ranges or start > merged_ranges[-1][1] + 1:
-                merged_ranges.append((start, end))
-            else:
-                prev_start, prev_end = merged_ranges[-1]
-                merged_ranges[-1] = (prev_start, max(prev_end, end))
-
-        units: List[List[Dict[str, Any]]] = []
-        cursor = 0
-        for start, end in merged_ranges:
-            while cursor < start:
-                units.append([segments[cursor]])
-                cursor += 1
-            units.append(segments[start:end + 1])
-            cursor = end + 1
-        while cursor < len(segments):
-            units.append([segments[cursor]])
-            cursor += 1
-        return units
+        return render_visual_base_helpers.build_standard_visual_transition_units(self)
 
     def _build_standard_visual_chunk_groups(self) -> List[Dict[str, Any]]:
-        units = self._build_standard_visual_transition_units()
-        if not units:
-            return []
-        max_segments = max(2, int(self.params.get("visual_base_chunk_max_segments") or 6))
-        max_seconds = max(4.0, float(self.params.get("visual_base_chunk_seconds") or 20.0))
-        groups: List[Dict[str, Any]] = []
-        current: List[Dict[str, Any]] = []
-        current_duration = 0.0
-        current_keys: List[str] = []
-        current_segment_count = 0
-        current_family: Optional[str] = None
-
-        def flush() -> None:
-            nonlocal current, current_duration, current_keys, current_segment_count, current_family
-            if not current:
-                return
-            groups.append({
-                "index": len(groups),
-                "segments": list(current),
-                "duration": round(current_duration, 3),
-                "cache_key": _v56_stable_json_hash(current_keys),
-                **self._standard_visual_chunk_route_payload(current),
-            })
-            current = []
-            current_duration = 0.0
-            current_keys = []
-            current_segment_count = 0
-            current_family = None
-
-        for unit in units:
-            unit_duration = sum(float(seg.get("duration") or 0.0) for seg in unit)
-            unit_segment_count = len(unit)
-            unit_family = "timeline"
-            if unit and all(_v56_chunk_route_family(seg, self.params) == "direct" for seg in unit):
-                unit_family = "direct"
-            elif unit and all(_v56_chunk_route_family(seg, self.params) == "card" for seg in unit):
-                unit_family = "card"
-            elif unit and all(_v56_chunk_route_family(seg, self.params) == "image" for seg in unit):
-                unit_family = "image"
-            if current:
-                count_exceeded = (current_segment_count + unit_segment_count) > max_segments
-                time_exceeded = (current_duration + unit_duration) > max_seconds
-                family_changed = current_family != unit_family
-                if count_exceeded or time_exceeded or family_changed:
-                    flush()
-            current.extend(unit)
-            current_duration += unit_duration
-            current_segment_count += unit_segment_count
-            current_family = unit_family
-            for seg in unit:
-                current_keys.append(_v56_segment_cache_key(seg, self.params))
-
-        flush()
-        return groups
+        return render_visual_base_helpers.build_standard_visual_chunk_groups(self)
 
     def _render_visual_timeline_clip(self) -> Tuple[Any, List[Dict[str, Any]]]:
-        clips: List[Any] = []
-        rendered_segments: List[Dict[str, Any]] = []
-        segments = self.plan.get("segments", [])
-        total = max(1, len(segments))
-        self._emit_render_scheduler_summary()
-
-        for idx, seg in enumerate(segments, 1):
-            emit_event(
-                "phase",
-                phase="render",
-                message=f"Processing segment {idx}/{total}: {seg.get('type')}",
-                percent=min(90, int(idx / total * 90)),
-            )
-            clip = self._segment(seg)
-            if clip is not None:
-                clips.append(clip)
-                rendered_segments.append(seg)
-
-        if not clips:
-            raise RuntimeError("No valid clips generated")
-
-        emit_event("phase", phase="render", message="Composing final video timeline", percent=91)
-        final = self._compose_timeline(clips, rendered_segments)
-
-        if self.params.get("watermark"):
-            emit_event("phase", phase="render", message="Applying watermark", percent=92)
-            final = self._add_watermark(final, str(self.params.get("watermark")))
-
-        return final, rendered_segments
+        return render_visual_base_helpers.render_visual_timeline_clip(self, emit_event_fn=emit_event)
 
     def _write_visual_base_video(self, output_path: Path) -> float:
-        final = None
-        duration = 0.0
-        try:
-            final, _rendered_segments = self._render_visual_timeline_clip()
-            duration = float(getattr(final, "duration", 0.0) or 0.0)
-            logger = JsonMoviePyLogger(base_percent=92, span_percent=7)
-            final.write_videofile(
-                str(output_path),
-                fps=int(self.params.get("fps") or self.plan.get("render_settings", {}).get("fps") or 30),
-                codec="libx264",
-                audio_codec="aac",
-                preset="medium",
-                threads=4,
-                temp_audiofile=str(self.temp_dir / "temp_audio.m4a"),
-                remove_temp=True,
-                ffmpeg_params=[
-                    "-pix_fmt",
-                    "yuv420p",
-                    "-movflags",
-                    "+faststart",
-                    "-crf",
-                    quality_to_crf(self.params.get("python_quality") or self.params.get("quality")),
-                ],
-                logger=logger,
-            )
-            return duration
-        finally:
-            if final is not None:
-                close_clip(final)
+        return render_visual_base_helpers.write_visual_base_video(
+            self,
+            output_path,
+            logger_factory=lambda base_percent, span_percent: JsonMoviePyLogger(
+                base_percent=base_percent,
+                span_percent=span_percent,
+            ),
+            quality_to_crf_fn=quality_to_crf,
+            close_clip_fn=close_clip,
+            emit_event_fn=emit_event,
+        )
 
     def _write_visual_base_video_from_chunks(self, output_path: Path) -> Optional[float]:
-        if not self._should_use_chunked_visual_base():
-            return None
-        groups = self._build_standard_visual_chunk_groups()
-        if len(groups) < 2:
-            return None
-
-        self.visual_base_cache_stats["chunk_groups"] = max(
-            int(self.visual_base_cache_stats.get("chunk_groups") or 0),
-            len(groups),
+        return render_visual_base_helpers.write_visual_base_video_from_chunks(
+            self,
+            output_path,
+            validate_video_fn=_v56_validate_video,
+            write_chunk_video_fn=_v56_write_chunk_video,
+            concat_chunks_ffmpeg_fn=_v56_concat_chunks_ffmpeg,
+            concat_chunks_ffmpeg_reencode_fn=_v56_concat_chunks_ffmpeg_reencode,
+            concat_chunks_moviepy_fn=_v56_concat_chunks_moviepy,
+            atomic_replace_fn=_v56_atomic_replace,
+            emit_event_fn=emit_event,
         )
-        chunk_bucket = self.render_cache_dir / "visual_base_chunks"
-        chunk_bucket.mkdir(parents=True, exist_ok=True)
-        chunk_work_dir = self.render_cache_dir / "visual_base_chunk_work"
-        chunk_work_dir.mkdir(parents=True, exist_ok=True)
-
-        rendered_chunks: List[Path] = []
-        for group in groups:
-            chunk_path = chunk_bucket / f"{group['cache_key']}.mp4"
-            ok, _reason, _duration = _v56_validate_video(chunk_path, min_size=512)
-            if ok:
-                self.visual_base_cache_stats["chunk_hit"] += 1
-                rendered_chunks.append(chunk_path)
-                emit_event("log", message=f"Visual base chunk cache hit: {chunk_path.name}")
-                continue
-            _v56_write_chunk_video(
-                self,
-                group,
-                chunk_path,
-                int(self.params.get("fps") or self.plan.get("render_settings", {}).get("fps") or 30),
-                self.params,
-                ensure_audio_track=False,
-            )
-            ok, reason, _duration = _v56_validate_video(chunk_path, min_size=512)
-            if not ok:
-                raise RuntimeError(f"visual base chunk validation failed: {reason}")
-            self.visual_base_cache_stats["chunk_created"] += 1
-            rendered_chunks.append(chunk_path)
-            emit_event("log", message=f"Visual base chunk cache created: {chunk_path.name}")
-
-        tmp_output = output_path.with_suffix(".assembling.tmp.mp4")
-        try:
-            if tmp_output.exists():
-                tmp_output.unlink()
-        except Exception:
-            pass
-
-        concat_ok = _v56_concat_chunks_ffmpeg(rendered_chunks, tmp_output, chunk_work_dir)
-        if not concat_ok:
-            concat_ok = _v56_concat_chunks_ffmpeg_reencode(
-                rendered_chunks,
-                tmp_output,
-                chunk_work_dir,
-                int(self.params.get("fps") or self.plan.get("render_settings", {}).get("fps") or 30),
-                self.params,
-            )
-        if not concat_ok:
-            _v56_concat_chunks_moviepy(
-                rendered_chunks,
-                tmp_output,
-                int(self.params.get("fps") or self.plan.get("render_settings", {}).get("fps") or 30),
-                self.params,
-            )
-
-        ok, reason, duration = _v56_validate_video(tmp_output, min_size=512)
-        if not ok:
-            raise RuntimeError(f"visual base chunk concat failed: {reason}")
-        _v56_atomic_replace(tmp_output, output_path)
-        return float(duration or 0.0)
 
     def _materialize_standard_visual_base(self) -> Tuple[Path, float]:
-        self.visual_base_cache_stats["eligible"] += 1
-        out = self._standard_visual_cache_path()
-        ok, _reason, duration = _v56_validate_video(out, min_size=512)
-        if ok:
-            self.visual_base_cache_stats["hit"] += 1
-            self.visual_base_cache_stats["saved_render_seconds"] += int(round(float(duration or 0.0)))
-            emit_event("log", message=f"Visual base cache hit: {out.name}")
-            return out, float(duration or 0.0)
-
-        try:
-            if out.exists():
-                out.unlink()
-        except Exception:
-            pass
-
-        try:
-            duration = self._write_visual_base_video_from_chunks(out)
-            if duration is None:
-                duration = self._write_visual_base_video(out)
-            ok, _reason, validated_duration = _v56_validate_video(out, min_size=512)
-            if ok:
-                self.visual_base_cache_stats["created"] += 1
-                emit_event("log", message=f"Visual base cache created: {out.name}")
-                return out, float(validated_duration or duration or 0.0)
-        except Exception:
-            self.visual_base_cache_stats["fallback"] += 1
-            raise
-
-        self.visual_base_cache_stats["fallback"] += 1
-        raise RuntimeError("Failed to materialize standard visual base video")
+        return render_visual_base_helpers.materialize_standard_visual_base(
+            self,
+            validate_video_fn=_v56_validate_video,
+            write_visual_base_video_fn=self._write_visual_base_video,
+            write_visual_base_video_from_chunks_fn=self._write_visual_base_video_from_chunks,
+            emit_event_fn=emit_event,
+        )
 
     def _finalize_output_from_visual_base(self, visual_base_path: Path, output_path: Path, duration: float) -> float:
-        mixed_output = output_path.with_suffix(".audio.tmp.mp4")
-        finalize_started = perf_counter()
-        try:
-            if mixed_output.exists():
-                mixed_output.unlink()
-        except Exception:
-            pass
-
-        final_duration = float(duration or 0.0)
-        finalize_summary = {
-            "audio_mix_attempted": False,
-            "audio_mix_applied": False,
-            "copy_through_used": False,
-            "audio_mix_seconds": 0.0,
-            "copy_through_seconds": 0.0,
-            "total_finalize_seconds": 0.0,
-        }
-        audio_mix_started = perf_counter()
-        if _v56_apply_final_bgm_mix(
+        return render_finalize_helpers.finalize_output_from_visual_base(
+            self,
             visual_base_path,
-            mixed_output,
-            self.audio_settings,
-            final_duration,
-            prepared_bgm_path=self._prepare_music_bed(final_duration) or self._prepare_music_path(),
-            prepared_bgm_is_bed=True,
-        ):
-            finalize_summary["audio_mix_attempted"] = True
-            finalize_summary["audio_mix_applied"] = True
-            finalize_summary["audio_mix_seconds"] = round(perf_counter() - audio_mix_started, 4)
-            ok, reason, validated_duration = _v56_validate_video(mixed_output, min_size=512)
-            if not ok:
-                raise RuntimeError(f"visual base validation failed: {reason}")
-            _v56_atomic_replace(mixed_output, output_path)
-            finalize_summary["total_finalize_seconds"] = round(perf_counter() - finalize_started, 4)
-            self.last_visual_finalize_summary = finalize_summary
-            return float(validated_duration or final_duration)
-
-        finalize_summary["audio_mix_attempted"] = True
-        finalize_summary["audio_mix_seconds"] = round(perf_counter() - audio_mix_started, 4)
-        copy_started = perf_counter()
-        ensure_parent(output_path)
-        if output_path.exists():
-            output_path.unlink()
-        shutil.copy2(visual_base_path, output_path)
-        finalize_summary["copy_through_used"] = True
-        finalize_summary["copy_through_seconds"] = round(perf_counter() - copy_started, 4)
-        ok, reason, validated_duration = _v56_validate_video(output_path, min_size=512)
-        if not ok:
-            raise RuntimeError(f"visual base final validation failed: {reason}")
-        finalize_summary["total_finalize_seconds"] = round(perf_counter() - finalize_started, 4)
-        self.last_visual_finalize_summary = finalize_summary
-        return float(validated_duration or final_duration)
+            output_path,
+            duration,
+            apply_final_bgm_mix_fn=_v56_apply_final_bgm_mix,
+            validate_video_fn=_v56_validate_video,
+            atomic_replace_fn=_v56_atomic_replace,
+        )
 
     def _video_segment_cache_summary(self) -> Dict[str, int]:
         return render_video_cache_helpers.video_segment_cache_summary(self)
@@ -2146,42 +1541,13 @@ class Renderer:
         return None
 
     def _chapter_card(self, seg: Dict[str, Any], duration: float):
-        mode = seg.get("background_mode") or "bridge_blur"
-        title_style = seg.get("title_style")
-
-        if mode == "plain":
-            return self._text_card(
-                seg.get("text") or "",
-                seg.get("subtitle"),
-                duration,
-                main=False,
-                background_source=None,
-                background_position="first",
-                title_style=title_style,
-            )
-
-        if mode == "bridge_blur":
-            return self._text_card(
-                seg.get("text") or "",
-                seg.get("subtitle"),
-                duration,
-                main=False,
-                background_source=seg.get("background_source_path"),
-                background_position=seg.get("background_source_position") or "last",
-                background_source_2=seg.get("background_source_path_2"),
-                background_position_2=seg.get("background_source_position_2") or "first",
-                blend_sources=True,
-                title_style=title_style,
-            )
-
-        return self._text_card(
-            seg.get("text") or "",
-            seg.get("subtitle"),
+        return render_cards_helpers.chapter_card(
+            self,
+            seg,
             duration,
-            main=False,
-            background_source=seg.get("background_source_path"),
-            background_position=seg.get("background_source_position") or "first",
-            title_style=title_style,
+            np_module=np,
+            image_clip_cls=ImageClip,
+            composite_video_clip_cls=CompositeVideoClip,
         )
 
     def _text_card(
@@ -2197,21 +1563,22 @@ class Renderer:
         blend_sources: bool = False,
         title_style: Optional[Dict[str, Any]] = None,
     ):
-        bg = self._build_text_background(
-            background_source,
-            background_position,
-            background_source_2,
-            background_position_2,
+        return render_cards_helpers.text_card(
+            self,
+            title,
+            subtitle,
+            duration,
+            main=main,
+            background_source=background_source,
+            background_position=background_position,
+            background_source_2=background_source_2,
+            background_position_2=background_position_2,
             blend_sources=blend_sources,
+            title_style=title_style,
+            np_module=np,
+            image_clip_cls=ImageClip,
+            composite_video_clip_cls=CompositeVideoClip,
         )
-        bg_clip = ImageClip(np.array(bg)).set_duration(duration)
-        
-        style = title_style or {"preset": "cinematic_bold" if main else "cinematic_bold", "motion": "fade_slide_up"}
-        text_img = self.renderer.render_layer(title, subtitle, style, is_full_card=True)
-        text_clip = ImageClip(np.array(text_img), ismask=False).set_duration(duration)
-        text_clip = self.renderer.animate(text_clip, style.get("motion", "fade_slide_up"), duration)
-
-        return CompositeVideoClip([bg_clip, text_clip], size=self.target_size)
 
     def _text_card_image(
         self,
@@ -2225,25 +1592,18 @@ class Renderer:
         blend_sources: bool = False,
         title_style: Optional[Dict[str, Any]] = None,
     ) -> Image.Image:
-        """Build the exact PIL frame used by title/chapter/end cards.
-
-        Cover generation calls this helper too, so the exported
-        cover image is visually consistent with the first video frame.
-        """
-        w, h = self.target_size
-        img = self._build_text_background(
-            background_source,
-            background_position,
-            background_source_2,
-            background_position_2,
+        return render_cards_helpers.text_card_image(
+            self,
+            title,
+            subtitle,
+            main=main,
+            background_source=background_source,
+            background_position=background_position,
+            background_source_2=background_source_2,
+            background_position_2=background_position_2,
             blend_sources=blend_sources,
+            title_style=title_style,
         )
-
-        style = title_style or {"preset": "cinematic_bold" if main else "film_subtitle", "motion": "static_hold"}
-        text_img = self.renderer.render_layer(title, subtitle, style, is_full_card=True)
-        composed = img.convert("RGBA")
-        composed.alpha_composite(text_img)
-        return composed.convert("RGB")
 
     def _build_text_background(
         self,
@@ -2253,53 +1613,34 @@ class Renderer:
         pos_2: str = "first",
         blend_sources: bool = False,
     ) -> Image.Image:
-        frame_1 = self._source_frame_for_background(source_1, pos_1)
-        frame_2 = self._source_frame_for_background(source_2, pos_2) if source_2 else None
-
-        if frame_1 and frame_1.exists():
-            img_1 = Image.open(self._blur_bg(frame_1)).convert("RGB")
-            if blend_sources and frame_2 and frame_2.exists():
-                img_2 = Image.open(self._blur_bg(frame_2)).convert("RGB")
-                img = Image.blend(img_1, img_2, 0.50)
-            else:
-                img = img_1
-            return Image.blend(img, Image.new("RGB", self.target_size, (0, 0, 0)), 0.20)
-
-        if frame_2 and frame_2.exists():
-            img = Image.open(self._blur_bg(frame_2)).convert("RGB")
-            return Image.blend(img, Image.new("RGB", self.target_size, (0, 0, 0)), 0.20)
-
-        return Image.new("RGB", self.target_size, (17, 31, 25))
+        return render_cards_helpers.build_text_background(
+            self,
+            source_1,
+            pos_1,
+            source_2,
+            pos_2,
+            blend_sources=blend_sources,
+            image_cls=Image,
+        )
 
     def _apply_overlay_title(self, clip: Any, seg: Dict[str, Any]):
-        text = seg.get("overlay_text")
-        if not text:
-            return clip
-        subtitle = seg.get("overlay_subtitle")
-        duration = min(float(seg.get("overlay_duration") or 1.8), float(clip.duration or 1.8))
-        style = seg.get("overlay_title_style")
-        overlay = self._overlay_title_clip(str(text), subtitle, duration, style=style)
-        return CompositeVideoClip([clip, overlay], size=clip.size).set_duration(clip.duration)
+        return render_cards_helpers.apply_overlay_title(
+            self,
+            clip,
+            seg,
+            composite_video_clip_cls=CompositeVideoClip,
+        )
 
     def _overlay_title_clip(self, title: str, subtitle: Optional[str], duration: float, style: Optional[Dict[str, Any]] = None):
-        if not style:
-            style = {"preset": "cinematic_bold", "motion": "fade_slide_up", "position": "lower_left"}
-        
-        text_img = self.renderer.render_layer(title, subtitle, style, is_full_card=False)
-        text_clip = ImageClip(np.array(text_img), ismask=False).set_duration(duration)
-        text_clip = self.renderer.animate(text_clip, style.get("motion", "fade_slide_up"), duration)
-
-        # Handle positioning for overlays
-        pos = style.get("position", "lower_left")
-        w, h = self.target_size
-        if pos == "lower_left":
-            text_clip = text_clip.set_position((int(w * 0.05), int(h * 0.70)))
-        elif pos == "lower_center":
-            text_clip = text_clip.set_position(("center", int(h * 0.75)))
-        else:
-            text_clip = text_clip.set_position("center")
-
-        return text_clip
+        return render_cards_helpers.overlay_title_clip(
+            self,
+            title,
+            subtitle,
+            duration,
+            style=style,
+            np_module=np,
+            image_clip_cls=ImageClip,
+        )
 
     def _image_overlay_cache_spec(self, seg: Dict[str, Any], duration: float) -> Optional[Dict[str, Any]]:
         return _v56_image_overlay_cache_spec(seg, duration)
@@ -2618,37 +1959,7 @@ class Renderer:
         return CompositeVideoClip([video, wm], size=video.size)
 
     def _create_cover(self) -> None:
-        """Create the upload cover from the same visual recipe as the opening title card.
-
-        Priority:
-          1. params.title_background_path selected in GUI
-          2. first visual segment from render_plan
-          3. plain brand background fallback
-
-        This keeps cover_travel_video.jpg, the first video frame, and the
-        user-selected opening background visually consistent.
-        """
-        cover = self.output_path.with_name(f"cover_{self.output_path.stem}.jpg")
-        title = str(self.params.get("title") or "Travel Video")
-        subtitle = str(self.params.get("title_subtitle") or "Video Create Studio")
-        background_source = self.params.get("title_background_path") or self.first_visual_source
-
-        img = self._text_card_image(
-            title=title,
-            subtitle=subtitle,
-            main=True,
-            background_source=background_source,
-            background_position="first",
-            title_style=self.params.get("title_style") or {"preset": "cinematic_bold", "motion": "static_hold"},
-        )
-
-        img.save(cover, quality=92)
-        emit_event(
-            "artifact",
-            artifact="cover",
-            path=str(cover),
-            message="Cover generated from opening title card background",
-        )
+        render_cards_helpers.create_cover(self, emit_event_fn=emit_event)
 
 
 # =========================
@@ -2687,26 +1998,13 @@ def command_compile(args: argparse.Namespace) -> None:
 # =========================
 
 def _v56_validate_video(path: Path, min_size: int = 1024) -> Tuple[bool, str, Optional[float]]:
-    if not path.exists():
-        return False, "video file does not exist", None
-    if path.stat().st_size < min_size:
-        return False, f"video file is too small: {path.stat().st_size} bytes", None
-
-    if not HAS_MOVIEPY:
-        return True, "MoviePy unavailable; size check passed", None
-
-    clip = None
-    try:
-        clip = VideoFileClip(str(path))
-        duration = float(clip.duration or 0.0)
-        if duration <= 0:
-            return False, "video duration is invalid", duration
-        return True, "validation passed", duration
-    except Exception as exc:
-        return False, f"video validation failed: {exc}", None
-    finally:
-        if clip is not None:
-            close_clip(clip)
+    return render_finalize_helpers.validate_video(
+        path,
+        min_size=min_size,
+        has_moviepy=HAS_MOVIEPY,
+        video_file_clip_cls=VideoFileClip,
+        close_clip_fn=close_clip,
+    )
 
 
 def _v56_concat_chunks_ffmpeg(chunks: List[Path], tmp_output: Path, project_dir: Path) -> bool:
@@ -2763,7 +2061,7 @@ def _v56_apply_final_bgm_mix(
     prepared_bgm_path: Optional[Path] = None,
     prepared_bgm_is_bed: bool = False,
 ) -> bool:
-    return render_ffmpeg_helpers._v56_apply_final_bgm_mix(
+    return render_finalize_helpers.apply_final_bgm_mix(
         input_video,
         output_video,
         audio_settings,
@@ -2970,10 +2268,7 @@ def _v56_build_recovery_summary(
     )
 
 def _v56_safe_apply_final_bgm_mix(*args: Any, **kwargs: Any) -> Tuple[bool, Optional[Exception]]:
-    try:
-        return bool(_v56_apply_final_bgm_mix(*args, **kwargs)), None
-    except Exception as exc:
-        return False, exc
+    return render_finalize_helpers.safe_apply_final_bgm_mix(_v56_apply_final_bgm_mix, *args, **kwargs)
 
 
 def _v56_render_diagnostics(
@@ -3188,36 +2483,17 @@ def command_render(args: argparse.Namespace) -> None:
 
 
 def preview_resolution(aspect_ratio: str) -> Tuple[int, int]:
-    if aspect_ratio == "9:16":
-        return 360, 640
-    if aspect_ratio == "1:1":
-        return 480, 480
-    return 640, 360
+    return render_cards_helpers.preview_resolution(aspect_ratio)
 
 
 def preview_background(size: Tuple[int, int], theme: str) -> Image.Image:
-    palettes = {
-        "nature": ((18, 54, 38), (106, 142, 69), (211, 238, 174)),
-        "city": ((7, 12, 28), (43, 63, 88), (47, 157, 210)),
-        "clean": ((248, 250, 252), (205, 220, 232), (164, 220, 190)),
-        "travel": ((40, 62, 57), (129, 171, 159), (201, 132, 87)),
-    }
-    c1, c2, c3 = palettes.get(theme, palettes["travel"])
-    w, h = size
-    img = Image.new("RGB", size, c1)
-    draw = ImageDraw.Draw(img)
-    for y in range(h):
-        ratio = y / max(h - 1, 1)
-        if ratio < 0.55:
-            local = ratio / 0.55
-            color = tuple(int(c1[i] + (c2[i] - c1[i]) * local) for i in range(3))
-        else:
-            local = (ratio - 0.55) / 0.45
-            color = tuple(int(c2[i] + (c3[i] - c2[i]) * local) for i in range(3))
-        draw.line([(0, y), (w, y)], fill=color)
-    draw.ellipse((int(w * 0.08), int(h * 0.12), int(w * 0.42), int(h * 0.68)), fill=(*c3[:3],))
-    overlay = Image.new("RGB", size, (8, 18, 14))
-    return Image.blend(img.filter(ImageFilter.GaussianBlur(radius=10)), overlay, 0.18)
+    return render_cards_helpers.preview_background(
+        size,
+        theme,
+        image_cls=Image,
+        image_draw_mod=ImageDraw,
+        image_filter_mod=ImageFilter,
+    )
 
 
 def command_preview_title(args: argparse.Namespace) -> None:
