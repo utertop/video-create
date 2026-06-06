@@ -52,6 +52,22 @@
   - proxy media manifest normalization and library loading
   - preview proxy creation and proxy cache summary events
   - video display-geometry normalization helpers
+- `video_engine/render_image_cache.py`
+  - image prerender cache decisions and FFmpeg image segment cache helpers
+  - photo/card segment cache summaries and events
+  - card segment cache keys and prerender reuse wrappers
+- `video_engine/render_video_cache.py`
+  - video fit and motion-fit FFmpeg cache helpers
+  - video overlay fitted cache helpers
+  - video segment cache summaries and route candidate checks
+- `video_engine/render_stable.py`
+  - V5.6 stable renderer orchestration
+  - chunk manifest persistence and build-report emission
+  - backend resolution, fallback execution, and stable render entrypoint
+- `video_engine/render_chunks.py`
+  - stable chunk write orchestration
+  - FFmpeg chunk fast-path wrappers and MoviePy fallback chunk export
+  - chunk concat wrappers and silent audio-track enforcement
 - `video_engine/audio.py`
   - audio probing and normalized-audio cache helpers
   - auto music scoring and playlist selection
@@ -66,6 +82,6 @@
 
 ## Next Safe Steps
 
-1. Start shrinking `Renderer` by moving small, hook-light image/video prerender cache methods.
-2. Split stable chunk manifest/recovery helpers into a resumable render module.
-3. Move final export/finalize helpers after cache and proxy paths are isolated.
+1. Move final export/finalize helpers into `render_finalize.py`.
+2. Split stable audio final-mix wrappers once finalize boundaries are stable.
+3. Consider extracting pure visual composition helpers after render cache surfaces settle.
