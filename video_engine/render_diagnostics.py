@@ -12,6 +12,9 @@ SelectVideoEncoder = Callable[[Dict[str, Any]], Tuple[str, List[str]]]
 ShouldUseHardwareEncoding = Callable[[Dict[str, Any]], bool]
 VideoHasAudioStream = Callable[[Path], bool]
 
+FAST_SEGMENT_ROUTES = ("photo_prerender", "direct_chunk_candidate", "video_fit", "video_motion_fit")
+FAST_CHUNK_ROUTES = ("ffmpeg_direct_chunk", "ffmpeg_fitted_video_chunk", "ffmpeg_card_chunk", "ffmpeg_image_chunk")
+
 
 def _default_select_video_encoder(_params: Dict[str, Any]) -> Tuple[str, List[str]]:
     return "libx264", ["-preset", "veryfast"]
@@ -61,6 +64,7 @@ def _v56_collect_segment_route_details(segments: List[Dict[str, Any]], limit: in
         details.append({
             "segment_id": seg.get("segment_id"),
             "type": seg.get("type"),
+            "asset_id": seg.get("asset_id"),
             "start_time": seg.get("start_time"),
             "end_time": seg.get("end_time"),
             "duration": seg.get("duration"),
@@ -76,6 +80,7 @@ def _v56_collect_segment_route_details(segments: List[Dict[str, Any]], limit: in
             "has_overlay": bool(seg.get("overlay_text") or seg.get("overlay_subtitle")),
             "transition": ((seg.get("transition_config") or {}).get("type") or seg.get("transition")),
             "motion": ((seg.get("motion_config") or {}).get("type") or "none"),
+            "source_name": Path(str(seg.get("source_path"))).name if seg.get("source_path") else None,
         })
     return details
 
@@ -96,6 +101,7 @@ def _v56_collect_chunk_route_details(
             "cache_key": group.get("cache_key"),
             "status": report.get("status"),
             "duration": report.get("duration"),
+            "render_seconds": report.get("render_seconds"),
             "route": group.get("runtime_chunk_route"),
             "reason": group.get("runtime_chunk_route_reason"),
             "tags": list(group.get("runtime_chunk_route_tags") or []),
@@ -123,6 +129,199 @@ def _v56_route_reason_summary(items: List[Dict[str, Any]], route_key: str, reaso
         "route_counts": route_counts,
         "reason_counts": reason_counts,
         "reasons_by_route": by_route,
+    }
+
+
+def _v56_segment_blockers(item: Dict[str, Any]) -> List[str]:
+    route = str(item.get("route") or "")
+    if route in FAST_SEGMENT_ROUTES:
+        return []
+
+    blockers: List[str] = []
+    reason = str(item.get("reason") or "")
+    if reason:
+        blockers.append(f"reason:{reason}")
+    if route:
+        blockers.append(f"route:{route}")
+
+    stype = str(item.get("type") or "")
+    transition = str(item.get("transition") or "none")
+    if transition not in {"", "none", "cut"}:
+        blockers.append(f"transition:{transition}")
+
+    motion = str(item.get("motion") or "none")
+    if stype == "video" and motion not in {"none", "still_hold"}:
+        blockers.append(f"video_motion:{motion}")
+    elif stype == "image" and motion not in {"none", "still_hold", "gentle_push", "slow_push"}:
+        blockers.append(f"image_motion:{motion}")
+
+    if bool(item.get("has_overlay")):
+        blockers.append("overlay:text")
+    if stype in {"title", "chapter", "end"}:
+        blockers.append(f"card_type:{stype}")
+    return blockers
+
+
+def _v56_chunk_blockers(item: Dict[str, Any]) -> List[str]:
+    route = str(item.get("route") or "")
+    if route in FAST_CHUNK_ROUTES:
+        return []
+
+    blockers: List[str] = []
+    reason = str(item.get("reason") or "")
+    if reason:
+        blockers.append(f"reason:{reason}")
+    if route:
+        blockers.append(f"route:{route}")
+    for segment_route, count in sorted((item.get("route_counts") or {}).items()):
+        if int(count or 0) > 0:
+            blockers.append(f"contains:{segment_route}")
+    return blockers
+
+
+def _v56_ranked_blockers(items: List[Dict[str, Any]], blocker_fn: Callable[[Dict[str, Any]], List[str]], limit: int = 8) -> List[Dict[str, Any]]:
+    counts: Dict[str, int] = {}
+    for item in items:
+        for blocker in blocker_fn(item):
+            counts[blocker] = counts.get(blocker, 0) + 1
+    return _v56_top_named_counts(counts, limit=limit)
+
+
+def _v56_slow_segment_samples(items: List[Dict[str, Any]], limit: int = 12) -> List[Dict[str, Any]]:
+    samples: List[Dict[str, Any]] = []
+    for item in items:
+        blockers = _v56_segment_blockers(item)
+        if not blockers:
+            continue
+        samples.append({
+            "segment_id": item.get("segment_id"),
+            "asset_id": item.get("asset_id"),
+            "type": item.get("type"),
+            "source_name": item.get("source_name"),
+            "start_time": item.get("start_time"),
+            "duration": item.get("duration"),
+            "route": item.get("route"),
+            "reason": item.get("reason"),
+            "transition": item.get("transition"),
+            "motion": item.get("motion"),
+            "has_overlay": bool(item.get("has_overlay")),
+            "blockers": blockers[:6],
+        })
+        if len(samples) >= limit:
+            break
+    return samples
+
+
+def _v56_slow_chunk_samples(items: List[Dict[str, Any]], limit: int = 12) -> List[Dict[str, Any]]:
+    slow_items = [item for item in items if _v56_chunk_blockers(item)]
+    slow_items.sort(key=lambda item: (-(float(item.get("render_seconds") or 0.0)), int(item.get("index") or 0)))
+    samples: List[Dict[str, Any]] = []
+    for item in slow_items[:limit]:
+        samples.append({
+            "name": item.get("name"),
+            "index": item.get("index"),
+            "status": item.get("status"),
+            "segment_count": item.get("segment_count"),
+            "duration": item.get("duration"),
+            "render_seconds": item.get("render_seconds"),
+            "route": item.get("route"),
+            "reason": item.get("reason"),
+            "route_counts": dict(item.get("route_counts") or {}),
+            "blockers": _v56_chunk_blockers(item)[:8],
+        })
+    return samples
+
+
+def _v56_slow_path_recommendations(
+    *,
+    segment_fast_path: Dict[str, Any],
+    chunk_fast_path: Dict[str, Any],
+    segment_blockers: List[Dict[str, Any]],
+    chunk_blockers: List[Dict[str, Any]],
+    selected_encoder: str,
+) -> List[Dict[str, Any]]:
+    recommendations: List[Dict[str, Any]] = []
+    segment_rate = segment_fast_path.get("fast_path_rate")
+    chunk_rate = chunk_fast_path.get("fast_path_rate")
+
+    if chunk_rate is not None and float(chunk_rate) < 0.5:
+        recommendations.append({
+            "id": "increase_chunk_fast_path_coverage",
+            "priority": "high",
+            "message": "Most chunks still render through MoviePy; expand FFmpeg image/video/card chunk coverage first.",
+        })
+    if segment_rate is not None and float(segment_rate) < 0.5:
+        recommendations.append({
+            "id": "reduce_segment_moviepy_routes",
+            "priority": "high",
+            "message": "Most segments are not on a fast path; inspect top segment blockers before tuning encoding.",
+        })
+
+    blocker_names = {str(item.get("name") or "") for item in [*segment_blockers, *chunk_blockers]}
+    if any("transition:" in name for name in blocker_names):
+        recommendations.append({
+            "id": "simplify_long_video_transitions",
+            "priority": "medium",
+            "message": "Complex transitions are blocking FFmpeg routes; use cut/light transitions for long-video stable exports.",
+        })
+    if any("overlay:text" in name for name in blocker_names):
+        recommendations.append({
+            "id": "cache_or_limit_text_overlays",
+            "priority": "medium",
+            "message": "Text overlays are keeping segments on MoviePy; prefer cacheable overlay styles or prerendered cards.",
+        })
+    if str(selected_encoder or "") == "libx264":
+        recommendations.append({
+            "id": "enable_hardware_encoder_auto",
+            "priority": "medium",
+            "message": "Final encoding is using libx264; hardware_encoder=auto may reduce export time on supported GPUs.",
+        })
+    if not recommendations:
+        recommendations.append({
+            "id": "fast_paths_healthy",
+            "priority": "low",
+            "message": "Fast-path coverage looks healthy; focus on the top timing step or unusually slow chunks.",
+        })
+    return recommendations[:6]
+
+
+def _v56_slow_path_report(
+    segment_route_details: List[Dict[str, Any]],
+    chunk_route_details: List[Dict[str, Any]],
+    *,
+    selected_encoder: str,
+) -> Dict[str, Any]:
+    segment_fast_path = _v56_fast_path_coverage(
+        segment_route_details,
+        fast_routes=FAST_SEGMENT_ROUTES,
+        limit=8,
+    )
+    chunk_fast_path = _v56_fast_path_coverage(
+        chunk_route_details,
+        fast_routes=FAST_CHUNK_ROUTES,
+        limit=8,
+    )
+    segment_blockers = _v56_ranked_blockers(segment_route_details, _v56_segment_blockers)
+    chunk_blockers = _v56_ranked_blockers(chunk_route_details, _v56_chunk_blockers)
+    return {
+        "strategy_version": "slow_path_report_v1",
+        "segments": {
+            **segment_fast_path,
+            "top_blockers": segment_blockers,
+            "samples": _v56_slow_segment_samples(segment_route_details),
+        },
+        "chunks": {
+            **chunk_fast_path,
+            "top_blockers": chunk_blockers,
+            "samples": _v56_slow_chunk_samples(chunk_route_details),
+        },
+        "recommendations": _v56_slow_path_recommendations(
+            segment_fast_path=segment_fast_path,
+            chunk_fast_path=chunk_fast_path,
+            segment_blockers=segment_blockers,
+            chunk_blockers=chunk_blockers,
+            selected_encoder=selected_encoder,
+        ),
     }
 
 
@@ -299,11 +498,11 @@ def _v56_observability_summary(
         "fast_path_coverage": {
             "segments": _v56_fast_path_coverage(
                 segment_route_details,
-                fast_routes=("photo_prerender", "direct_chunk_candidate", "video_fit", "video_motion_fit"),
+                fast_routes=FAST_SEGMENT_ROUTES,
             ),
             "chunks": _v56_fast_path_coverage(
                 chunk_route_details,
-                fast_routes=("ffmpeg_direct_chunk", "ffmpeg_fitted_video_chunk", "ffmpeg_card_chunk", "ffmpeg_image_chunk"),
+                fast_routes=FAST_CHUNK_ROUTES,
             ),
         },
         "route_differences": {
@@ -323,6 +522,10 @@ def _v56_report_summary_fields(
     segment_fast_path = dict(fast_path_coverage.get("segments") or {})
     chunk_fast_path = dict(fast_path_coverage.get("chunks") or {})
     route_differences = dict((observability.get("route_differences") or {}).get("segments") or {})
+    slow_path_report = dict((diagnostics or {}).get("slow_path_report") or {})
+    slow_segments = dict(slow_path_report.get("segments") or {})
+    slow_chunks = dict(slow_path_report.get("chunks") or {})
+    top_blockers = list(slow_segments.get("top_blockers") or slow_chunks.get("top_blockers") or [])
     return {
         "render_intent": render_intent,
         "actual_backend": backend_payload.get("actual_backend_name"),
@@ -333,6 +536,9 @@ def _v56_report_summary_fields(
         "fallback_applied": bool(backend_payload.get("fallback_applied")),
         "segment_fast_path_rate": segment_fast_path.get("fast_path_rate"),
         "chunk_fast_path_rate": chunk_fast_path.get("fast_path_rate"),
+        "slow_segment_count": int(slow_segments.get("non_fast_path_count") or 0),
+        "slow_chunk_count": int(slow_chunks.get("non_fast_path_count") or 0),
+        "top_slow_path_blockers": top_blockers[:5],
         "segment_route_difference_count": int(route_differences.get("changed_count") or 0),
         "segment_route_difference_rate": route_differences.get("changed_rate"),
     }
@@ -415,6 +621,11 @@ def _v56_render_diagnostics(
             source_paths.append(source_path)
     segment_route_details = _v56_collect_segment_route_details(segments)
     chunk_route_details = _v56_collect_chunk_route_details(groups, chunk_reports)
+    slow_path_report = _v56_slow_path_report(
+        segment_route_details,
+        chunk_route_details,
+        selected_encoder=selected_encoder,
+    )
     return {
         "strategy_version": "render_diagnostics_v2",
         "backend": _v56_backend_report_payload(
@@ -452,6 +663,7 @@ def _v56_render_diagnostics(
             "segment_details": segment_route_details,
             "chunk_details": chunk_route_details,
         },
+        "slow_path_report": slow_path_report,
         "timings": dict(timings or getattr(renderer, "last_render_timings", {}) or {}),
         "observability": _v56_observability_summary(
             renderer,

@@ -293,6 +293,7 @@ class V56StableRenderer:
                     "name": chunk_name,
                     "status": "cached",
                     "duration": duration,
+                    "render_seconds": 0.0,
                     "cache_key": key,
                     "runtime_chunk_route": group.get("runtime_chunk_route"),
                     "runtime_chunk_route_reason": group.get("runtime_chunk_route_reason"),
@@ -300,6 +301,7 @@ class V56StableRenderer:
                 continue
 
             try:
+                single_chunk_started = perf_counter()
                 self.write_chunk_video(
                     renderer,
                     group,
@@ -311,6 +313,7 @@ class V56StableRenderer:
                 ok, reason, duration = self.validate_video(chunk_path)
                 if not ok:
                     raise RuntimeError(reason)
+                single_chunk_seconds = round(perf_counter() - single_chunk_started, 4)
 
                 manifest["chunks"][chunk_name] = {
                     "status": "done",
@@ -320,6 +323,7 @@ class V56StableRenderer:
                     "attempt_count": int(existing.get("attempt_count") or 0) + 1,
                     "runtime_chunk_route": group.get("runtime_chunk_route"),
                     "runtime_chunk_route_reason": group.get("runtime_chunk_route_reason"),
+                    "render_seconds": single_chunk_seconds,
                     "updated_at": datetime.now().isoformat(),
                 }
                 manifest["last_completed_chunk"] = chunk_name
@@ -329,6 +333,7 @@ class V56StableRenderer:
                     "name": chunk_name,
                     "status": "rendered",
                     "duration": duration,
+                    "render_seconds": single_chunk_seconds,
                     "cache_key": key,
                     "runtime_chunk_route": group.get("runtime_chunk_route"),
                     "runtime_chunk_route_reason": group.get("runtime_chunk_route_reason"),

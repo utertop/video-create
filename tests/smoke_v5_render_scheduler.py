@@ -278,6 +278,16 @@ def test_render_diagnostics_expose_route_observability() -> None:
     assert observability["fast_path_coverage"]["segments"]["fast_path_count"] == 1
     assert observability["fast_path_coverage"]["segments"]["non_fast_path_count"] == 1
     assert observability["cache_efficiency"]["proxy_media"]["eligible"] == 0
+    slow_path = diagnostics["slow_path_report"]
+    assert slow_path["strategy_version"] == "slow_path_report_v1"
+    assert slow_path["segments"]["non_fast_path_count"] == 1
+    assert slow_path["segments"]["samples"][0]["segment_id"] == "seg_diag_img"
+    assert slow_path["segments"]["top_blockers"][0]["name"].startswith("reason:")
+    assert slow_path["recommendations"][0]["id"] in {
+        "enable_hardware_encoder_auto",
+        "increase_chunk_fast_path_coverage",
+        "reduce_segment_moviepy_routes",
+    }
 
 
 def test_render_backend_selector_keeps_preview_on_legacy_backend() -> None:
