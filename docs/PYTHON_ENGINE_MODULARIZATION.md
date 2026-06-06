@@ -80,6 +80,10 @@
   - title style layer renderer and title animation helpers
   - title/chapter/end card rendering helpers
   - overlay title, cover, and title-preview background helpers
+- `video_engine/render_media_clips.py`
+  - image/video MoviePy clip construction helpers
+  - text-card background frame extraction, blur backgrounds, and visual motion
+  - watermark composition helper
 - `video_engine/audio.py`
   - audio probing and normalized-audio cache helpers
   - auto music scoring and playlist selection
@@ -94,6 +98,6 @@
 
 ## Next Safe Steps
 
-1. Split image/video clip composition helpers into `render_media_clips.py`.
-2. Move watermark and blur-background helpers once media clip boundaries are stable.
-3. Keep `Renderer.render()` and CLI wrappers in `video_engine_v5.py` until media composition is smaller.
+1. Split timeline composition and transition helpers into `render_timeline.py`.
+2. Move standard-render report emission after timeline boundaries are stable.
+3. Keep CLI wrappers in `video_engine_v5.py` as the compatibility entrypoint.

@@ -456,6 +456,8 @@ def apply_overlay_title(
     seg: Dict[str, Any],
     *,
     composite_video_clip_cls: Any = None,
+    image_clip_cls: Any = None,
+    np_module: Any = None,
 ) -> Any:
     text = seg.get("overlay_text")
     if not text:
@@ -463,7 +465,15 @@ def apply_overlay_title(
     subtitle = seg.get("overlay_subtitle")
     duration = min(float(seg.get("overlay_duration") or 1.8), float(clip.duration or 1.8))
     style = seg.get("overlay_title_style")
-    overlay = overlay_title_clip(renderer, str(text), subtitle, duration, style=style)
+    overlay = overlay_title_clip(
+        renderer,
+        str(text),
+        subtitle,
+        duration,
+        style=style,
+        image_clip_cls=image_clip_cls,
+        np_module=np_module,
+    )
     return composite_video_clip_cls([clip, overlay], size=clip.size).set_duration(clip.duration)
 
 

@@ -93,6 +93,7 @@ from video_engine import render_chunks as render_chunks_helpers
 from video_engine import render_finalize as render_finalize_helpers
 from video_engine import render_cards as render_cards_helpers
 from video_engine import render_image_cache as render_image_cache_helpers
+from video_engine import render_media_clips as render_media_clip_helpers
 from video_engine import render_proxy as render_proxy_helpers
 from video_engine import render_stable as render_stable_helpers
 from video_engine import render_visual_base as render_visual_base_helpers
@@ -1486,59 +1487,18 @@ class Renderer:
                 return clip
 
     def _find_visual_source(self, direction: str) -> Optional[str]:
-        """Find first/last image or video source from render_plan for title/end backgrounds."""
-        segments = self.plan.get("segments", [])
-        ordered = segments if direction == "first" else list(reversed(segments))
-        for seg in ordered:
-            if seg.get("type") in {"image", "video"} and seg.get("source_path"):
-                return str(seg.get("source_path"))
-        return None
+        return render_media_clip_helpers.find_visual_source(self, direction)
 
     def _source_frame_for_background(self, source_path: Optional[str], position: str) -> Optional[Path]:
-        """Return a temporary image frame that can be blurred as a text-card background.
-
-        Image source: EXIF-transposed image.
-        Video source: first frame for opening title, last frame for ending card.
-        """
-        if not source_path:
-            return None
-
-        source = Path(str(source_path))
-        if not source.exists():
-            emit_event("log", message=f"Preview background source missing, using fallback: {source}")
-            return None
-
-        suffix = source.suffix.lower()
-        out = self._cache_path("text_frames", source, ".jpg", f"text_bg|position={position}")
-        if out.exists():
-            return out
-
-        try:
-            if suffix in IMAGE_EXTS:
-                with Image.open(source) as img:
-                    img = ImageOps.exif_transpose(img).convert("RGB")
-                    img.save(out, quality=94)
-                return out
-
-            if suffix in VIDEO_EXTS:
-                render_source = self._normalize_video_display_geometry(source)
-                clip = VideoFileClip(str(render_source))
-                try:
-                    duration = float(clip.duration or 0)
-                    if position == "last":
-                        t = max(0.0, duration - 0.08) if duration else 0.0
-                    elif position == "middle":
-                        t = max(0.0, duration / 2.0) if duration else 0.0
-                    else:
-                        t = 0.05 if duration > 0.1 else 0.0
-                    clip.save_frame(str(out), t=t)
-                    return out
-                finally:
-                    clip.close()
-        except Exception as exc:
-            emit_event("log", message=f"Fixed image cache failed for {source.name}: {exc}")
-
-        return None
+        return render_media_clip_helpers.source_frame_for_background(
+            self,
+            source_path,
+            position,
+            emit_event_fn=emit_event,
+            image_cls=Image,
+            image_ops=ImageOps,
+            video_file_clip_cls=VideoFileClip,
+        )
 
     def _chapter_card(self, seg: Dict[str, Any], duration: float):
         return render_cards_helpers.chapter_card(
@@ -1629,6 +1589,8 @@ class Renderer:
             clip,
             seg,
             composite_video_clip_cls=CompositeVideoClip,
+            image_clip_cls=ImageClip,
+            np_module=np,
         )
 
     def _overlay_title_clip(self, title: str, subtitle: Optional[str], duration: float, style: Optional[Dict[str, Any]] = None):
@@ -1664,22 +1626,16 @@ class Renderer:
         motion_config: Optional[Dict[str, Any]] = None,
         overlay_spec: Optional[Dict[str, Any]] = None,
     ):
-        source = self._get_proxy_source(source, is_video=False)
-        fixed = self._cache_path("fixed_images", source, ".jpg", "exif_rgb_v1")
-        if not fixed.exists():
-            with Image.open(source) as img:
-                img = ImageOps.exif_transpose(img).convert("RGB")
-                img.save(fixed, quality=95)
-
-        if self._should_prerender_image_segment(duration, motion_config):
-            self.photo_segment_cache_stats["eligible"] += 1
-            if overlay_spec:
-                self.photo_segment_cache_stats["overlay_eligible"] += 1
-            prerendered = self._prerender_image_segment(source, fixed, duration, motion_config, overlay_spec=overlay_spec)
-            if prerendered is not None and prerendered.exists():
-                return VideoFileClip(str(prerendered)).set_duration(duration)
-
-        return self._build_image_segment_clip(fixed, duration, motion_config, overlay_spec=overlay_spec)
+        return render_media_clip_helpers.image_clip(
+            self,
+            source,
+            duration,
+            motion_config,
+            overlay_spec,
+            image_cls=Image,
+            image_ops=ImageOps,
+            video_file_clip_cls=VideoFileClip,
+        )
 
     def _video_clip(
         self,
@@ -1689,63 +1645,19 @@ class Renderer:
         motion_config: Optional[Dict[str, Any]] = None,
         prefer_ffmpeg: bool = False,
     ):
-        source = self._get_proxy_source(source, is_video=True)
-        if prefer_ffmpeg:
-            self.video_segment_cache_stats["eligible"] += 1
-            motion_spec = self._ffmpeg_video_motion_cache_spec(motion_config)
-            if motion_spec is not None:
-                self.video_segment_cache_stats["motion_eligible"] += 1
-                motion_fitted = self._ffmpeg_fit_motion_video_segment(
-                    source,
-                    duration,
-                    motion_spec,
-                    keep_audio=keep_audio,
-                )
-                if motion_fitted:
-                    return VideoFileClip(str(motion_fitted))
-            else:
-                fitted = self._ffmpeg_fit_video_segment(source, duration, keep_audio=keep_audio)
-                if fitted:
-                    return VideoFileClip(str(fitted))
-
-        render_source = self._normalize_video_display_geometry(source)
-        raw = VideoFileClip(str(render_source))
-        if raw.duration and raw.duration > duration:
-            raw = raw.subclip(0, duration)
-        raw = raw.set_duration(min(duration, raw.duration or duration))
-
-        frame_path: Optional[Path] = self._cache_path("video_frames", source, ".jpg", "middle_frame_v1")
-        try:
-            if not frame_path.exists():
-                raw.save_frame(str(frame_path), t=min(1.0, (raw.duration or 1.0) / 2))
-        except Exception:
-            frame_path = None
-
-        final = self._compose_with_blur_bg(
-            raw,
-            raw.duration or duration,
-            source_image=frame_path,
+        return render_media_clip_helpers.video_clip(
+            self,
+            source,
+            duration,
+            keep_audio=keep_audio,
             motion_config=motion_config,
+            prefer_ffmpeg=prefer_ffmpeg,
+            audio_file_clip_cls=AudioFileClip,
+            color_clip_cls=ColorClip,
+            composite_video_clip_cls=CompositeVideoClip,
+            image_clip_cls=ImageClip,
+            video_file_clip_cls=VideoFileClip,
         )
-        prepared_source_audio = self._prepare_source_audio_path(source) if keep_audio else None
-        if keep_audio and prepared_source_audio is not None:
-            source_volume = float(self.audio_settings.get("source_audio_volume", 1.0))
-            if source_volume > 0:
-                source_audio = AudioFileClip(str(prepared_source_audio))
-                source_audio_duration = float(getattr(source_audio, "duration", None) or 0.0)
-                if source_audio_duration > 0:
-                    source_audio = source_audio.subclip(0, min(source_audio_duration, raw.duration or duration))
-                if abs(source_volume - 1.0) > 0.001:
-                    source_audio = source_audio.volumex(source_volume)
-                final = final.set_audio(source_audio)
-        elif keep_audio and raw.audio is not None:
-            source_volume = float(self.audio_settings.get("source_audio_volume", 1.0))
-            if source_volume > 0:
-                source_audio = raw.audio
-                if abs(source_volume - 1.0) > 0.001:
-                    source_audio = source_audio.volumex(source_volume)
-                final = final.set_audio(source_audio)
-        return final
 
     def _normalize_video_display_geometry(self, source: Path) -> Path:
         return render_proxy_helpers.normalize_video_display_geometry(
@@ -1866,21 +1778,18 @@ class Renderer:
         source_image: Optional[Path],
         motion_config: Optional[Dict[str, Any]] = None,
     ):
-        tw, th = self.target_size
-        scale = min(tw / clip.w, th / clip.h)
-        fg = clip.resize((max(1, int(clip.w * scale)), max(1, int(clip.h * scale))))
-        fg = self._apply_visual_motion(fg, duration, motion_config)
-
-        if source_image and Path(source_image).exists():
-            bg_path = self._blur_bg(Path(source_image))
-            bg = ImageClip(str(bg_path)).set_duration(duration)
-        else:
-            bg = ColorClip(self.target_size, color=(0, 0, 0)).set_duration(duration)
-
-        return CompositeVideoClip(
-            [bg, fg.set_position("center")],
-            size=self.target_size,
-        ).set_duration(duration)
+        return render_media_clip_helpers.compose_with_blur_bg(
+            self,
+            clip,
+            duration,
+            source_image,
+            motion_config,
+            color_clip_cls=ColorClip,
+            composite_video_clip_cls=CompositeVideoClip,
+            image_cls=Image,
+            image_filter_mod=ImageFilter,
+            image_clip_cls=ImageClip,
+        )
 
     def _apply_visual_motion(
         self,
@@ -1888,75 +1797,32 @@ class Renderer:
         duration: float,
         motion_config: Optional[Dict[str, Any]],
     ):
-        motion_type = str((motion_config or {}).get("type") or "none")
-        if motion_type in {"none", "still_hold"}:
-            return clip
-
-        duration = max(float(duration or 0.1), 0.1)
-
-        if motion_type in {"gentle_push", "slow_push"}:
-            amount = 0.018 if motion_type == "gentle_push" else 0.015
-            return self._resize_clip_safe(clip, lambda t: 1.0 + amount * min(max(t / duration, 0.0), 1.0))
-
-        if motion_type in {"ken_burns", "subtle_ken_burns"}:
-            amount = 0.022 if motion_type == "ken_burns" else 0.012
-            return self._resize_clip_safe(clip, lambda t: 1.0 + amount * min(max(t / duration, 0.0), 1.0))
-
-        if motion_type in {"punch_zoom", "micro_zoom"}:
-            amount = 0.035 if motion_type == "punch_zoom" else 0.025
-            return self._resize_clip_safe(
-                clip,
-                lambda t: 1.0 + amount * max(0.0, 1.0 - min(max(t / 0.42, 0.0), 1.0)),
-            )
-
-        return clip
+        return render_media_clip_helpers.apply_visual_motion(self, clip, duration, motion_config)
 
     def _resize_clip_safe(self, clip: Any, scale_fn: Any):
-        try:
-            return clip.resize(scale_fn)
-        except Exception:
-            return clip
+        return render_media_clip_helpers.resize_clip_safe(clip, scale_fn)
 
     def _blur_bg(self, source_image: Path) -> Path:
-        out = self._cache_path("blur_backgrounds", source_image, ".jpg", "blur30_dark28_v1")
-        if out.exists():
-            return out
-
-        tw, th = self.target_size
-        img = None
-        bg = None
-        try:
-            with Image.open(source_image) as raw_img:
-                img = raw_img.convert("RGB")
-            scale = max(tw / img.width, th / img.height)
-            bg = img.resize((int(img.width * scale), int(img.height * scale)), Image.Resampling.LANCZOS)
-
-            left = max(0, (bg.width - tw) // 2)
-            top = max(0, (bg.height - th) // 2)
-            bg = bg.crop((left, top, left + tw, top + th)).filter(ImageFilter.GaussianBlur(30))
-            bg = Image.blend(bg, Image.new("RGB", bg.size, (0, 0, 0)), 0.28)
-            bg.save(out, quality=90)
-            return out
-        finally:
-            for image in (bg, img):
-                try:
-                    if image is not None:
-                        image.close()
-                except Exception:
-                    pass
+        return render_media_clip_helpers.blur_bg(
+            self,
+            source_image,
+            image_cls=Image,
+            image_filter_mod=ImageFilter,
+        )
 
     def _add_watermark(self, video: Any, text: str):
-        font = load_font(30)
-        temp = Image.new("RGBA", (1, 1), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(temp)
-        tw, th = text_size(draw, text, font)
-
-        img = Image.new("RGBA", (tw + 32, th + 24), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(img)
-        draw_text_with_emoji(draw, (16, 10), text, font=font, fill=(255, 255, 255, 150))
-
-        wm = ImageClip(np.array(img)).set_duration(video.duration).set_position(("right", "bottom"))
-        return CompositeVideoClip([video, wm], size=video.size)
+        return render_media_clip_helpers.add_watermark(
+            video,
+            text,
+            np_module=np,
+            image_cls=Image,
+            image_draw_mod=ImageDraw,
+            image_clip_cls=ImageClip,
+            composite_video_clip_cls=CompositeVideoClip,
+            load_font_fn=load_font,
+            text_size_fn=text_size,
+            draw_text_with_emoji_fn=draw_text_with_emoji,
+        )
 
     def _create_cover(self) -> None:
         render_cards_helpers.create_cover(self, emit_event_fn=emit_event)
