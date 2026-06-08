@@ -74,6 +74,10 @@ def ffmpeg_image_motion_cache_spec(motion_config: Optional[Dict[str, Any]]) -> O
         return {"type": motion_type, "amount": 0.018}
     if motion_type == "slow_push":
         return {"type": motion_type, "amount": 0.015}
+    if motion_type == "subtle_ken_burns":
+        return {"type": motion_type, "amount": 0.012}
+    if motion_type == "micro_zoom":
+        return {"type": motion_type, "amount": 0.025}
     return None
 
 

@@ -198,7 +198,7 @@ def test_ffmpeg_image_chunk_renders_safe_image_only_stable_chunk() -> None:
                 "text": None,
                 "transition": "cut",
                 "transition_config": {"type": "cut", "duration": 0},
-                "motion_config": {"type": "gentle_push"},
+                "motion_config": {"type": "micro_zoom"},
             },
             {
                 "segment_id": "seg_img_0002",
@@ -210,7 +210,7 @@ def test_ffmpeg_image_chunk_renders_safe_image_only_stable_chunk() -> None:
                 "text": None,
                 "transition": "cut",
                 "transition_config": {"type": "cut", "duration": 0},
-                "motion_config": {"type": "slow_push"},
+                "motion_config": {"type": "subtle_ken_burns"},
             },
         ],
     }

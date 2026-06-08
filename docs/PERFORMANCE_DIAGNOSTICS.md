@@ -50,3 +50,16 @@ For a 10+ minute render that takes hours, inspect these first:
 4. If `recommendations` includes `enable_hardware_encoder_auto`, final encoding is still CPU-bound.
 5. If `timing_highlights.top_steps` points to chunk rendering, improve route coverage before tuning final encoding.
 
+## Current Image Fast Path Coverage
+
+`ffmpeg_image_chunk` currently accepts image segments with:
+
+- `none`
+- `still_hold`
+- `gentle_push`
+- `slow_push`
+- `subtle_ken_burns`
+- `micro_zoom`
+
+It still rejects stronger or more expressive image motion, such as `ken_burns`
+and `punch_zoom`, until those effects have a closer FFmpeg implementation.

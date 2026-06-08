@@ -88,7 +88,7 @@ def test_renderer_applies_runtime_render_routes() -> None:
                 "subtitle": None,
                 "start_time": 0.0,
                 "end_time": 4.0,
-                "motion_config": {"type": "gentle_push"},
+                "motion_config": {"type": "micro_zoom"},
             },
             {
                 "segment_id": "seg_vid_chunk",
@@ -350,7 +350,7 @@ def test_standard_visual_chunk_groups_prefer_ffmpeg_for_safe_image_units() -> No
                 "end_time": 4.0,
                 "text": None,
                 "transition_config": {"type": "cut", "duration": 0},
-                "motion_config": {"type": "slow_push"},
+                "motion_config": {"type": "subtle_ken_burns"},
             },
         ],
     }

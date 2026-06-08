@@ -95,7 +95,7 @@ def _v56_is_ffmpeg_image_chunk_candidate(
     if transition_type not in {"none", "cut"} or transition_duration > 0.05:
         return False
     motion_type = str((seg.get("motion_config") or {}).get("type") or "none")
-    if motion_type not in {"none", "still_hold", "gentle_push", "slow_push"}:
+    if motion_type not in {"none", "still_hold", "gentle_push", "slow_push", "subtle_ken_burns", "micro_zoom"}:
         return False
     if seg.get("overlay_text"):
         return _v56_image_overlay_cache_spec(seg, float(seg.get("duration") or 0.0)) is not None

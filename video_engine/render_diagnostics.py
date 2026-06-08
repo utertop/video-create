@@ -152,7 +152,7 @@ def _v56_segment_blockers(item: Dict[str, Any]) -> List[str]:
     motion = str(item.get("motion") or "none")
     if stype == "video" and motion not in {"none", "still_hold"}:
         blockers.append(f"video_motion:{motion}")
-    elif stype == "image" and motion not in {"none", "still_hold", "gentle_push", "slow_push"}:
+    elif stype == "image" and motion not in {"none", "still_hold", "gentle_push", "slow_push", "subtle_ken_burns", "micro_zoom"}:
         blockers.append(f"image_motion:{motion}")
 
     if bool(item.get("has_overlay")):
