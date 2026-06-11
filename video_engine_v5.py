@@ -88,6 +88,7 @@ from video_engine.plan import (
     set_plan_event_emitter,
 )
 from video_engine.compile import Compiler, set_compile_event_emitter
+from video_engine.timeline import build_timeline_from_blueprint, build_timeline_from_render_plan
 from video_engine import render_diagnostics as render_diagnostics_helpers
 from video_engine import render_chunks as render_chunks_helpers
 from video_engine import render_finalize as render_finalize_helpers
@@ -113,6 +114,7 @@ from video_engine.render_cache import (
     _v56_atomic_replace,
     _v56_build_chunk_groups,
     _v56_chunk_visual_audio_payload,
+    _v56_render_cache_policy,
     _v56_segment_cache_key,
     _v56_segment_source_fingerprints,
     _v56_source_fingerprint,
@@ -133,12 +135,14 @@ usage:
   python video_engine_v5.py scan    --input_folder <folder> --output <media_library.json> [--recursive]
   python video_engine_v5.py plan    --library <media_library.json> --output <story_blueprint.json> [--template auto]
   python video_engine_v5.py compile --blueprint <story_blueprint.json> --library <media_library.json> --output <render_plan.json>
+  python video_engine_v5.py timeline-generate --render_plan <render_plan.json> --output <timeline.json> [--blueprint <story_blueprint.json>]
   python video_engine_v5.py render  --plan <render_plan.json> --output <video.mp4> [--params <json>]
   python video_engine_v5.py preview-render --plan <render_plan.json> --output <preview.mp4>
   python video_engine_v5.py preview-title --title <text> --style_json <json> --output <preview.mp4>
 
 Pipeline:
-  scan -> media_library.json -> plan -> story_blueprint.json -> compile -> render_plan.json -> render -> final mp4
+  scan -> media_library.json -> plan -> story_blueprint.json -> compile -> render_plan.json -> timeline-generate -> timeline.json
+  render -> final mp4
 
 Notes:
   - --help intentionally does not import heavy media dependencies.
@@ -538,6 +542,7 @@ class Renderer:
             self.params.get("_backend_execution") or self.backend_decision
         )
         settings = plan.get("render_settings", {})
+        self.cache_policy_summary = _v56_render_cache_policy(self.params, settings)
         aspect_ratio = params.get("aspect_ratio") or settings.get("aspect_ratio") or "16:9"
         if params.get("preview_height"):
             self.target_size = get_preview_resolution(aspect_ratio, int(params.get("preview_height") or 540))
@@ -603,6 +608,7 @@ class Renderer:
             "manifest_hit": 0,
             "created": 0,
             "fallback": 0,
+            "final_proxy_blocked": 0,
         }
         self.cache_cleanup_stats: Dict[str, Any] = {"enabled": True, "buckets": {}, "deleted_files": 0, "deleted_bytes": 0}
         self.last_render_timings: Dict[str, Any] = {}
@@ -1223,6 +1229,7 @@ class Renderer:
                     "card_segment_cache": self._card_segment_cache_summary(),
                     "video_segment_cache": self._video_segment_cache_summary(),
                     "proxy_media": self._proxy_media_summary(),
+                    "cache_policy": dict(self.cache_policy_summary),
                     "cache_cleanup": self.cache_cleanup_stats,
                     "render_scheduler": self.render_scheduler_summary,
                     "segment_routes": _v56_collect_segment_route_details(self.plan.get("segments", []) or []),
@@ -1293,6 +1300,7 @@ class Renderer:
                     "card_segment_cache": self._card_segment_cache_summary(),
                     "video_segment_cache": self._video_segment_cache_summary(),
                     "proxy_media": self._proxy_media_summary(),
+                    "cache_policy": dict(self.cache_policy_summary),
                     "cache_cleanup": self.cache_cleanup_stats,
                     "render_scheduler": self.render_scheduler_summary,
                     "segment_routes": _v56_collect_segment_route_details(self.plan.get("segments", []) or []),
@@ -1856,6 +1864,47 @@ def command_compile(args: argparse.Namespace) -> None:
     write_json(args.output, result)
     if args.output:
         emit_event("artifact", artifact="render_plan", path=args.output, message="render plan generated")
+
+
+def command_timeline_generate(args: argparse.Namespace) -> None:
+    render_plan = read_json(args.render_plan)
+    blueprint = read_json(args.blueprint) if getattr(args, "blueprint", None) else None
+    library = read_json(args.library) if getattr(args, "library", None) else None
+    output_path = getattr(args, "output", None)
+    existing_timeline_path = getattr(args, "existing_timeline", None)
+    existing_timeline = None
+
+    if existing_timeline_path and Path(str(existing_timeline_path)).exists():
+        existing_timeline = read_json(str(existing_timeline_path))
+    elif output_path and Path(str(output_path)).exists():
+        existing_timeline = read_json(str(output_path))
+
+    project_dir = getattr(args, "project_dir", None)
+    if not project_dir and output_path:
+        project_dir = str(Path(str(output_path)).parent)
+
+    if blueprint:
+        result = build_timeline_from_blueprint(
+            blueprint,
+            render_plan,
+            media_library=library,
+            existing_timeline=existing_timeline,
+            media_library_path=getattr(args, "library", None),
+            story_blueprint_path=getattr(args, "blueprint", None),
+            render_plan_path=getattr(args, "render_plan", None),
+            project_dir=project_dir,
+        )
+    else:
+        result = build_timeline_from_render_plan(
+            render_plan,
+            existing_timeline=existing_timeline,
+            render_plan_path=getattr(args, "render_plan", None),
+            project_dir=project_dir,
+        )
+
+    write_json(output_path, result)
+    if output_path:
+        emit_event("artifact", artifact="timeline", path=output_path, message="timeline generated")
 
 
 
@@ -2435,6 +2484,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--library", required=True)
     p.add_argument("--output")
     p.set_defaults(func=command_compile)
+
+    p = sub.add_parser("timeline-generate", help="Generate timeline.json from story_blueprint.json and render_plan.json")
+    p.add_argument("--render_plan", required=True)
+    p.add_argument("--output")
+    p.add_argument("--blueprint")
+    p.add_argument("--library")
+    p.add_argument("--existing_timeline")
+    p.add_argument("--project_dir")
+    p.set_defaults(func=command_timeline_generate)
 
     p = sub.add_parser("render", help="Render final MP4 from render_plan.json")
     p.add_argument("--plan", required=True)

@@ -626,7 +626,7 @@ def test_proxy_media_cache_is_opt_in_and_reportable() -> None:
     renderer = engine.Renderer(
         plan,
         str(root / "output.mp4"),
-        {"fps": 12, "quality": "draft", "proxy_media": True},
+        {"preview": True, "preview_height": 180, "fps": 12, "quality": "draft", "proxy_media": True},
     )
 
     proxy_a = renderer._get_proxy_source(source, is_video=False)
@@ -640,6 +640,7 @@ def test_proxy_media_cache_is_opt_in_and_reportable() -> None:
     assert stats["created"] == 1
     assert stats["hit"] == 1
     assert stats["fallback"] == 0
+    assert stats["final_proxy_blocked"] == 0
 
 
 def test_proxy_media_manifest_is_preferred_for_preview() -> None:

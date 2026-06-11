@@ -3990,6 +3990,309 @@ select:focus {
  opacity: 0.8;
 }
 
+.timeline-editor-shell {
+  display: grid;
+  gap: 12px;
+}
+
+.timeline-editor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.timeline-editor-head > div {
+  display: grid;
+  gap: 3px;
+}
+
+.timeline-editor-head strong {
+  color: #f0fdf4;
+  font-size: 0.95rem;
+}
+
+.timeline-editor-head span {
+  color: #90aa9d;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.timeline-source-badge {
+  flex: 0 0 auto;
+  padding: 6px 10px;
+  color: #a7f3d0;
+  font-size: 0.72rem;
+  font-weight: 900;
+  background: rgb(20 65 44 / 56%);
+  border: 1px solid #2d6047;
+  border-radius: 999px;
+}
+
+.timeline-source-badge.render_plan {
+  color: #fde68a;
+  background: rgb(76 51 16 / 48%);
+  border-color: #806223;
+}
+
+.timeline-editor-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 280px);
+  gap: 14px;
+  align-items: start;
+}
+
+.timeline-scroll-surface {
+  min-width: 0;
+  max-height: 380px;
+  overflow: auto;
+  padding: 0 8px 8px 0;
+}
+
+.timeline-scroll-surface::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.timeline-scroll-surface::-webkit-scrollbar-thumb {
+  background: #243c32;
+  border-radius: 999px;
+}
+
+.timeline-ruler {
+  position: relative;
+  height: 30px;
+  min-width: 100%;
+  margin-left: 136px;
+  border-bottom: 1px solid rgb(120 150 132 / 22%);
+}
+
+.timeline-ruler-tick {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: rgb(120 150 132 / 28%);
+}
+
+.timeline-ruler-tick span {
+  position: absolute;
+  top: 4px;
+  left: 5px;
+  color: #88a092;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 0.66rem;
+  white-space: nowrap;
+}
+
+.timeline-track-list {
+  display: grid;
+  gap: 8px;
+  min-width: max-content;
+}
+
+.timeline-track {
+  display: grid;
+  grid-template-columns: 124px minmax(720px, 1fr);
+  gap: 12px;
+  align-items: stretch;
+  min-height: 58px;
+}
+
+.timeline-track.disabled {
+  opacity: 0.55;
+}
+
+.timeline-track-label {
+  display: grid;
+  align-content: center;
+  gap: 4px;
+  min-height: 58px;
+  padding: 8px 10px;
+  background: rgb(255 255 255 / 4%);
+  border: 1px solid rgb(255 255 255 / 6%);
+  border-radius: 8px;
+}
+
+.timeline-track-label strong {
+  overflow: hidden;
+  color: #eefcf4;
+  font-size: 0.78rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.timeline-track-label span {
+  color: #8da699;
+  font-size: 0.68rem;
+  font-weight: 800;
+}
+
+.timeline-track-rail {
+  position: relative;
+  min-height: 58px;
+  background:
+    repeating-linear-gradient(90deg, rgb(255 255 255 / 4%) 0 1px, transparent 1px 80px),
+    rgb(255 255 255 / 2%);
+  border: 1px solid rgb(255 255 255 / 6%);
+  border-radius: 8px;
+}
+
+.timeline-clip {
+  position: absolute;
+  top: 7px;
+  bottom: 7px;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  min-width: 48px;
+  padding: 6px 8px;
+  overflow: hidden;
+  color: #f0fdf4;
+  text-align: left;
+  cursor: pointer;
+  background: rgb(99 102 241 / 30%);
+  border: 1px solid rgb(165 180 252 / 30%);
+  border-left: 3px solid #818cf8;
+  border-radius: 7px;
+}
+
+.timeline-clip:hover,
+.timeline-clip.selected {
+  border-color: #a7f3d0;
+  box-shadow: 0 0 0 2px rgb(74 222 128 / 14%);
+}
+
+.timeline-clip.active-rendering {
+  border-color: #4ade80;
+  box-shadow: 0 0 18px rgb(74 222 128 / 22%);
+}
+
+.timeline-clip.linked-audio-section {
+  background: rgb(52 211 153 / 20%);
+}
+
+.timeline-clip.disabled {
+  opacity: 0.48;
+  filter: grayscale(0.7);
+}
+
+.timeline-clip.kind-title_card,
+.timeline-clip.kind-chapter_card {
+  background: rgb(16 185 129 / 22%);
+  border-left-color: #10b981;
+}
+
+.timeline-clip.kind-video_asset {
+  background: rgb(245 158 11 / 20%);
+  border-left-color: #f59e0b;
+}
+
+.timeline-clip.kind-audio_bgm,
+.timeline-clip.kind-audio_source,
+.timeline-clip.kind-audio_effect {
+  background: rgb(45 212 191 / 18%);
+  border-left-color: #2dd4bf;
+}
+
+.timeline-clip-label {
+  color: #b6cfc2;
+  font-size: 0.58rem;
+  font-weight: 900;
+  line-height: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.timeline-clip strong {
+  overflow: hidden;
+  align-self: center;
+  color: #f8fff9;
+  font-size: 0.72rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.timeline-clip > span:last-child {
+  color: #9fbdaf;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 0.62rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.timeline-inspector {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  max-height: 380px;
+  overflow: auto;
+  padding: 12px;
+  background: rgb(255 255 255 / 4%);
+  border: 1px solid rgb(255 255 255 / 8%);
+  border-radius: 8px;
+}
+
+.timeline-inspector.empty {
+  align-content: start;
+}
+
+.timeline-inspector.empty span {
+  color: #91aa9d;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.timeline-inspector-head {
+  display: grid;
+  gap: 4px;
+}
+
+.timeline-inspector-head strong,
+.timeline-inspector > strong {
+  color: #eefcf4;
+  font-size: 0.88rem;
+  text-transform: capitalize;
+}
+
+.timeline-inspector-head span {
+  overflow: hidden;
+  color: #8da699;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 0.66rem;
+  text-overflow: ellipsis;
+}
+
+.timeline-inspector dl {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+}
+
+.timeline-inspector dl > div {
+  display: grid;
+  grid-template-columns: 82px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.timeline-inspector dt {
+  color: #88a092;
+  font-size: 0.68rem;
+  font-weight: 900;
+}
+
+.timeline-inspector dd {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: #e7f5ec;
+  font-size: 0.72rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .render-audio-timeline-card {
   margin-bottom: 1.5rem;
   padding: 1rem 1.1rem;
@@ -4572,6 +4875,14 @@ select:focus {
 @media (max-width: 980px) {
   .render-queue-grid {
     grid-template-columns: 1fr;
+  }
+
+  .timeline-editor-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .timeline-inspector {
+    max-height: none;
   }
 
   .music-submode-buttons,

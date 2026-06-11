@@ -116,11 +116,21 @@ def get_proxy_source(
     image_cls: Any = None,
     image_ops: Any = None,
 ) -> Path:
-    use_proxy = bool(
-        renderer.params.get("preview")
-        or renderer.params.get("proxy_media")
+    cache_policy = getattr(renderer, "cache_policy_summary", {}) or {}
+    preview = bool(renderer.params.get("preview") or cache_policy.get("render_intent") == "preview")
+    proxy_requested = bool(
+        renderer.params.get("proxy_media")
         or renderer.params.get("use_proxy_media")
         or renderer.params.get("optimized_media") == "proxy"
+    )
+    if not preview and proxy_requested:
+        renderer.proxy_media_stats["final_proxy_blocked"] = int(renderer.proxy_media_stats.get("final_proxy_blocked") or 0) + 1
+        emit_event_fn("log", message=f"Final render proxy request ignored; using original source: {source.name}")
+        return source
+
+    use_proxy = bool(
+        preview
+        or (proxy_requested and bool(cache_policy.get("allow_proxy", preview)))
     )
     if not use_proxy:
         return source

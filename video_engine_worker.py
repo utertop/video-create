@@ -101,6 +101,27 @@ def run_task(task: Dict[str, Any]) -> Dict[str, Any]:
             "document": _read_output_json(output_path),
         }
 
+    if task_type == "timeline-generate":
+        output_path = str(task["output_path"])
+        _ensure_parent(output_path)
+        engine.command_timeline_generate(
+            Namespace(
+                render_plan=str(task["render_plan_path"]),
+                output=output_path,
+                blueprint=str(task["blueprint_path"]) if task.get("blueprint_path") else None,
+                library=str(task["library_path"]) if task.get("library_path") else None,
+                existing_timeline=str(task["existing_timeline_path"]) if task.get("existing_timeline_path") else None,
+                project_dir=str(task["project_dir"]) if task.get("project_dir") else None,
+            )
+        )
+        return {
+            "type": "result",
+            "id": task_id,
+            "ok": True,
+            "output_path": output_path,
+            "document": _read_output_json(output_path),
+        }
+
     if task_type == "render":
         engine.render_with_v56_stability(
             str(task["plan_path"]),

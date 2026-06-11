@@ -17,6 +17,30 @@ from .render_routes import (
 _emit_event: Callable[..., None] = lambda _event_type, **_payload: None
 
 
+def _v56_render_cache_policy(params: Dict[str, Any], render_settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    render_settings = render_settings or {}
+    preview = bool(params.get("preview") or render_settings.get("preview"))
+    namespace = "preview" if preview else "final"
+    return {
+        "version": "preview_final_cache_policy_v1",
+        "render_intent": "preview" if preview else "final",
+        "cache_namespace": namespace,
+        "preview_cache_namespace": "preview",
+        "final_cache_namespace": "final",
+        "proxy_cache_namespace": "proxy",
+        "thumbnail_cache_namespace": "thumbnail",
+        "uses_original_source": not preview,
+        "allow_proxy": bool(preview),
+        "proxy_allowed_for_final": False,
+        "quality": params.get("quality") or render_settings.get("quality"),
+        "python_quality": params.get("python_quality") or render_settings.get("python_quality"),
+        "fps": params.get("fps") or render_settings.get("fps"),
+        "aspect_ratio": params.get("aspect_ratio") or render_settings.get("aspect_ratio"),
+        "preview_height": params.get("preview_height") or render_settings.get("preview_height"),
+        "engine_version": ENGINE_VERSION,
+    }
+
+
 def set_render_cache_event_emitter(callback: Callable[..., None]) -> None:
     global _emit_event
     _emit_event = callback
@@ -82,8 +106,12 @@ def _v56_chunk_visual_audio_payload(params: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _v56_segment_cache_key(seg: Dict[str, Any], params: Dict[str, Any]) -> str:
+    cache_policy = _v56_render_cache_policy(params)
     stable = {
         "engine_version": ENGINE_VERSION,
+        "cache_policy_version": cache_policy.get("version"),
+        "cache_namespace": cache_policy.get("cache_namespace"),
+        "render_intent": cache_policy.get("render_intent"),
         "segment_id": seg.get("segment_id"),
         "type": seg.get("type"),
         "source_path": seg.get("source_path"),
@@ -109,6 +137,8 @@ def _v56_segment_cache_key(seg: Dict[str, Any], params: Dict[str, Any]) -> str:
         "fps": params.get("fps"),
         "quality": params.get("quality"),
         "python_quality": params.get("python_quality"),
+        "render_mode": params.get("render_mode"),
+        "preview_height": params.get("preview_height"),
     }
     return _v56_stable_json_hash(stable)
 

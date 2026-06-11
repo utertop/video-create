@@ -475,6 +475,7 @@ def _v56_observability_summary(
             "performance_mode": params.get("performance_mode") or render_settings.get("performance_mode"),
             "preview": bool(params.get("preview")),
         },
+        "cache_policy": dict(getattr(renderer, "cache_policy_summary", {}) or {}),
         "timing_highlights": _v56_timing_highlights(timings or getattr(renderer, "last_render_timings", {}) or {}),
         "cache_efficiency": {
             "visual_base_cache": _v56_cache_efficiency_entry(

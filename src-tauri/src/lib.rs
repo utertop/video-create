@@ -120,6 +120,7 @@ struct ProjectDocumentsLoadResult {
     library: Option<Value>,
     blueprint: Option<Value>,
     render_plan: Option<Value>,
+    timeline: Option<Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2946,6 +2947,7 @@ fn load_project_documents_v5_blocking(project_dir: String) -> Result<ProjectDocu
     let library = load_and_migrate_project_doc(&root.join("media_library.json"), "media_library", &mut migrated, &mut migration_notes)?;
     let blueprint = load_and_migrate_project_doc(&root.join("story_blueprint.json"), "story_blueprint", &mut migrated, &mut migration_notes)?;
     let render_plan = load_and_migrate_project_doc(&root.join("render_plan.json"), "render_plan", &mut migrated, &mut migration_notes)?;
+    let timeline = load_and_migrate_project_doc(&root.join("timeline.json"), "timeline", &mut migrated, &mut migration_notes)?;
 
     Ok(ProjectDocumentsLoadResult {
         project_dir,
@@ -2954,6 +2956,7 @@ fn load_project_documents_v5_blocking(project_dir: String) -> Result<ProjectDocu
         library,
         blueprint,
         render_plan,
+        timeline,
     })
 }
 
@@ -3219,6 +3222,7 @@ fn migrate_v5_document(mut value: Value, expected_type: &str) -> Result<(bool, V
         "media_library" => migrate_media_library_doc(obj, &mut migrated, &mut notes),
         "story_blueprint" => migrate_story_blueprint_doc(obj, &mut migrated, &mut notes),
         "render_plan" => migrate_render_plan_doc(obj, &mut migrated, &mut notes),
+        "timeline" => migrate_timeline_doc(obj, &mut migrated, &mut notes),
         _ => {}
     }
 
@@ -3339,6 +3343,23 @@ fn migrate_render_plan_doc(
             }
         }
     }
+}
+
+fn migrate_timeline_doc(
+    obj: &mut serde_json::Map<String, Value>,
+    migrated: &mut bool,
+    notes: &mut Vec<String>,
+) {
+    if !obj.contains_key("timeline_version") {
+        obj.insert("timeline_version".to_string(), Value::String("v1".to_string()));
+        *migrated = true;
+        notes.push("琛ュ叏 timeline_version".to_string());
+    }
+    ensure_object_child(obj, "project_ref", migrated, notes, "琛ュ叏 project_ref");
+    ensure_object_child(obj, "source_ref", migrated, notes, "琛ュ叏 source_ref");
+    ensure_array_child(obj, "tracks", migrated, notes, "琛ュ叏 tracks");
+    ensure_object_child(obj, "clip_index", migrated, notes, "琛ュ叏 clip_index");
+    ensure_object_child(obj, "metadata", migrated, notes, "琛ュ叏 metadata");
 }
 
 fn ensure_object_child(

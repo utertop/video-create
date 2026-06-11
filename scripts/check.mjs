@@ -4,6 +4,11 @@ import process from "node:process";
 const full = process.argv.includes("--full");
 
 const coreSmokeTests = [
+  "tests/smoke_v5_timeline_schema.py",
+  "tests/smoke_v5_timeline_generate.py",
+  "tests/smoke_v5_timeline_invalidation.py",
+  "tests/smoke_v5_preview_final_cache_isolation.py",
+  "tests/smoke_v5_final_render_original_source.py",
   "tests/smoke_v5_edit_strategy_compile.py",
   "tests/smoke_v5_render_scheduler.py",
   "tests/smoke_v5_video_geometry.py",
@@ -27,9 +32,14 @@ const fullSmokeTests = [
   "tests/smoke_v5_low_res_preview.py",
   "tests/smoke_v5_music_playlist.py",
   "tests/smoke_v5_photo_segment_cache.py",
+  "tests/smoke_v5_preview_final_cache_isolation.py",
   "tests/smoke_v5_render_cache.py",
   "tests/smoke_v5_render_scheduler.py",
   "tests/smoke_v5_template_matching.py",
+  "tests/smoke_v5_timeline_schema.py",
+  "tests/smoke_v5_timeline_generate.py",
+  "tests/smoke_v5_timeline_invalidation.py",
+  "tests/smoke_v5_final_render_original_source.py",
   "tests/smoke_v5_video_geometry.py",
   "tests/smoke_v5_worker_protocol.py",
   "tests/smoke_v5_6_long_video_stability.py",

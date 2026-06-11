@@ -22,7 +22,7 @@ export type EditStrategy =
 // V5 common type definitions
 // =========================
 
-export type V5DocumentType = "media_library" | "story_blueprint" | "render_plan";
+export type V5DocumentType = "media_library" | "story_blueprint" | "render_plan" | "timeline";
 export type V5DirectoryType = "city" | "date" | "scenic_spot" | "chapter" | "unknown";
 export type V5AssetType = "image" | "video" | "audio";
 export type V5Orientation = "landscape" | "portrait" | "square";
@@ -68,10 +68,204 @@ export type V5TitleMotion =
   | string;
 
 export const V5_SCHEMA_VERSION = "5.5";
+export const V5_TIMELINE_VERSION = "v1";
 
 // =========================
 // V5 data structure definitions
 // =========================
+
+export type V5TimelineVersion = typeof V5_TIMELINE_VERSION | string;
+export type V5TimelineTrackKind = "video" | "audio" | "title" | "subtitle" | "overlay";
+export type V5TimelineClipKind =
+  | "video_asset"
+  | "image_asset"
+  | "title_card"
+  | "chapter_card"
+  | "subtitle_overlay"
+  | "audio_bgm"
+  | "audio_source"
+  | "audio_effect";
+export type V5TimelineDependencyKind =
+  | "derived_from_section"
+  | "derived_from_asset"
+  | "overlay_of"
+  | "audio_sync_to"
+  | "paired_with"
+  | "generated_from_template";
+export type V5TimelineRecomputeScope =
+  | "none"
+  | "preview_only"
+  | "clip_only"
+  | "track_only"
+  | "timeline_compile"
+  | "final_render_only"
+  | "full_rebuild";
+export type V5TimelinePreviewMode = "proxy" | "low_res" | "original";
+export type V5TimelineCacheNamespace = "preview" | "final" | "thumbnail" | "proxy";
+
+export interface V5Timeline {
+  schema_version: string;
+  document_type: "timeline";
+  timeline_version: V5TimelineVersion;
+  project_ref: V5TimelineProjectRef;
+  source_ref: V5TimelineSourceRef;
+  tracks: V5TimelineTrack[];
+  clip_index: Record<string, V5TimelineClip>;
+  dependency_graph?: V5TimelineDependency[];
+  invalidation_rules_version?: string;
+  performance_policy?: V5TimelinePerformancePolicy;
+  metadata?: V5TimelineMetadata;
+}
+
+export interface V5TimelineProjectRef {
+  project_id?: string | null;
+  project_dir?: string | null;
+  title?: string | null;
+}
+
+export interface V5TimelineSourceRef {
+  media_library_path?: string | null;
+  story_blueprint_path?: string | null;
+  render_plan_path?: string | null;
+  generated_from_blueprint: boolean;
+  generated_at?: string | null;
+}
+
+export interface V5TimelineTrack {
+  track_id: string;
+  kind: V5TimelineTrackKind;
+  name: string;
+  order_index: number;
+  enabled: boolean;
+  locked?: boolean;
+  lane_mode?: "single" | "stacked";
+  clip_ids: string[];
+  metadata?: Record<string, unknown>;
+}
+
+export interface V5TimelineClip {
+  clip_id: string;
+  kind: V5TimelineClipKind;
+  track_id: string;
+
+  /** Position and duration on the editable timeline. */
+  timeline_start: number;
+  timeline_duration: number;
+  timeline_end: number;
+
+  /** Optional in/out range inside the original source media. */
+  source_in?: number | null;
+  source_out?: number | null;
+  playback_rate?: number | null;
+
+  enabled: boolean;
+  source_ref?: V5TimelineClipSourceRef | null;
+  content_ref?: V5TimelineContentRef | null;
+  edit_state?: V5TimelineEditState;
+  presentation?: V5TimelinePresentation;
+  execution?: V5TimelineExecutionHint;
+  invalidation_hint?: V5TimelineInvalidationHint;
+  cache_policy?: V5TimelineClipCachePolicy;
+  metadata?: Record<string, unknown>;
+}
+
+export interface V5TimelineClipSourceRef {
+  section_id?: string | null;
+  asset_id?: string | null;
+  segment_id?: string | null;
+  directory_node_id?: string | null;
+}
+
+export interface V5TimelineContentRef {
+  source_path?: string | null;
+  title_text?: string | null;
+  subtitle_text?: string | null;
+  audio_profile?: string | null;
+  template_id?: string | null;
+}
+
+export interface V5TimelineEditState {
+  auto_generated: boolean;
+  user_overridden: boolean;
+  override_fields?: string[] | null;
+  origin?: "plan" | "timeline_edit" | "migration" | "recovery" | string;
+  last_edited_at?: string | null;
+}
+
+export interface V5TimelinePresentation {
+  title_style?: V5TitleStyle | null;
+  transition_type?: string | null;
+  transition_duration?: number | null;
+  motion_config?: Record<string, unknown> | null;
+  background_mode?: string | null;
+  background_source_path?: string | null;
+}
+
+export interface V5TimelineExecutionHint {
+  preferred_route?: string | null;
+  route_reason?: string | null;
+  cache_key?: string | null;
+  preview_supported?: boolean | null;
+  final_render_supported?: boolean | null;
+}
+
+export interface V5TimelineInvalidationHint {
+  primary_scope: V5TimelineRecomputeScope;
+  affected_track_ids?: string[] | null;
+  affected_clip_ids?: string[] | null;
+  cache_reuse_expected?: boolean | null;
+  requires_render_plan_recompile?: boolean;
+  requires_audio_relayout?: boolean;
+  reason?: string | null;
+}
+
+export interface V5TimelineClipCachePolicy {
+  cache_namespace?: V5TimelineCacheNamespace;
+  cache_fingerprint?: string | null;
+  cache_reuse_expected?: boolean | null;
+}
+
+export interface V5TimelineDependency {
+  dependency_id: string;
+  from_clip_id: string;
+  to_clip_id?: string | null;
+  kind: V5TimelineDependencyKind;
+  source_section_id?: string | null;
+  source_asset_id?: string | null;
+  strict: boolean;
+  reason?: string | null;
+}
+
+export interface V5TimelinePerformancePolicy {
+  preview: {
+    mode: V5TimelinePreviewMode;
+    height?: number;
+    fps?: number;
+    cache_namespace: "preview";
+    preferred_backend?: string | null;
+  };
+  final: {
+    uses_original_source: true;
+    allow_proxy: false;
+    cache_namespace: "final";
+    preferred_backend?: string | null;
+  };
+  thumbnail?: {
+    cache_namespace: "thumbnail";
+  };
+  proxy?: {
+    cache_namespace: "proxy";
+  };
+  cache_fingerprint_version: string;
+}
+
+export interface V5TimelineMetadata {
+  created_at?: string | null;
+  updated_at?: string | null;
+  generated_from?: "blueprint" | "migration" | "recovery" | string;
+  editor_mode?: "auto" | "guided" | "manual" | string;
+  migration_notes?: string[] | null;
+}
 
 export interface V5MediaLibrary {
   schema_version: string;
@@ -511,6 +705,7 @@ export interface ProjectDocumentsLoadResult {
   library: V5MediaLibrary | null;
   blueprint: V5StoryBlueprint | null;
   renderPlan: V5RenderPlan | null;
+  timeline: V5Timeline | null;
 }
 
 export interface RenderRecoverySummary {
@@ -798,6 +993,7 @@ export async function loadProjectDocumentsV5(projectDir: string): Promise<Projec
     blueprint?: unknown;
     renderPlan?: unknown;
     render_plan?: unknown;
+    timeline?: unknown;
   }>("load_project_documents_v5", { projectDir });
 
   return {
@@ -807,6 +1003,7 @@ export async function loadProjectDocumentsV5(projectDir: string): Promise<Projec
     library: payload.library ? parseV5Value<V5MediaLibrary>(payload.library, "media_library") : null,
     blueprint: payload.blueprint ? parseV5Value<V5StoryBlueprint>(payload.blueprint, "story_blueprint") : null,
     renderPlan: (payload.renderPlan || payload.render_plan) ? parseV5Value<V5RenderPlan>(payload.renderPlan || payload.render_plan, "render_plan") : null,
+    timeline: payload.timeline ? parseV5Value<V5Timeline>(payload.timeline, "timeline") : null,
   };
 }
 

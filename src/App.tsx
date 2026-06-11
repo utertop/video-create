@@ -70,7 +70,7 @@ import {
   V5StorySection,
   V5MediaLibrary,
   V5RenderPlan,
-  V5RenderSegment,
+  V5Timeline,
   V5Asset,
   V5AudioSettings,
   V5AudioBlueprint,
@@ -100,6 +100,7 @@ import { PerformanceModeControl, PerformanceRecommendation, performanceModeLabel
 import { ProgressBar, ProgressTone } from "./components/ProgressBar";
 import { ACTIVE_RENDER_QUEUE_STATUSES, normalizeQueueStatus, RenderQueueItem, RenderQueuePanel, shortJobId } from "./components/RenderQueuePanel";
 import { normalizeTitleStyle, titleTemplateLabel, TitleStyleLab } from "./components/TitleStylePreview";
+import { TimelineEditor } from "./features/timeline/TimelineEditor";
 import { selectStudioAppState, StudioState, useStudio } from "./store/studio";
 import { BackgroundPickerTarget, PhotoSegmentCacheStats, ProxyMediaStats, VideoEvent, VideoSegmentCacheStats } from "./types/studio";
 import { buildDiagnosticBundlePayload, buildErrorCodeStats, buildSupportCaseSummary, summarizeErrorCodes } from "./lib/diagnostics";
@@ -171,6 +172,7 @@ interface StudioDraft {
   v5Library: V5MediaLibrary | null;
   v5Blueprint: V5StoryBlueprint | null;
   v5RenderPlan: V5RenderPlan | null;
+  v5Timeline: V5Timeline | null;
 }
 
 interface SessionRecoveryData {
@@ -291,11 +293,11 @@ export function App() {
     if (!selectedAudioSectionId) return;
     const container = segmentsTimelineRef.current;
     if (!container) return;
-    const firstMatch = Array.from(container.querySelectorAll<HTMLElement>(".segment-strip[data-section-id]")).find(
+    const firstMatch = Array.from(container.querySelectorAll<HTMLElement>("[data-section-id]")).find(
       (element) => element.dataset.sectionId === selectedAudioSectionId,
     );
     firstMatch?.scrollIntoView({ behavior: "smooth", block: "nearest" });
-  }, [selectedAudioSectionId, state.v5RenderPlan]);
+  }, [selectedAudioSectionId, state.v5RenderPlan, state.v5Timeline]);
 
   useEffect(() => {
     let disposed = false;
@@ -702,6 +704,7 @@ export function App() {
         v5Library: recoveredStudio?.v5Library || loaded.library,
         v5Blueprint: recoveredStudio?.v5Blueprint || loaded.blueprint,
         v5RenderPlan: recoveredStudio?.v5RenderPlan || loaded.renderPlan,
+        v5Timeline: recoveredStudio?.v5Timeline || loaded.timeline,
       });
       if (recovered) {
         applyRecoveredWorkspaceRuntimeState(recovered);
@@ -729,6 +732,7 @@ export function App() {
         v5Library: null,
         v5Blueprint: null,
         v5RenderPlan: null,
+        v5Timeline: null,
         titleBackgroundPath: null,
         endBackgroundPath: null,
       });
@@ -1336,7 +1340,7 @@ export function App() {
     setProgressDetail(null);
     try {
       const library = await scanV5(state.inputFolder, v5ProjectDir, state.recursive);
-      state.patch({ v5Library: library });
+      state.patch({ v5Library: library, v5Blueprint: null, v5RenderPlan: null, v5Timeline: null });
       setToast(target.kind === "title" ? "请选择片头文案背景图片。" : target.kind === "end" ? "请选择片尾文案背景图片。" : `请选择章节「${target.sectionTitle}」背景图片或视频帧。`);
     } catch (error) {
       console.error("Prepare background library failed:", error);
@@ -1349,10 +1353,10 @@ export function App() {
 
   function onSelectBackgroundAsset(target: BackgroundPickerTarget, asset: V5Asset) {
     if (target.kind === "title") {
-      state.patch({ titleBackgroundPath: asset.absolute_path });
+      state.patch({ titleBackgroundPath: asset.absolute_path, v5Timeline: null });
       setToast(`已选择片头卡背景：${asset.file.name}`);
     } else if (target.kind === "end") {
-      state.patch({ endBackgroundPath: asset.absolute_path });
+      state.patch({ endBackgroundPath: asset.absolute_path, v5Timeline: null });
       setToast(`已选择片尾背景：${asset.file.name}`);
     } else if (state.v5Blueprint) {
       const updated = updateBlueprintSection(state.v5Blueprint, target.sectionId, (section) => ({
@@ -1365,7 +1369,7 @@ export function App() {
         },
         user_overridden: true,
       }));
-      state.patch({ v5Blueprint: updated });
+      state.patch({ v5Blueprint: updated, v5Timeline: null });
       setToast(`已为章节「${target.sectionTitle}」选择背景：${asset.file.name}`);
     }
     setBackgroundPickerTarget(null);
@@ -1373,10 +1377,10 @@ export function App() {
 
   function onClearBackgroundAsset(target: BackgroundPickerTarget) {
     if (target.kind === "title") {
-      state.patch({ titleBackgroundPath: null });
+      state.patch({ titleBackgroundPath: null, v5Timeline: null });
       setToast("片头背景已恢复默认：使用成片第一个画面首帧虚化。");
     } else if (target.kind === "end") {
-      state.patch({ endBackgroundPath: null });
+      state.patch({ endBackgroundPath: null, v5Timeline: null });
       setToast("片尾背景已恢复默认：使用成片最后一个画面尾帧虚化。");
     } else if (state.v5Blueprint) {
       const updated = updateBlueprintSection(state.v5Blueprint, target.sectionId, (section) => ({
@@ -1388,7 +1392,7 @@ export function App() {
           user_overridden: false,
         },
       }));
-      state.patch({ v5Blueprint: updated });
+      state.patch({ v5Blueprint: updated, v5Timeline: null });
       setToast(`章节「${target.sectionTitle}」背景已恢复默认。`);
     }
     setBackgroundPickerTarget(null);
@@ -1771,7 +1775,7 @@ export function App() {
     setToast(null);
     try {
       const library = await scanV5(state.inputFolder, v5ProjectDir, state.recursive);
-      state.patch({ v5Library: library });
+      state.patch({ v5Library: library, v5Blueprint: null, v5RenderPlan: null, v5Timeline: null });
       
       setPhase("规划故事蓝图中...");
       setProgress(40);
@@ -1789,7 +1793,7 @@ export function App() {
           gui_title_applied: true,
         },
       };
-      state.patch({ v5Blueprint: blueprintWithGuiText, v5Stage: "BLUEPRINT" });
+      state.patch({ v5Blueprint: blueprintWithGuiText, v5RenderPlan: null, v5Timeline: null, v5Stage: "BLUEPRINT" });
       rememberCurrentProject();
       
       setPhase("蓝图就绪");
@@ -1840,7 +1844,7 @@ export function App() {
       const plan = await compileV5(bpPath, libPath, `${v5ProjectDir}\\render_plan.json`);
       
       // 3. 进入渲染阶段
-      state.patch({ v5Blueprint: blueprintForCompile, v5RenderPlan: plan, v5Stage: "RENDER" });
+      state.patch({ v5Blueprint: blueprintForCompile, v5RenderPlan: plan, v5Timeline: null, v5Stage: "RENDER" });
       rememberCurrentProject();
       setPhase("渲染计划就绪");
       setProgress(100);
@@ -2301,7 +2305,7 @@ export function App() {
                           .map((ref) => ref.asset_id),
                       })
                     }
-                    onUpdate={(bp) => state.patch({ v5Blueprint: bp })}
+                    onUpdate={(bp) => state.patch({ v5Blueprint: bp, v5Timeline: null })}
                   />
                   <div className="blueprint-actions">
                      <button className="secondary-action" onClick={() => state.patch({ v5Stage: "INPUT" })}>重新扫描</button>
@@ -2361,42 +2365,17 @@ export function App() {
                           {selectedAudioSectionId ? <span>章节聚焦: {selectedAudioSectionId}</span> : null}
                           {isRendering && progress !== null && <span className="current-progress-text">进度: {progress}%</span>}
                        </div>
-                       <div className="segments-timeline" ref={segmentsTimelineRef}>
-                          {state.v5RenderPlan!.segments.map((seg: V5RenderSegment, idx: number) => {
-                            const isCurrent = isRendering && activeSegmentIndex !== null && activeSegmentIndex === idx;
-                            const isLinked = Boolean(selectedAudioSectionId) && seg.section_id === selectedAudioSectionId;
-                            
-                            return (
-                              <div
-                                key={seg.segment_id}
-                                className={`segment-strip ${seg.type}${isCurrent ? ' active-rendering' : ''}${isLinked ? ' linked-audio-section' : ''}`}
-                                data-section-id={seg.section_id || undefined}
-                                role={seg.section_id ? "button" : undefined}
-                                tabIndex={seg.section_id ? 0 : undefined}
-                                onClick={() => {
-                                  if (!seg.section_id) return;
-                                  const nextSectionId = seg.section_id || null;
-                                  setSelectedAudioSectionId((current) => (current === nextSectionId ? null : nextSectionId));
-                                }}
-                                onKeyDown={(event) => {
-                                  if (!seg.section_id) return;
-                                  if (event.key === "Enter" || event.key === " ") {
-                                    event.preventDefault();
-                                    const nextSectionId = seg.section_id || null;
-                                    setSelectedAudioSectionId((current) => (current === nextSectionId ? null : nextSectionId));
-                                  }
-                                }}
-                              >
-                                 <div className="seg-label">
-                                   {isCurrent ? <Wand2 size={10} className="spin" /> : seg.type.toUpperCase()}
-                                 </div>
-                                 <div className="seg-info">
-                                    {seg.text || seg.source_path?.split(/[/\\]/).pop()}
-                                 </div>
-                                 <div className="seg-time">{seg.duration.toFixed(1)}s</div>
-                              </div>
-                            );
-                          })}
+                       <div ref={segmentsTimelineRef}>
+                         <TimelineEditor
+                           timeline={state.v5Timeline}
+                           renderPlan={state.v5RenderPlan}
+                           activeSegmentIndex={activeSegmentIndex}
+                           isRendering={isRendering}
+                           selectedSectionId={selectedAudioSectionId}
+                           onSelectSection={(sectionId) => {
+                             setSelectedAudioSectionId((current) => (current === sectionId ? null : sectionId));
+                           }}
+                         />
                        </div>
                     </div>
                   )}
@@ -3420,6 +3399,7 @@ function patchAudioBlueprintCue(
 
   const nextPatch: Partial<StudioState> = {
     v5Blueprint: nextBlueprint,
+    v5Timeline: null,
   };
 
   if (state.v5RenderPlan?.render_settings?.audio_blueprint) {
@@ -3454,6 +3434,7 @@ function restoreCompiledAudioBlueprintCues(state: StudioState): void {
     v5Blueprint: withBlueprintMetadata(state.v5Blueprint, {
       audio_blueprint: nextAudioBlueprint,
     }),
+    v5Timeline: null,
   });
 }
 
@@ -4399,6 +4380,7 @@ function captureStudioDraft(state: StudioState): StudioDraft {
     v5Library: state.v5Library,
     v5Blueprint: state.v5Blueprint,
     v5RenderPlan: state.v5RenderPlan,
+    v5Timeline: state.v5Timeline,
   };
 }
 
@@ -4409,6 +4391,7 @@ function hasMeaningfulStudioDraft(draft: StudioDraft): boolean {
       draft.v5Library ||
       draft.v5Blueprint ||
       draft.v5RenderPlan ||
+      draft.v5Timeline ||
       draft.titleBackgroundPath ||
       draft.endBackgroundPath ||
       draft.musicPath ||
