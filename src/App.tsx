@@ -2375,6 +2375,7 @@ export function App() {
                            onSelectSection={(sectionId) => {
                              setSelectedAudioSectionId((current) => (current === sectionId ? null : sectionId));
                            }}
+                           onTimelineChange={(timeline) => state.patch({ v5Timeline: timeline })}
                          />
                        </div>
                     </div>
@@ -3117,6 +3118,7 @@ function ResultCard({
           ) : null}
         </div>
       ) : null}
+      <BuildReportV2Panel recovery={recovery} />
       {result.ok && result.outputPath && (
         <div className="result-card-actions">
           <button className="result-open-btn" onClick={() => openInExplorer(result.outputDir || result.outputPath!)}>
@@ -3125,6 +3127,116 @@ function ResultCard({
           </button>
         </div>
       )}
+    </div>
+  );
+}
+
+function asReportObject(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function reportString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+function reportNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function reportBool(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
+}
+
+function reportPercent(value: unknown): string | null {
+  const number = reportNumber(value);
+  return number === null ? null : `${Math.round(number * 100)}%`;
+}
+
+function buildReportSuggestions(value: unknown): Array<{ id?: string; priority?: string; message: string }> {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => asReportObject(item))
+    .map((item) => ({
+      id: reportString(item.id) || undefined,
+      priority: reportString(item.priority) || undefined,
+      message: reportString(item.message) || "",
+    }))
+    .filter((item) => item.message)
+    .slice(0, 4);
+}
+
+function BuildReportV2Panel({ recovery }: { recovery: RenderRecoverySummary | null }) {
+  if (!recovery) return null;
+  const timeline = asReportObject(recovery.timelineSummary);
+  const route = asReportObject(recovery.routeSummary);
+  const fallback = asReportObject(recovery.fallbackSummary);
+  const cache = asReportObject(recovery.cacheSummary);
+  const recompute = asReportObject(recovery.recomputeSummary);
+  const quality = asReportObject(recovery.qualitySummary);
+  const performance = asReportObject(recovery.performanceSummary);
+  const recoveryV2 = asReportObject(recovery.recoverySummary);
+  const cachePolicy = asReportObject(cache.policy);
+  const suggestions = buildReportSuggestions(recovery.reportSuggestions);
+  const hasV2 =
+    recovery.buildReportVersion === "v2" ||
+    Object.keys(timeline).length > 0 ||
+    Object.keys(route).length > 0 ||
+    Object.keys(cache).length > 0 ||
+    Object.keys(quality).length > 0;
+  if (!hasV2) return null;
+
+  const source = reportString(timeline.source) || "render_plan";
+  const renderIntent = reportString(quality.render_intent) || reportString(cachePolicy.render_intent) || recovery.renderIntent || "final";
+  const actualBackend = reportString(route.actual_backend) || recovery.actualBackend || recovery.selectedBackend || "auto";
+  const fallbackApplied = reportBool(fallback.applied) ?? Boolean(recovery.fallbackApplied);
+  const usesOriginalSource = reportBool(quality.uses_original_source);
+  const allowProxy = reportBool(quality.allow_proxy);
+  const elapsedSeconds = reportNumber(performance.elapsed_seconds);
+  const outputSize = reportNumber(performance.output_size_bytes);
+
+  const facts = [
+    ["Timeline", source === "timeline" ? "compiled" : source],
+    ["Intent", renderIntent],
+    ["Backend", actualBackend],
+    ["Fallback", fallbackApplied ? (reportString(fallback.used) || recovery.fallbackUsed || "applied") : "none"],
+    ["Cache", reportString(cachePolicy.cache_namespace) || "default"],
+    ["Recompute", reportBool(recompute.timeline_dirty) ? "dirty" : "clean"],
+    ["Source", usesOriginalSource === null ? "unknown" : usesOriginalSource ? "original" : "proxy/derived"],
+    ["Proxy", allowProxy === null ? "unknown" : allowProxy ? "allowed" : "blocked"],
+  ];
+
+  return (
+    <div className="build-report-v2-panel">
+      <div className="build-report-v2-header">
+        <ListChecks size={16} />
+        <strong>Build Report V2</strong>
+        <span>{recovery.buildReportVersion || "compatible"}</span>
+      </div>
+      <div className="build-report-v2-grid">
+        {facts.map(([label, value]) => (
+          <div className="build-report-v2-item" key={label}>
+            <span>{label}</span>
+            <strong>{value}</strong>
+          </div>
+        ))}
+      </div>
+      <div className="build-report-v2-meta">
+        {reportPercent(route.segment_fast_path_rate) ? <span>Segment fast path {reportPercent(route.segment_fast_path_rate)}</span> : null}
+        {reportPercent(route.chunk_fast_path_rate) ? <span>Chunk fast path {reportPercent(route.chunk_fast_path_rate)}</span> : null}
+        {elapsedSeconds !== null ? <span>Elapsed {elapsedSeconds.toFixed(2)}s</span> : null}
+        {outputSize !== null ? <span>Output {(outputSize / 1024 / 1024).toFixed(1)} MB</span> : null}
+        {reportString(recoveryV2.failure_code) ? <span>Failure {reportString(recoveryV2.failure_code)}</span> : null}
+      </div>
+      {suggestions.length > 0 ? (
+        <div className="build-report-v2-suggestions">
+          {suggestions.map((item) => (
+            <span key={item.id || item.message}>
+              {item.priority ? `${item.priority}: ` : ""}
+              {item.message}
+            </span>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }

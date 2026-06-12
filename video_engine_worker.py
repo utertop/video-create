@@ -122,6 +122,24 @@ def run_task(task: Dict[str, Any]) -> Dict[str, Any]:
             "document": _read_output_json(output_path),
         }
 
+    if task_type == "timeline-compile":
+        output_path = str(task["output_path"])
+        _ensure_parent(output_path)
+        engine.command_timeline_compile(
+            Namespace(
+                timeline=str(task["timeline_path"]),
+                base_render_plan=str(task["base_render_plan_path"]),
+                output=output_path,
+            )
+        )
+        return {
+            "type": "result",
+            "id": task_id,
+            "ok": True,
+            "output_path": output_path,
+            "document": _read_output_json(output_path),
+        }
+
     if task_type == "render":
         engine.render_with_v56_stability(
             str(task["plan_path"]),

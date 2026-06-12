@@ -265,6 +265,9 @@ export interface V5TimelineMetadata {
   generated_from?: "blueprint" | "migration" | "recovery" | string;
   editor_mode?: "auto" | "guided" | "manual" | string;
   migration_notes?: string[] | null;
+  dirty?: boolean;
+  dirty_reason?: string | null;
+  last_edit_operation?: string | null;
 }
 
 export interface V5MediaLibrary {
@@ -708,9 +711,28 @@ export interface ProjectDocumentsLoadResult {
   timeline: V5Timeline | null;
 }
 
+export type BuildReportJsonObject = Record<string, unknown>;
+
+export interface BuildReportSuggestion extends BuildReportJsonObject {
+  id?: string;
+  priority?: string;
+  message?: string;
+}
+
 export interface RenderRecoverySummary {
   reportPath: string;
   manifestPath?: string | null;
+  buildReportVersion?: string | null;
+  timelineSummary?: BuildReportJsonObject | null;
+  routeSummary?: BuildReportJsonObject | null;
+  fallbackSummary?: BuildReportJsonObject | null;
+  cacheSummary?: BuildReportJsonObject | null;
+  recomputeSummary?: BuildReportJsonObject | null;
+  performanceSummary?: BuildReportJsonObject | null;
+  qualitySummary?: BuildReportJsonObject | null;
+  recoverySummary?: BuildReportJsonObject | null;
+  migrationNotes?: string[] | null;
+  reportSuggestions?: BuildReportSuggestion[] | null;
   status?: string | null;
   renderIntent?: string | null;
   renderMode?: string | null;

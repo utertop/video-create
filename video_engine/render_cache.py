@@ -248,6 +248,16 @@ def _v56_atomic_replace(tmp_path: Path, final_path: Path) -> None:
 
 def _v56_write_build_report(report_path: Path, report: Dict[str, Any]) -> None:
     try:
+        try:
+            from .render_diagnostics import _v56_build_report_v2_fields
+
+            enriched = dict(report or {})
+            enriched.update(_v56_build_report_v2_fields(enriched))
+            report = enriched
+        except Exception as exc:
+            report = dict(report or {})
+            report.setdefault("build_report_version", "v1")
+            report["build_report_v2_error"] = str(exc)
         ensure_parent(report_path)
         with report_path.open("w", encoding="utf-8") as f:
             json.dump(report, f, ensure_ascii=False, indent=2)

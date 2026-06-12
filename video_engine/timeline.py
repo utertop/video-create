@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import copy
 from collections.abc import Iterable as IterableABC
 from datetime import datetime
 from pathlib import Path
@@ -188,6 +189,135 @@ def build_timeline_from_blueprint(
     )
 
 
+def migrate_timeline_document(timeline: Dict[str, Any]) -> Tuple[bool, Dict[str, Any], List[str]]:
+    if not isinstance(timeline, dict):
+        raise ValueError("timeline document must be an object")
+    if timeline.get("document_type") != "timeline":
+        raise ValueError(f"timeline document_type mismatch: {timeline.get('document_type')!r}")
+
+    result = copy.deepcopy(timeline)
+    notes: List[str] = []
+    migrated = False
+
+    def ensure_object(key: str) -> None:
+        nonlocal migrated
+        if not isinstance(result.get(key), dict):
+            result[key] = {}
+            migrated = True
+            notes.append(f"timeline: ensure {key}")
+
+    def ensure_array(key: str) -> None:
+        nonlocal migrated
+        if not isinstance(result.get(key), list):
+            result[key] = []
+            migrated = True
+            notes.append(f"timeline: ensure {key}")
+
+    schema_version = str(result.get("schema_version") or "missing")
+    if schema_version != SCHEMA_VERSION:
+        result["schema_version"] = SCHEMA_VERSION
+        migrated = True
+        notes.append(f"schema_version {schema_version} -> {SCHEMA_VERSION}")
+
+    timeline_version = str(result.get("timeline_version") or "missing")
+    if timeline_version != TIMELINE_VERSION:
+        result["timeline_version"] = TIMELINE_VERSION
+        migrated = True
+        notes.append(f"timeline_version {timeline_version} -> {TIMELINE_VERSION}")
+
+    ensure_object("project_ref")
+    ensure_object("source_ref")
+    ensure_array("tracks")
+    ensure_object("clip_index")
+    ensure_array("dependency_graph")
+    ensure_object("metadata")
+    ensure_object("performance_policy")
+
+    if result.get("invalidation_rules_version") != TIMELINE_INVALIDATION_RULES_VERSION:
+        result["invalidation_rules_version"] = TIMELINE_INVALIDATION_RULES_VERSION
+        migrated = True
+        notes.append("timeline: ensure invalidation_rules_version")
+
+    policy = result["performance_policy"]
+    if not isinstance(policy.get("preview"), dict):
+        policy["preview"] = {
+            "cache_namespace": "preview",
+            "uses_original_source": False,
+            "allow_proxy": True,
+        }
+        migrated = True
+        notes.append("timeline: ensure preview performance policy")
+    if not isinstance(policy.get("final"), dict):
+        policy["final"] = {
+            "cache_namespace": "final",
+            "uses_original_source": True,
+            "allow_proxy": False,
+        }
+        migrated = True
+        notes.append("timeline: ensure final performance policy")
+
+    metadata = result["metadata"]
+    if not isinstance(metadata.get("migration_notes"), list):
+        metadata["migration_notes"] = []
+        migrated = True
+        notes.append("timeline: ensure metadata.migration_notes")
+    if notes:
+        metadata["migration_notes"] = [*metadata.get("migration_notes", []), *notes]
+        metadata["updated_at"] = datetime.now().isoformat()
+
+    return migrated, result, notes
+
+
+def recover_timeline_document(
+    blueprint: Optional[Dict[str, Any]],
+    render_plan: Dict[str, Any],
+    *,
+    media_library: Optional[Dict[str, Any]] = None,
+    existing_timeline: Optional[Dict[str, Any]] = None,
+    media_library_path: Optional[str] = None,
+    story_blueprint_path: Optional[str] = None,
+    render_plan_path: Optional[str] = None,
+    project_dir: Optional[str] = None,
+) -> Tuple[Dict[str, Any], List[str]]:
+    notes: List[str] = []
+    migrated_existing: Optional[Dict[str, Any]] = None
+    if isinstance(existing_timeline, dict):
+        try:
+            migrated, migrated_existing, migration_notes = migrate_timeline_document(existing_timeline)
+            if migrated:
+                notes.extend(migration_notes)
+        except Exception as exc:
+            notes.append(f"timeline migration failed; original timeline ignored: {exc}")
+            migrated_existing = None
+
+    if isinstance(blueprint, dict) and blueprint:
+        timeline = build_timeline_from_blueprint(
+            blueprint,
+            render_plan,
+            media_library=media_library,
+            existing_timeline=migrated_existing,
+            media_library_path=media_library_path,
+            story_blueprint_path=story_blueprint_path,
+            render_plan_path=render_plan_path,
+            project_dir=project_dir,
+        )
+    else:
+        timeline = build_timeline_from_render_plan(
+            render_plan,
+            existing_timeline=migrated_existing,
+            render_plan_path=render_plan_path,
+            project_dir=project_dir,
+        )
+
+    metadata = dict(timeline.get("metadata") or {})
+    metadata["migration_notes"] = [*metadata.get("migration_notes", []), *notes]
+    if notes:
+        metadata["recovered"] = True
+        metadata["recovery_source"] = "existing_timeline_migration"
+    timeline["metadata"] = metadata
+    return timeline, notes
+
+
 def resolve_timeline_recompute_scope(
     operation: Dict[str, Any],
     *,
@@ -288,6 +418,140 @@ def resolve_timeline_recompute_scope(
         requires_render_plan_recompile=True,
         requires_audio_relayout=True,
         reason=f"unknown timeline edit operation: {operation_type}",
+    )
+
+
+def update_clip_enabled(timeline: Dict[str, Any], clip_id: str, enabled: bool) -> Dict[str, Any]:
+    return _apply_clip_edit(
+        timeline,
+        clip_id,
+        lambda clip: {**clip, "enabled": bool(enabled)},
+        ["enabled"],
+        {"type": "clip_enable_disable", "clip_id": clip_id},
+    )
+
+
+def update_clip_content(timeline: Dict[str, Any], clip_id: str, patch: Dict[str, Any]) -> Dict[str, Any]:
+    patch = patch if isinstance(patch, dict) else {}
+    operation_type = "subtitle_text_change" if "subtitle_text" in patch and "title_text" not in patch else "title_text_change"
+
+    def updater(clip: Dict[str, Any]) -> Dict[str, Any]:
+        content = dict(clip.get("content_ref") or {})
+        content.update(patch)
+        return {**clip, "content_ref": content}
+
+    return _apply_clip_edit(
+        timeline,
+        clip_id,
+        updater,
+        [f"content_ref.{key}" for key in patch.keys()],
+        {"type": operation_type, "clip_id": clip_id},
+    )
+
+
+def update_clip_presentation(timeline: Dict[str, Any], clip_id: str, patch: Dict[str, Any]) -> Dict[str, Any]:
+    patch = patch if isinstance(patch, dict) else {}
+
+    def updater(clip: Dict[str, Any]) -> Dict[str, Any]:
+        presentation = dict(clip.get("presentation") or {})
+        presentation.update(patch)
+        return {**clip, "presentation": presentation}
+
+    return _apply_clip_edit(
+        timeline,
+        clip_id,
+        updater,
+        [f"presentation.{key}" for key in patch.keys()],
+        {"type": "title_style_change", "clip_id": clip_id},
+    )
+
+
+def update_clip_duration(timeline: Dict[str, Any], clip_id: str, duration: float) -> Dict[str, Any]:
+    result = copy.deepcopy(timeline)
+    location = _find_clip_location(result, clip_id)
+    if not location:
+        return result
+
+    track, index = location
+    clip_index = result.get("clip_index") or {}
+    clip = clip_index.get(clip_id)
+    if not isinstance(clip, dict):
+        return result
+
+    next_duration = round(max(0.1, _float(duration, clip.get("timeline_duration") or 0.1)), 3)
+    delta = next_duration - _float(clip.get("timeline_duration"), 0.0)
+    affected_ids = [str(item) for item in track.get("clip_ids", [])[index:]]
+    operation = {
+        "type": "image_duration_change",
+        "clip_id": clip_id,
+        "track_id": track.get("track_id"),
+        "affected_clip_ids": affected_ids,
+        "affected_track_ids": [track.get("track_id")],
+    }
+    now = datetime.now().isoformat()
+
+    for affected_id in affected_ids:
+        affected = clip_index.get(affected_id)
+        if not isinstance(affected, dict):
+            continue
+        if affected_id == clip_id:
+            source_in = affected.get("source_in")
+            updated = {
+                **affected,
+                "timeline_duration": next_duration,
+                "timeline_end": round(_float(affected.get("timeline_start"), 0.0) + next_duration, 3),
+                "source_out": round(_float(source_in, 0.0) + next_duration, 3) if source_in is not None else affected.get("source_out"),
+            }
+            clip_index[affected_id] = _with_edit_metadata(updated, ["timeline_duration", "timeline_end", "source_out"], now, operation)
+        else:
+            clip_index[affected_id] = {
+                **affected,
+                "timeline_start": round(_float(affected.get("timeline_start"), 0.0) + delta, 3),
+                "timeline_end": round(_float(affected.get("timeline_end"), 0.0) + delta, 3),
+            }
+
+    return _mark_timeline_dirty(result, "image_duration_change", now)
+
+
+def move_clip(timeline: Dict[str, Any], clip_id: str, target_index: int) -> Dict[str, Any]:
+    result = copy.deepcopy(timeline)
+    location = _find_clip_location(result, clip_id)
+    if not location:
+        return result
+
+    track, index = location
+    clip_ids = [str(item) for item in track.get("clip_ids") or []]
+    clip_ids.pop(index)
+    clamped = max(0, min(int(target_index), len(clip_ids)))
+    clip_ids.insert(clamped, clip_id)
+    track["clip_ids"] = clip_ids
+
+    now = datetime.now().isoformat()
+    operation = {
+        "type": "clip_reorder",
+        "clip_id": clip_id,
+        "track_id": track.get("track_id"),
+        "affected_clip_ids": clip_ids,
+        "affected_track_ids": [track.get("track_id")],
+    }
+    _relayout_track_clips(result.get("clip_index") or {}, clip_ids, now, operation)
+    return _mark_timeline_dirty(result, "clip_reorder", now)
+
+
+def update_bgm_cue_volume(timeline: Dict[str, Any], clip_id: str, volume: float) -> Dict[str, Any]:
+    safe_volume = min(1.0, max(0.0, _float(volume, 0.0)))
+
+    def updater(clip: Dict[str, Any]) -> Dict[str, Any]:
+        metadata = dict(clip.get("metadata") or {})
+        metadata["bgm_volume"] = safe_volume
+        return {**clip, "metadata": metadata}
+
+    return _apply_clip_edit(
+        timeline,
+        clip_id,
+        updater,
+        ["metadata.bgm_volume"],
+        {"type": "bgm_volume_change", "clip_id": clip_id},
     )
 
 
@@ -604,6 +868,98 @@ def _existing_created_at(existing_timeline: Dict[str, Any]) -> str:
     if isinstance(metadata, dict) and metadata.get("created_at"):
         return str(metadata["created_at"])
     return datetime.now().isoformat()
+
+
+def _apply_clip_edit(
+    timeline: Dict[str, Any],
+    clip_id: str,
+    updater,
+    override_fields: List[str],
+    operation: Dict[str, Any],
+) -> Dict[str, Any]:
+    result = copy.deepcopy(timeline)
+    clip_index = result.get("clip_index") if isinstance(result.get("clip_index"), dict) else {}
+    clip = clip_index.get(clip_id)
+    if not isinstance(clip, dict):
+        return result
+    now = datetime.now().isoformat()
+    clip_index[clip_id] = _with_edit_metadata(updater(clip), override_fields, now, operation)
+    result["clip_index"] = clip_index
+    return _mark_timeline_dirty(result, str(operation.get("type") or "timeline_edit"), now)
+
+
+def _with_edit_metadata(
+    clip: Dict[str, Any],
+    override_fields: List[str],
+    now: str,
+    operation: Dict[str, Any],
+) -> Dict[str, Any]:
+    edit_state = dict(clip.get("edit_state") or {"auto_generated": True})
+    previous_fields = edit_state.get("override_fields") if isinstance(edit_state.get("override_fields"), list) else []
+    edit_state.update(
+        {
+            "auto_generated": False,
+            "user_overridden": True,
+            "override_fields": _unique_strings([*previous_fields, *override_fields]),
+            "origin": "timeline_edit",
+            "last_edited_at": now,
+        }
+    )
+    return {
+        **clip,
+        "edit_state": edit_state,
+        "invalidation_hint": resolve_timeline_recompute_scope(operation, clip=clip),
+    }
+
+
+def _mark_timeline_dirty(timeline: Dict[str, Any], operation_type: str, now: str) -> Dict[str, Any]:
+    metadata = dict(timeline.get("metadata") or {})
+    metadata.update(
+        {
+            "updated_at": now,
+            "editor_mode": "guided",
+            "dirty": True,
+            "dirty_reason": "timeline_edit",
+            "last_edit_operation": operation_type,
+        }
+    )
+    timeline["metadata"] = metadata
+    return timeline
+
+
+def _find_clip_location(timeline: Dict[str, Any], clip_id: str):
+    for track in timeline.get("tracks") or []:
+        if not isinstance(track, dict):
+            continue
+        clip_ids = track.get("clip_ids")
+        if not isinstance(clip_ids, list):
+            continue
+        if clip_id in clip_ids:
+            return track, clip_ids.index(clip_id)
+    return None
+
+
+def _relayout_track_clips(
+    clip_index: Dict[str, Any],
+    clip_ids: List[str],
+    now: str,
+    operation: Dict[str, Any],
+) -> None:
+    cursor = 0.0
+    for clip_id in clip_ids:
+        clip = clip_index.get(clip_id)
+        if not isinstance(clip, dict):
+            continue
+        duration = max(0.0, _float(clip.get("timeline_duration"), 0.0))
+        updated = {
+            **clip,
+            "timeline_start": round(cursor, 3),
+            "timeline_end": round(cursor + duration, 3),
+        }
+        if clip_id == operation.get("clip_id"):
+            updated = _with_edit_metadata(updated, ["track_order", "timeline_start", "timeline_end"], now, operation)
+        clip_index[clip_id] = updated
+        cursor += duration
 
 
 def _normalize_timeline_edit_operation(value: Any) -> str:

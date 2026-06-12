@@ -88,7 +88,8 @@ from video_engine.plan import (
     set_plan_event_emitter,
 )
 from video_engine.compile import Compiler, set_compile_event_emitter
-from video_engine.timeline import build_timeline_from_blueprint, build_timeline_from_render_plan
+from video_engine.timeline import recover_timeline_document
+from video_engine.timeline_compile import compile_from_timeline
 from video_engine import render_diagnostics as render_diagnostics_helpers
 from video_engine import render_chunks as render_chunks_helpers
 from video_engine import render_finalize as render_finalize_helpers
@@ -136,12 +137,13 @@ usage:
   python video_engine_v5.py plan    --library <media_library.json> --output <story_blueprint.json> [--template auto]
   python video_engine_v5.py compile --blueprint <story_blueprint.json> --library <media_library.json> --output <render_plan.json>
   python video_engine_v5.py timeline-generate --render_plan <render_plan.json> --output <timeline.json> [--blueprint <story_blueprint.json>]
+  python video_engine_v5.py timeline-compile --timeline <timeline.json> --base_render_plan <render_plan.json> --output <render_plan.json>
   python video_engine_v5.py render  --plan <render_plan.json> --output <video.mp4> [--params <json>]
   python video_engine_v5.py preview-render --plan <render_plan.json> --output <preview.mp4>
   python video_engine_v5.py preview-title --title <text> --style_json <json> --output <preview.mp4>
 
 Pipeline:
-  scan -> media_library.json -> plan -> story_blueprint.json -> compile -> render_plan.json -> timeline-generate -> timeline.json
+  scan -> media_library.json -> plan -> story_blueprint.json -> compile -> render_plan.json -> timeline-generate -> timeline.json -> timeline-compile -> render_plan.json
   render -> final mp4
 
 Notes:
@@ -1223,6 +1225,7 @@ class Renderer:
                     "output_path": str(self.output_path),
                     "selected_backend": self.backend_execution.selected_backend_name,
                     "backend": backend_payload,
+                    "metadata": dict((self.plan or {}).get("metadata") or {}),
                     "output_size_bytes": self.output_path.stat().st_size if self.output_path.exists() else None,
                     "duration_seconds": float(getattr(final, "duration", 0.0) or 0.0),
                     "photo_segment_cache": self._photo_segment_cache_summary(),
@@ -1293,6 +1296,7 @@ class Renderer:
                     "output_path": str(self.output_path),
                     "selected_backend": self.backend_execution.selected_backend_name,
                     "backend": backend_payload,
+                    "metadata": dict((self.plan or {}).get("metadata") or {}),
                     "output_size_bytes": self.output_path.stat().st_size if self.output_path.exists() else None,
                     "duration_seconds": final_duration,
                     "visual_base_cache": dict(self.visual_base_cache_stats),
@@ -1875,36 +1879,48 @@ def command_timeline_generate(args: argparse.Namespace) -> None:
     existing_timeline = None
 
     if existing_timeline_path and Path(str(existing_timeline_path)).exists():
-        existing_timeline = read_json(str(existing_timeline_path))
+        try:
+            existing_timeline = read_json(str(existing_timeline_path))
+        except Exception as exc:
+            emit_event("log", message=f"existing timeline ignored during recovery: {exc}")
     elif output_path and Path(str(output_path)).exists():
-        existing_timeline = read_json(str(output_path))
+        try:
+            existing_timeline = read_json(str(output_path))
+        except Exception as exc:
+            emit_event("log", message=f"existing output timeline ignored during recovery: {exc}")
 
     project_dir = getattr(args, "project_dir", None)
     if not project_dir and output_path:
         project_dir = str(Path(str(output_path)).parent)
 
-    if blueprint:
-        result = build_timeline_from_blueprint(
-            blueprint,
-            render_plan,
-            media_library=library,
-            existing_timeline=existing_timeline,
-            media_library_path=getattr(args, "library", None),
-            story_blueprint_path=getattr(args, "blueprint", None),
-            render_plan_path=getattr(args, "render_plan", None),
-            project_dir=project_dir,
-        )
-    else:
-        result = build_timeline_from_render_plan(
-            render_plan,
-            existing_timeline=existing_timeline,
-            render_plan_path=getattr(args, "render_plan", None),
-            project_dir=project_dir,
-        )
+    result, migration_notes = recover_timeline_document(
+        blueprint,
+        render_plan,
+        media_library=library,
+        existing_timeline=existing_timeline,
+        media_library_path=getattr(args, "library", None),
+        story_blueprint_path=getattr(args, "blueprint", None),
+        render_plan_path=getattr(args, "render_plan", None),
+        project_dir=project_dir,
+    )
 
     write_json(output_path, result)
+    for note in migration_notes:
+        emit_event("log", message=f"timeline migration: {note}")
     if output_path:
         emit_event("artifact", artifact="timeline", path=output_path, message="timeline generated")
+
+
+def command_timeline_compile(args: argparse.Namespace) -> None:
+    result = compile_from_timeline(
+        read_json(args.timeline),
+        read_json(args.base_render_plan),
+        timeline_path=getattr(args, "timeline", None),
+        source_render_plan_path=getattr(args, "base_render_plan", None),
+    )
+    write_json(args.output, result)
+    if args.output:
+        emit_event("artifact", artifact="render_plan", path=args.output, message="render plan compiled from timeline")
 
 
 
@@ -2493,6 +2509,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--existing_timeline")
     p.add_argument("--project_dir")
     p.set_defaults(func=command_timeline_generate)
+
+    p = sub.add_parser("timeline-compile", help="Compile render_plan.json from timeline.json")
+    p.add_argument("--timeline", required=True)
+    p.add_argument("--base_render_plan", required=True)
+    p.add_argument("--output")
+    p.set_defaults(func=command_timeline_compile)
 
     p = sub.add_parser("render", help="Render final MP4 from render_plan.json")
     p.add_argument("--plan", required=True)

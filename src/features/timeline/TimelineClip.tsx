@@ -9,8 +9,14 @@ interface TimelineClipProps {
   selected: boolean;
   active: boolean;
   linked: boolean;
+  draggable: boolean;
+  dropTarget: boolean;
   onSelect: (clip: V5TimelineClip) => void;
   onSelectSection: (sectionId: string | null) => void;
+  onDragStart: (clipId: string) => void;
+  onDragOver: (clipId: string) => void;
+  onDrop: (clipId: string) => void;
+  onDragEnd: () => void;
 }
 
 export function TimelineClip({
@@ -20,8 +26,14 @@ export function TimelineClip({
   selected,
   active,
   linked,
+  draggable,
+  dropTarget,
   onSelect,
   onSelectSection,
+  onDragStart,
+  onDragOver,
+  onDrop,
+  onDragEnd,
 }: TimelineClipProps) {
   const sectionId = clip.source_ref?.section_id || null;
   const title = clip.content_ref?.title_text || clip.content_ref?.source_path?.split(/[/\\]/).pop() || clip.kind;
@@ -40,12 +52,31 @@ export function TimelineClip({
         selected ? "selected" : "",
         active ? "active-rendering" : "",
         linked ? "linked-audio-section" : "",
+        dropTarget ? "drop-target" : "",
         clip.enabled ? "" : "disabled",
       ].filter(Boolean).join(" ")}
       style={{ left, width }}
       data-section-id={sectionId || undefined}
       data-segment-id={clip.source_ref?.segment_id || undefined}
       onClick={handleActivate}
+      draggable={draggable}
+      onDragStart={(event) => {
+        if (!draggable) return;
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData("text/plain", clip.clip_id);
+        onDragStart(clip.clip_id);
+      }}
+      onDragOver={(event) => {
+        if (!draggable) return;
+        event.preventDefault();
+        onDragOver(clip.clip_id);
+      }}
+      onDrop={(event) => {
+        if (!draggable) return;
+        event.preventDefault();
+        onDrop(clip.clip_id);
+      }}
+      onDragEnd={onDragEnd}
     >
       <span className="timeline-clip-label">
         {active ? <Wand2 size={11} className="spin" /> : clip.kind.replace("_", " ")}

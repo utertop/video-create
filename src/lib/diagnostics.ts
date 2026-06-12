@@ -24,6 +24,17 @@ export interface DiagnosticResultLike {
 export interface DiagnosticRecoveryLike {
   reportPath?: string | null;
   manifestPath?: string | null;
+  buildReportVersion?: string | null;
+  timelineSummary?: Record<string, unknown> | null;
+  routeSummary?: Record<string, unknown> | null;
+  fallbackSummary?: Record<string, unknown> | null;
+  cacheSummary?: Record<string, unknown> | null;
+  recomputeSummary?: Record<string, unknown> | null;
+  performanceSummary?: Record<string, unknown> | null;
+  qualitySummary?: Record<string, unknown> | null;
+  recoverySummary?: Record<string, unknown> | null;
+  migrationNotes?: string[] | null;
+  reportSuggestions?: Array<Record<string, unknown>> | null;
   status?: string | null;
   renderIntent?: string | null;
   renderMode?: string | null;
@@ -137,11 +148,33 @@ export interface DiagnosticBundlePayload {
   };
 }
 
+function normalizeReportObject(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function normalizeReportObjectList(value: unknown): Array<Record<string, unknown>> {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => normalizeReportObject(item))
+    .filter((item): item is Record<string, unknown> => Boolean(item));
+}
+
 function normalizeRecoverySummary(recovery: DiagnosticRecoveryLike | null | undefined): DiagnosticRecoveryLike | null {
   if (!recovery || typeof recovery !== "object") return null;
   return {
     reportPath: typeof recovery.reportPath === "string" ? recovery.reportPath : null,
     manifestPath: typeof recovery.manifestPath === "string" ? recovery.manifestPath : null,
+    buildReportVersion: typeof recovery.buildReportVersion === "string" ? recovery.buildReportVersion : null,
+    timelineSummary: normalizeReportObject(recovery.timelineSummary),
+    routeSummary: normalizeReportObject(recovery.routeSummary),
+    fallbackSummary: normalizeReportObject(recovery.fallbackSummary),
+    cacheSummary: normalizeReportObject(recovery.cacheSummary),
+    recomputeSummary: normalizeReportObject(recovery.recomputeSummary),
+    performanceSummary: normalizeReportObject(recovery.performanceSummary),
+    qualitySummary: normalizeReportObject(recovery.qualitySummary),
+    recoverySummary: normalizeReportObject(recovery.recoverySummary),
+    migrationNotes: Array.isArray(recovery.migrationNotes) ? recovery.migrationNotes.filter((item): item is string => typeof item === "string") : [],
+    reportSuggestions: normalizeReportObjectList(recovery.reportSuggestions),
     status: typeof recovery.status === "string" ? recovery.status : null,
     renderIntent: typeof recovery.renderIntent === "string" ? recovery.renderIntent : null,
     renderMode: typeof recovery.renderMode === "string" ? recovery.renderMode : null,

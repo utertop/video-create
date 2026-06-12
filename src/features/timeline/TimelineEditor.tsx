@@ -1,6 +1,14 @@
 import { useMemo, useState } from "react";
 import type { V5RenderPlan, V5RenderSegment, V5Timeline, V5TimelineClip, V5TimelineTrack } from "../../lib/engine";
 import { TimelineInspector } from "./TimelineInspector";
+import {
+  moveClip,
+  updateBgmCueVolume,
+  updateClipContent,
+  updateClipDuration,
+  updateClipEnabled,
+  updateClipPresentation,
+} from "./timelineOps";
 import { TimelineRuler } from "./TimelineRuler";
 import { TimelineTrack } from "./TimelineTrack";
 
@@ -11,6 +19,7 @@ interface TimelineEditorProps {
   isRendering: boolean;
   selectedSectionId: string | null;
   onSelectSection: (sectionId: string | null) => void;
+  onTimelineChange?: (timeline: V5Timeline) => void;
 }
 
 interface TimelineViewModel {
@@ -28,10 +37,15 @@ export function TimelineEditor({
   isRendering,
   selectedSectionId,
   onSelectSection,
+  onTimelineChange,
 }: TimelineEditorProps) {
   const viewModel = useMemo(() => buildTimelineViewModel(timeline, renderPlan), [timeline, renderPlan]);
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
+  const [draggingClipId, setDraggingClipId] = useState<string | null>(null);
+  const [dragOverClipId, setDragOverClipId] = useState<string | null>(null);
   const selectedClip = selectedClipId ? viewModel.clipIndex[selectedClipId] || null : null;
+  const selectedTrack = selectedClip ? viewModel.tracks.find((track) => track.track_id === selectedClip.track_id) || null : null;
+  const editable = Boolean(timeline && onTimelineChange && viewModel.source === "timeline");
   const activeSegmentId =
     isRendering && activeSegmentIndex !== null && renderPlan?.segments?.[activeSegmentIndex]
       ? renderPlan.segments[activeSegmentIndex].segment_id
@@ -39,6 +53,34 @@ export function TimelineEditor({
   const pixelsPerSecond = resolvePixelsPerSecond(viewModel.duration);
 
   if (!renderPlan && !timeline) return null;
+
+  const commitTimeline = (nextTimeline: V5Timeline) => {
+    onTimelineChange?.(nextTimeline);
+  };
+
+  const handleMoveClip = (clipId: string, targetIndex: number) => {
+    if (!timeline || !editable) return;
+    commitTimeline(moveClip(timeline, clipId, targetIndex));
+  };
+
+  const handleDrop = (targetClipId: string) => {
+    if (!timeline || !editable || !draggingClipId || draggingClipId === targetClipId) {
+      setDraggingClipId(null);
+      setDragOverClipId(null);
+      return;
+    }
+    const targetTrack = viewModel.tracks.find((track) => track.clip_ids.includes(targetClipId));
+    if (!targetTrack || !targetTrack.clip_ids.includes(draggingClipId)) {
+      setDraggingClipId(null);
+      setDragOverClipId(null);
+      return;
+    }
+    const targetIndex = targetTrack.clip_ids.indexOf(targetClipId);
+    commitTimeline(moveClip(timeline, draggingClipId, targetIndex));
+    setSelectedClipId(draggingClipId);
+    setDraggingClipId(null);
+    setDragOverClipId(null);
+  };
 
   return (
     <div className="timeline-editor-shell">
@@ -72,14 +114,44 @@ export function TimelineEditor({
                   selectedClipId={selectedClipId}
                   activeSegmentId={activeSegmentId}
                   selectedSectionId={selectedSectionId}
+                  editable={editable}
+                  draggingClipId={draggingClipId}
+                  dragOverClipId={dragOverClipId}
                   onSelectClip={(clip) => setSelectedClipId(clip.clip_id)}
                   onSelectSection={onSelectSection}
+                  onDragStart={(clipId) => setDraggingClipId(clipId)}
+                  onDragOver={(clipId) => setDragOverClipId(clipId)}
+                  onDrop={handleDrop}
+                  onDragEnd={() => {
+                    setDraggingClipId(null);
+                    setDragOverClipId(null);
+                  }}
                 />
               );
             })}
           </div>
         </div>
-        <TimelineInspector clip={selectedClip} />
+        <TimelineInspector
+          clip={selectedClip}
+          editable={editable}
+          trackClipIds={selectedTrack?.clip_ids || []}
+          onUpdateEnabled={(clipId, enabled) => {
+            if (timeline) commitTimeline(updateClipEnabled(timeline, clipId, enabled));
+          }}
+          onUpdateContent={(clipId, patch) => {
+            if (timeline) commitTimeline(updateClipContent(timeline, clipId, patch));
+          }}
+          onUpdatePresentation={(clipId, patch) => {
+            if (timeline) commitTimeline(updateClipPresentation(timeline, clipId, patch));
+          }}
+          onUpdateDuration={(clipId, duration) => {
+            if (timeline) commitTimeline(updateClipDuration(timeline, clipId, duration));
+          }}
+          onUpdateBgmVolume={(clipId, volume) => {
+            if (timeline) commitTimeline(updateBgmCueVolume(timeline, clipId, volume));
+          }}
+          onMoveClip={handleMoveClip}
+        />
       </div>
     </div>
   );

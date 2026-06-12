@@ -545,6 +545,158 @@ def _v56_report_summary_fields(
     }
 
 
+def _v56_build_report_v2_fields(report: Dict[str, Any]) -> Dict[str, Any]:
+    report = dict(report or {})
+    backend = dict(report.get("backend") or {})
+    diagnostics = dict(report.get("diagnostics") or {})
+    observability = dict(diagnostics.get("observability") or {})
+    cache_efficiency = dict(observability.get("cache_efficiency") or {})
+    fast_path = dict(observability.get("fast_path_coverage") or {})
+    route_differences = dict(observability.get("route_differences") or {})
+    cache_policy = dict(report.get("cache_policy") or observability.get("cache_policy") or {})
+    render_scheduler = dict(report.get("render_scheduler") or {})
+    chunk_scheduler = dict(report.get("chunk_scheduler") or {})
+    timings = dict(report.get("timings") or {})
+    metadata = dict(report.get("metadata") or {})
+    recompute = dict(
+        report.get("recompute_summary")
+        or metadata.get("recompute_summary")
+        or (diagnostics.get("smart_invalidation") or {}).get("recompute_summary")
+        or {}
+    )
+    recovery = dict(report.get("recovery") or {})
+    failure = dict(report.get("failure") or recovery.get("failure") or {})
+    slow_path_report = dict(diagnostics.get("slow_path_report") or {})
+    slow_recommendations = list(slow_path_report.get("recommendations") or [])
+    segment_routes = list(report.get("segment_routes") or [])
+    chunk_routes = list(report.get("chunk_routes") or [])
+    chunks = list(report.get("chunks") or [])
+
+    segment_fast_path = dict(fast_path.get("segments") or {})
+    chunk_fast_path = dict(fast_path.get("chunks") or {})
+    segment_route_diff = dict(route_differences.get("segments") or {})
+    source_kind = "timeline" if metadata.get("generated_from") == "timeline" else "render_plan"
+
+    timeline_summary = {
+        "source": source_kind,
+        "compiled_from_timeline": source_kind == "timeline",
+        "timeline_source_path": metadata.get("timeline_source_path"),
+        "source_render_plan_path": metadata.get("source_render_plan_path"),
+        "total_segments": int(
+            render_scheduler.get("total_segments")
+            or len(segment_routes)
+            or report.get("chunk_count")
+            or 0
+        ),
+        "enabled_clip_count": recompute.get("enabled_clip_count"),
+        "disabled_clip_count": recompute.get("disabled_clip_count"),
+        "edited_clip_count": recompute.get("edited_clip_count"),
+    }
+
+    route_summary = {
+        "render_mode": report.get("render_mode"),
+        "selected_backend": report.get("selected_backend"),
+        "actual_backend": report.get("actual_backend") or backend.get("actual_backend_name"),
+        "backend_reason": report.get("backend_reason") or backend.get("reason"),
+        "segment_route_counts": dict(render_scheduler.get("route_counts") or {}),
+        "chunk_route_counts": dict(chunk_scheduler.get("route_counts") or {}),
+        "segment_fast_path_rate": report.get("segment_fast_path_rate") or segment_fast_path.get("fast_path_rate"),
+        "chunk_fast_path_rate": report.get("chunk_fast_path_rate") or chunk_fast_path.get("fast_path_rate"),
+        "segment_route_difference_count": report.get("segment_route_difference_count") or segment_route_diff.get("changed_count") or 0,
+        "segment_route_difference_rate": report.get("segment_route_difference_rate") or segment_route_diff.get("changed_rate"),
+        "segment_route_sample_count": len(segment_routes),
+        "chunk_route_sample_count": len(chunk_routes),
+    }
+
+    fallback_summary = {
+        "applied": bool(report.get("fallback_applied") or backend.get("fallback_applied")),
+        "used": report.get("fallback_used") or backend.get("fallback_used"),
+        "reason": report.get("fallback_reason") or backend.get("fallback_reason"),
+        "chain": list(report.get("fallback_chain") or backend.get("fallback_chain") or []),
+    }
+
+    cache_summary = {
+        "policy": cache_policy,
+        "cleanup": dict(report.get("cache_cleanup") or {}),
+        "efficiency": cache_efficiency,
+        "visual_base_cache": dict(report.get("visual_base_cache") or {}),
+        "photo_segment_cache": dict(report.get("photo_segment_cache") or {}),
+        "card_segment_cache": dict(report.get("card_segment_cache") or {}),
+        "video_segment_cache": dict(report.get("video_segment_cache") or {}),
+        "proxy_media": dict(report.get("proxy_media") or {}),
+    }
+
+    recompute_summary = {
+        **recompute,
+        "render_intent": report.get("render_intent") or cache_policy.get("render_intent"),
+        "cache_namespace": cache_policy.get("cache_namespace"),
+        "timeline_dirty": bool(metadata.get("timeline_dirty") or recompute.get("timeline_dirty")),
+    }
+
+    performance_summary = {
+        "elapsed_seconds": report.get("elapsed_seconds") or timings.get("total_render_seconds"),
+        "duration_seconds": report.get("duration_seconds"),
+        "output_size_bytes": report.get("output_size_bytes"),
+        "chunk_count": report.get("chunk_count") or len(chunks) or None,
+        "timing_highlights": dict(observability.get("timing_highlights") or {}),
+        "slow_path_report": slow_path_report,
+    }
+
+    quality_summary = {
+        "render_intent": report.get("render_intent") or cache_policy.get("render_intent"),
+        "uses_original_source": cache_policy.get("uses_original_source"),
+        "allow_proxy": cache_policy.get("allow_proxy"),
+        "proxy_allowed_for_final": cache_policy.get("proxy_allowed_for_final"),
+        "quality": cache_policy.get("quality"),
+        "python_quality": cache_policy.get("python_quality"),
+        "fps": cache_policy.get("fps"),
+        "preview_height": cache_policy.get("preview_height"),
+        "final_original_source_guard": bool(cache_policy.get("render_intent") == "final" and cache_policy.get("uses_original_source") is True),
+    }
+
+    recovery_summary = {
+        **recovery,
+        "status": report.get("status"),
+        "failed_stage": report.get("failed_stage"),
+        "failed_chunk": report.get("failed_chunk") or recovery.get("failed_chunk"),
+        "failure_code": failure.get("code"),
+        "failure_message": failure.get("message") or report.get("error"),
+        "retryable": bool(failure.get("retryable")),
+    }
+
+    suggestions = [
+        item
+        for item in slow_recommendations
+        if isinstance(item, dict)
+    ]
+    if fallback_summary["applied"]:
+        suggestions.append({
+            "id": "review_backend_fallback",
+            "priority": "medium",
+            "message": "Backend fallback was applied; inspect backend_reason and fallback_reason before tuning render quality.",
+        })
+    if cache_policy.get("render_intent") == "final" and cache_policy.get("allow_proxy"):
+        suggestions.append({
+            "id": "final_proxy_guard_violation",
+            "priority": "high",
+            "message": "Final render reports proxy usage is allowed; verify preview/final cache policy before export.",
+        })
+
+    return {
+        "build_report_version": "v2",
+        "timeline_summary": timeline_summary,
+        "route_summary": route_summary,
+        "fallback_summary": fallback_summary,
+        "cache_summary": cache_summary,
+        "recompute_summary": recompute_summary,
+        "performance_summary": performance_summary,
+        "quality_summary": quality_summary,
+        "recovery_summary": recovery_summary,
+        "migration_notes": list(report.get("migration_notes") or []),
+        "report_suggestions": suggestions[:8],
+    }
+
+
 def _v56_classify_render_failure(error: Any, stage: str) -> Dict[str, Any]:
     message = str(error or "")
     lowered = message.lower()

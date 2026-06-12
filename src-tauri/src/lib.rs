@@ -54,6 +54,7 @@ struct WorkerLaunchSpec {
 }
 
 const CURRENT_V5_SCHEMA_VERSION: &str = "5.5";
+const CURRENT_TIMELINE_VERSION: &str = "v1";
 const TELEMETRY_SCHEMA_VERSION: &str = "1";
 const TELEMETRY_CONSENT_VERSION: &str = "telemetry-consent-2026-05-v1";
 const MAX_PENDING_REMOTE_EVENTS: usize = 50;
@@ -128,6 +129,17 @@ struct ProjectDocumentsLoadResult {
 struct BuildReportSummary {
     report_path: String,
     manifest_path: Option<String>,
+    build_report_version: Option<String>,
+    timeline_summary: Option<Value>,
+    route_summary: Option<Value>,
+    fallback_summary: Option<Value>,
+    cache_summary: Option<Value>,
+    recompute_summary: Option<Value>,
+    performance_summary: Option<Value>,
+    quality_summary: Option<Value>,
+    recovery_summary: Option<Value>,
+    migration_notes: Vec<String>,
+    report_suggestions: Option<Value>,
     status: Option<String>,
     render_intent: Option<String>,
     render_mode: Option<String>,
@@ -2947,7 +2959,7 @@ fn load_project_documents_v5_blocking(project_dir: String) -> Result<ProjectDocu
     let library = load_and_migrate_project_doc(&root.join("media_library.json"), "media_library", &mut migrated, &mut migration_notes)?;
     let blueprint = load_and_migrate_project_doc(&root.join("story_blueprint.json"), "story_blueprint", &mut migrated, &mut migration_notes)?;
     let render_plan = load_and_migrate_project_doc(&root.join("render_plan.json"), "render_plan", &mut migrated, &mut migration_notes)?;
-    let timeline = load_and_migrate_project_doc(&root.join("timeline.json"), "timeline", &mut migrated, &mut migration_notes)?;
+    let timeline = load_timeline_doc_resilient(&root, &library, &blueprint, &render_plan, &mut migrated, &mut migration_notes)?;
 
     Ok(ProjectDocumentsLoadResult {
         project_dir,
@@ -3015,6 +3027,29 @@ fn extract_build_report_summary(value: Value, report_path: &Path) -> BuildReport
             .and_then(|item| item.get("manifest_path"))
             .and_then(|item| item.as_str())
             .map(|item| item.to_string()),
+        build_report_version: value
+            .get("build_report_version")
+            .and_then(|item| item.as_str())
+            .map(|item| item.to_string()),
+        timeline_summary: value.get("timeline_summary").cloned(),
+        route_summary: value.get("route_summary").cloned(),
+        fallback_summary: value.get("fallback_summary").cloned(),
+        cache_summary: value.get("cache_summary").cloned(),
+        recompute_summary: value.get("recompute_summary").cloned(),
+        performance_summary: value.get("performance_summary").cloned(),
+        quality_summary: value.get("quality_summary").cloned(),
+        recovery_summary: value.get("recovery_summary").cloned(),
+        migration_notes: value
+            .get("migration_notes")
+            .and_then(|item| item.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(|value| value.to_string()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
+        report_suggestions: value.get("report_suggestions").cloned(),
         status: value.get("status").and_then(|item| item.as_str()).map(|item| item.to_string()),
         render_intent: value
             .get("render_intent")
@@ -3190,6 +3225,265 @@ fn load_and_migrate_project_doc(
     Ok(Some(migrated_value))
 }
 
+fn load_timeline_doc_resilient(
+    root: &Path,
+    library: &Option<Value>,
+    blueprint: &Option<Value>,
+    render_plan: &Option<Value>,
+    migrated_any: &mut bool,
+    notes: &mut Vec<String>,
+) -> Result<Option<Value>, String> {
+    let timeline_path = root.join("timeline.json");
+    if timeline_path.is_file() {
+        match load_and_migrate_project_doc(&timeline_path, "timeline", migrated_any, notes) {
+            Ok(timeline) => return Ok(timeline),
+            Err(error) => {
+                *migrated_any = true;
+                notes.push(format!(
+                    "timeline.json: migration failed, original file kept, using recovered in-memory timeline ({})",
+                    error
+                ));
+                return Ok(build_recovered_timeline_doc(
+                    root,
+                    library.as_ref(),
+                    blueprint.as_ref(),
+                    render_plan.as_ref(),
+                    false,
+                    notes,
+                ));
+            }
+        }
+    }
+
+    let recovered = build_recovered_timeline_doc(
+        root,
+        library.as_ref(),
+        blueprint.as_ref(),
+        render_plan.as_ref(),
+        true,
+        notes,
+    );
+    if recovered.is_some() {
+        *migrated_any = true;
+    }
+    Ok(recovered)
+}
+
+fn build_recovered_timeline_doc(
+    root: &Path,
+    _library: Option<&Value>,
+    blueprint: Option<&Value>,
+    render_plan: Option<&Value>,
+    write_missing_file: bool,
+    notes: &mut Vec<String>,
+) -> Option<Value> {
+    let plan = render_plan?;
+    let segments = plan
+        .get("segments")
+        .and_then(|item| item.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let title = blueprint
+        .and_then(|item| item.get("title"))
+        .and_then(|item| item.as_str())
+        .map(|item| item.to_string());
+    let now = unix_timestamp_millis().to_string();
+    let mut clip_index = serde_json::Map::new();
+    let mut video_clip_ids = Vec::new();
+    let mut title_clip_ids = Vec::new();
+    let audio_clip_ids: Vec<Value> = Vec::new();
+
+    for (index, segment) in segments.iter().enumerate() {
+        let stype = segment
+            .get("type")
+            .and_then(|item| item.as_str())
+            .unwrap_or("image");
+        let track_id = if matches!(stype, "title" | "chapter" | "end") {
+            "track_title_main"
+        } else {
+            "track_video_main"
+        };
+        let clip_id = format!(
+            "clip_recovered_{}_{}",
+            stype,
+            segment
+                .get("segment_id")
+                .and_then(|item| item.as_str())
+                .map(sanitize_timeline_id_part)
+                .unwrap_or_else(|| index.to_string())
+        );
+        let start = segment.get("start_time").and_then(|item| item.as_f64()).unwrap_or_else(|| {
+            if index == 0 {
+                0.0
+            } else {
+                segments
+                    .get(index - 1)
+                    .and_then(|previous| previous.get("end_time"))
+                    .and_then(|item| item.as_f64())
+                    .unwrap_or(0.0)
+            }
+        });
+        let duration = segment
+            .get("duration")
+            .and_then(|item| item.as_f64())
+            .unwrap_or(3.0)
+            .max(0.0);
+        let end = segment
+            .get("end_time")
+            .and_then(|item| item.as_f64())
+            .unwrap_or(start + duration);
+
+        if track_id == "track_title_main" {
+            title_clip_ids.push(Value::String(clip_id.clone()));
+        } else {
+            video_clip_ids.push(Value::String(clip_id.clone()));
+        }
+
+        clip_index.insert(
+            clip_id.clone(),
+            json!({
+                "clip_id": clip_id,
+                "track_id": track_id,
+                "kind": if track_id == "track_title_main" { "title_card" } else { stype },
+                "enabled": true,
+                "locked": false,
+                "timeline_start": start,
+                "timeline_duration": duration,
+                "timeline_end": end,
+                "source_in": 0,
+                "source_out": duration,
+                "playback_rate": 1,
+                "source_ref": {
+                    "segment_id": segment.get("segment_id").cloned().unwrap_or(Value::Null),
+                    "section_id": segment.get("section_id").cloned().unwrap_or(Value::Null),
+                    "asset_id": segment.get("asset_id").cloned().unwrap_or(Value::Null),
+                    "source_path": segment.get("source_path").cloned().unwrap_or(Value::Null)
+                },
+                "content": {},
+                "presentation": {},
+                "invalidation_hint": {
+                    "primary_scope": "timeline_compile",
+                    "requires_preview_rebuild": true,
+                    "requires_final_rebuild": true,
+                    "cache_namespace": "timeline"
+                },
+                "metadata": {
+                    "recovered_from": "render_plan",
+                    "recovered_at": now.clone()
+                }
+            }),
+        );
+    }
+
+    let timeline = json!({
+        "schema_version": CURRENT_V5_SCHEMA_VERSION,
+        "document_type": "timeline",
+        "timeline_version": CURRENT_TIMELINE_VERSION,
+        "project_ref": {
+            "project_id": format!("project_recovered_{}", sanitize_timeline_id_part(&root.display().to_string())),
+            "project_dir": root.display().to_string(),
+            "title": title
+        },
+        "source_ref": {
+            "media_library_path": root.join("media_library.json").display().to_string(),
+            "story_blueprint_path": root.join("story_blueprint.json").display().to_string(),
+            "render_plan_path": root.join("render_plan.json").display().to_string(),
+            "generated_from_blueprint": blueprint.is_some(),
+            "generated_at": now.clone()
+        },
+        "tracks": [
+            {
+                "track_id": "track_video_main",
+                "kind": "video",
+                "label": "Main Video",
+                "order": 0,
+                "enabled": !video_clip_ids.is_empty(),
+                "locked": false,
+                "clip_ids": video_clip_ids
+            },
+            {
+                "track_id": "track_title_main",
+                "kind": "title",
+                "label": "Titles",
+                "order": 1,
+                "enabled": !title_clip_ids.is_empty(),
+                "locked": false,
+                "clip_ids": title_clip_ids
+            },
+            {
+                "track_id": "track_audio_main",
+                "kind": "audio",
+                "label": "Audio",
+                "order": 2,
+                "enabled": false,
+                "locked": false,
+                "clip_ids": audio_clip_ids
+            }
+        ],
+        "clip_index": Value::Object(clip_index),
+        "dependency_graph": [],
+        "invalidation_rules_version": "timeline_invalidation_v1",
+        "performance_policy": {
+            "preview": {
+                "cache_namespace": "preview",
+                "uses_original_source": false,
+                "allow_proxy": true
+            },
+            "final": {
+                "cache_namespace": "final",
+                "uses_original_source": true,
+                "allow_proxy": false
+            }
+        },
+        "metadata": {
+            "created_at": now.clone(),
+            "updated_at": now,
+            "generated_from": "project_recovery",
+            "editor_mode": "auto",
+            "dirty": false,
+            "migration_notes": ["timeline recovered from render_plan"]
+        }
+    });
+
+    if write_missing_file {
+        let timeline_path = root.join("timeline.json");
+        match serde_json::to_string_pretty(&timeline)
+            .map_err(|e| e.to_string())
+            .and_then(|formatted| std::fs::write(&timeline_path, formatted).map_err(|e| e.to_string()))
+        {
+            Ok(_) => notes.push("timeline.json: generated from render_plan for legacy project".to_string()),
+            Err(error) => notes.push(format!(
+                "timeline.json: generated in memory but could not be written ({})",
+                error
+            )),
+        }
+    } else {
+        notes.push("timeline.json: recovered in memory from render_plan without overwriting original".to_string());
+    }
+
+    Some(timeline)
+}
+
+fn sanitize_timeline_id_part(value: &str) -> String {
+    let sanitized = value
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect::<String>();
+    let trimmed = sanitized.trim_matches('_');
+    if trimmed.is_empty() {
+        "unknown".to_string()
+    } else {
+        trimmed.chars().take(48).collect()
+    }
+}
+
+fn unix_timestamp_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0)
+}
+
 fn migrate_v5_document(mut value: Value, expected_type: &str) -> Result<(bool, Value, Vec<String>), String> {
     let obj = value.as_object_mut().ok_or_else(|| {
         coded_error(
@@ -3350,16 +3644,67 @@ fn migrate_timeline_doc(
     migrated: &mut bool,
     notes: &mut Vec<String>,
 ) {
-    if !obj.contains_key("timeline_version") {
-        obj.insert("timeline_version".to_string(), Value::String("v1".to_string()));
+    let timeline_version = obj
+        .get("timeline_version")
+        .and_then(|v| v.as_str())
+        .unwrap_or("missing")
+        .to_string();
+    if timeline_version != CURRENT_TIMELINE_VERSION {
+        obj.insert("timeline_version".to_string(), Value::String(CURRENT_TIMELINE_VERSION.to_string()));
         *migrated = true;
-        notes.push("琛ュ叏 timeline_version".to_string());
+        notes.push(format!("timeline_version {} -> {}", timeline_version, CURRENT_TIMELINE_VERSION));
     }
-    ensure_object_child(obj, "project_ref", migrated, notes, "琛ュ叏 project_ref");
-    ensure_object_child(obj, "source_ref", migrated, notes, "琛ュ叏 source_ref");
-    ensure_array_child(obj, "tracks", migrated, notes, "琛ュ叏 tracks");
-    ensure_object_child(obj, "clip_index", migrated, notes, "琛ュ叏 clip_index");
-    ensure_object_child(obj, "metadata", migrated, notes, "琛ュ叏 metadata");
+    ensure_object_child(obj, "project_ref", migrated, notes, "timeline: ensure project_ref");
+    ensure_object_child(obj, "source_ref", migrated, notes, "timeline: ensure source_ref");
+    ensure_array_child(obj, "tracks", migrated, notes, "timeline: ensure tracks");
+    ensure_object_child(obj, "clip_index", migrated, notes, "timeline: ensure clip_index");
+    ensure_array_child(obj, "dependency_graph", migrated, notes, "timeline: ensure dependency_graph");
+    ensure_object_child(obj, "metadata", migrated, notes, "timeline: ensure metadata");
+    ensure_object_child(obj, "performance_policy", migrated, notes, "timeline: ensure performance_policy");
+
+    if !obj.contains_key("invalidation_rules_version") {
+        obj.insert(
+            "invalidation_rules_version".to_string(),
+            Value::String("timeline_invalidation_v1".to_string()),
+        );
+        *migrated = true;
+        notes.push("timeline: ensure invalidation_rules_version".to_string());
+    }
+
+    if let Some(policy) = obj.get_mut("performance_policy").and_then(|v| v.as_object_mut()) {
+        if !policy.get("preview").map(|v| v.is_object()).unwrap_or(false) {
+            policy.insert(
+                "preview".to_string(),
+                json!({
+                    "cache_namespace": "preview",
+                    "uses_original_source": false,
+                    "allow_proxy": true
+                }),
+            );
+            *migrated = true;
+            notes.push("timeline: ensure preview performance policy".to_string());
+        }
+        if !policy.get("final").map(|v| v.is_object()).unwrap_or(false) {
+            policy.insert(
+                "final".to_string(),
+                json!({
+                    "cache_namespace": "final",
+                    "uses_original_source": true,
+                    "allow_proxy": false
+                }),
+            );
+            *migrated = true;
+            notes.push("timeline: ensure final performance policy".to_string());
+        }
+    }
+
+    if let Some(metadata) = obj.get_mut("metadata").and_then(|v| v.as_object_mut()) {
+        if !metadata.get("migration_notes").map(|v| v.is_array()).unwrap_or(false) {
+            metadata.insert("migration_notes".to_string(), Value::Array(Vec::new()));
+            *migrated = true;
+            notes.push("timeline: ensure metadata.migration_notes".to_string());
+        }
+    }
 }
 
 fn ensure_object_child(
@@ -3539,6 +3884,105 @@ mod tests {
 
         let error = migrate_v5_document(input, "render_plan").expect_err("type mismatch should fail");
         assert!(error.contains("[E_PROJECT_DOC_TYPE_MISMATCH]"));
+    }
+
+    #[test]
+    fn project_recovery_generates_missing_timeline_from_render_plan() {
+        let root = unique_test_dir("timeline_missing_recovery");
+        write_project_doc(&root, "media_library.json", json!({
+            "schema_version": CURRENT_V5_SCHEMA_VERSION,
+            "document_type": "media_library",
+            "project": {},
+            "assets": [],
+            "directory_nodes": [],
+            "summary": {}
+        }));
+        write_project_doc(&root, "story_blueprint.json", json!({
+            "schema_version": CURRENT_V5_SCHEMA_VERSION,
+            "document_type": "story_blueprint",
+            "title": "Recovered Project",
+            "subtitle": "",
+            "metadata": {},
+            "sections": []
+        }));
+        write_project_doc(&root, "render_plan.json", json!({
+            "schema_version": CURRENT_V5_SCHEMA_VERSION,
+            "document_type": "render_plan",
+            "segments": [
+                {
+                    "segment_id": "seg_1",
+                    "type": "image",
+                    "asset_id": "asset_1",
+                    "source_path": "image.jpg",
+                    "start_time": 0,
+                    "duration": 3,
+                    "end_time": 3
+                }
+            ],
+            "render_settings": {}
+        }));
+
+        let loaded = load_project_documents_v5_blocking(root.display().to_string()).expect("project should load");
+        assert!(loaded.migrated);
+        assert!(root.join("timeline.json").is_file());
+        let timeline = loaded.timeline.expect("timeline should be generated");
+        assert_eq!(timeline["document_type"], "timeline");
+        assert_eq!(timeline["timeline_version"], CURRENT_TIMELINE_VERSION);
+        assert_eq!(timeline["metadata"]["generated_from"], "project_recovery");
+        assert!(loaded.migration_notes.iter().any(|note| note.contains("generated from render_plan")));
+
+        cleanup_test_dir(&root);
+    }
+
+    #[test]
+    fn project_recovery_keeps_invalid_timeline_and_uses_memory_recovery() {
+        let root = unique_test_dir("timeline_invalid_recovery");
+        write_project_doc(&root, "media_library.json", json!({
+            "schema_version": CURRENT_V5_SCHEMA_VERSION,
+            "document_type": "media_library",
+            "project": {},
+            "assets": [],
+            "directory_nodes": [],
+            "summary": {}
+        }));
+        write_project_doc(&root, "story_blueprint.json", json!({
+            "schema_version": CURRENT_V5_SCHEMA_VERSION,
+            "document_type": "story_blueprint",
+            "title": "Recovered Project",
+            "subtitle": "",
+            "metadata": {},
+            "sections": []
+        }));
+        write_project_doc(&root, "render_plan.json", json!({
+            "schema_version": CURRENT_V5_SCHEMA_VERSION,
+            "document_type": "render_plan",
+            "segments": [
+                { "segment_id": "seg_1", "type": "image", "duration": 2 }
+            ],
+            "render_settings": {}
+        }));
+        let invalid_path = root.join("timeline.json");
+        std::fs::write(&invalid_path, "{ invalid timeline").expect("invalid timeline should be written");
+
+        let loaded = load_project_documents_v5_blocking(root.display().to_string()).expect("project should recover");
+        assert!(loaded.migrated);
+        assert_eq!(
+            std::fs::read_to_string(&invalid_path).expect("invalid timeline should remain"),
+            "{ invalid timeline"
+        );
+        let timeline = loaded.timeline.expect("in-memory timeline should be returned");
+        assert_eq!(timeline["document_type"], "timeline");
+        assert!(loaded.migration_notes.iter().any(|note| note.contains("original file kept")));
+
+        cleanup_test_dir(&root);
+    }
+
+    fn write_project_doc(root: &Path, name: &str, value: Value) {
+        std::fs::write(
+            root.join(name),
+            serde_json::to_string_pretty(&value).expect("project JSON should serialize"),
+        )
+        .expect("project doc should be written");
     }
 
     #[test]

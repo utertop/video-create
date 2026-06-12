@@ -9,8 +9,15 @@ interface TimelineTrackProps {
   selectedClipId: string | null;
   activeSegmentId: string | null;
   selectedSectionId: string | null;
+  editable: boolean;
+  draggingClipId: string | null;
+  dragOverClipId: string | null;
   onSelectClip: (clip: V5TimelineClip) => void;
   onSelectSection: (sectionId: string | null) => void;
+  onDragStart: (clipId: string) => void;
+  onDragOver: (clipId: string) => void;
+  onDrop: (targetClipId: string) => void;
+  onDragEnd: () => void;
 }
 
 export function TimelineTrack({
@@ -21,8 +28,15 @@ export function TimelineTrack({
   selectedClipId,
   activeSegmentId,
   selectedSectionId,
+  editable,
+  draggingClipId,
+  dragOverClipId,
   onSelectClip,
   onSelectSection,
+  onDragStart,
+  onDragOver,
+  onDrop,
+  onDragEnd,
 }: TimelineTrackProps) {
   const railWidth = Math.max(720, Math.ceil(duration || 1) * pixelsPerSecond);
 
@@ -47,8 +61,14 @@ export function TimelineTrack({
               selected={selectedClipId === clip.clip_id}
               active={Boolean(activeSegmentId && segmentId === activeSegmentId)}
               linked={Boolean(selectedSectionId && sectionId === selectedSectionId)}
+              draggable={editable && track.kind === "video"}
+              dropTarget={Boolean(draggingClipId && dragOverClipId === clip.clip_id && draggingClipId !== clip.clip_id)}
               onSelect={onSelectClip}
               onSelectSection={onSelectSection}
+              onDragStart={onDragStart}
+              onDragOver={onDragOver}
+              onDrop={onDrop}
+              onDragEnd={onDragEnd}
             />
           );
         })}

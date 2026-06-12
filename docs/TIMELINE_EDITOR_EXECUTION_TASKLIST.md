@@ -779,6 +779,83 @@ npm run check
 tests/smoke_v5_timeline_edit_ops.py
 ```
 
+### 阶段 7 执行结果
+
+执行日期：2026-06-11
+
+已完成：
+
+- 新增 `src/features/timeline/timelineOps.ts`。
+- 已实现前端 timeline 编辑纯函数：
+  - `updateClipEnabled()`
+  - `updateClipContent()`
+  - `updateClipPresentation()`
+  - `updateClipDuration()`
+  - `moveClip()`
+  - `updateBgmCueVolume()`
+- `src/lib/engine.ts` 的 `V5TimelineMetadata` 已增加 dirty 相关字段：
+  - `dirty`
+  - `dirty_reason`
+  - `last_edit_operation`
+- `video_engine/timeline.py` 已新增 Python 侧同名编辑能力：
+  - `update_clip_enabled()`
+  - `update_clip_content()`
+  - `update_clip_presentation()`
+  - `update_clip_duration()`
+  - `move_clip()`
+  - `update_bgm_cue_volume()`
+- 所有编辑都会写入：
+  - `edit_state.user_overridden = true`
+  - `edit_state.auto_generated = false`
+  - `edit_state.override_fields`
+  - `edit_state.origin = "timeline_edit"`
+  - `edit_state.last_edited_at`
+  - `invalidation_hint`
+  - `metadata.dirty = true`
+- `TimelineInspector` 已接入基础编辑控件：
+  - clip enabled checkbox
+  - title text
+  - subtitle text
+  - title style preset
+  - duration number input
+  - BGM volume slider
+  - move up / move down
+- `TimelineClip` / `TimelineTrack` 已支持 video track 基础 drag/drop reorder。
+- `TimelineEditor` 已将编辑结果通过 `onTimelineChange()` 回传给 App。
+- `src/App.tsx` 已通过 `state.patch({ v5Timeline: timeline })` 持有编辑后的 timeline，现有 autosave/project state 会包含该状态。
+- 没有 `v5Timeline` 的 fallback timeline 仍保持只读，不允许编辑 render_plan fallback。
+- 当前仍未接入 `compile_from_timeline`，final render 主链路不变。
+- 已新增 `tests/smoke_v5_timeline_edit_ops.py`。
+- 已将 `tests/smoke_v5_timeline_edit_ops.py` 接入 `scripts/check.mjs` 的 core/full smoke suite。
+
+已验证编辑行为：
+
+- 禁用 clip 后写入 `enabled = false`，并输出 `timeline_compile` scope。
+- 修改标题文字后写入 `content_ref.title_text`，并输出 `clip_only` scope。
+- 修改标题样式后写入 `presentation.title_style`，并输出 `clip_only` scope。
+- 修改图片时长后，当前 clip 时长变化，后续同轨 clip 时间顺延。
+- 移动 clip 后，track `clip_ids` 顺序保存，并重新排布同轨 clip 时间。
+- BGM volume 写入 audio clip metadata，scope 为 `track_only`，不触发视觉轨重算。
+
+验证命令：
+
+```powershell
+python tests\smoke_v5_timeline_edit_ops.py
+python -m py_compile video_engine\timeline.py tests\smoke_v5_timeline_edit_ops.py
+npm run build:web
+npm run check
+```
+
+结果：全部通过。
+
+`npm run check` 当前核心套件已扩展为 14 步，其中新增：
+
+- `tests/smoke_v5_timeline_edit_ops.py`
+
+阶段 7 结论：
+
+> Timeline 基础编辑已落地；编辑意图可以写入 `v5Timeline`，并带有 dirty 标记、edit_state 和 recompute scope。当前仍未改变 render_plan 生成和 final render 行为，可以进入阶段 8：Timeline 编译为 Render Plan。
+
 ## 十一、阶段 8：Timeline 编译为 Render Plan
 
 ### 目标
@@ -825,6 +902,79 @@ tests/smoke_v5_timeline_edit_ops.py
 tests/smoke_v5_timeline_compile.py
 ```
 
+### 阶段 8 执行结果
+
+执行日期：2026-06-11
+
+已完成：
+
+- 新增 `video_engine/timeline_compile.py`。
+- 已实现 `compile_from_timeline()`。
+- 编译策略采用保守路径：以现有 `render_plan` 为基底，按 `timeline` 编辑结果覆盖顺序、启停、时长、标题和音频设置。
+- `disabled clip` 不进入新的 `render_plan.segments`。
+- clip reorder 会影响新的 `render_plan.segments` 顺序。
+- duration 修改会影响 segment duration，并重新计算连续 `start_time / end_time / total_duration`。
+- title text 修改会写回 title/chapter segment 的 `text`。
+- title style 修改会写回 `title_style` 或 `overlay_title_style`。
+- BGM volume 会写回 `render_settings.audio.bgm_volume`。
+- audio clip 会生成/更新 `render_settings.audio_blueprint.timeline_cues`。
+- 未编辑且可复用的 clip 会尽量保留原有 `cache_key`。
+- 已输出 metadata：
+  - `generated_from = "timeline"`
+  - `timeline_source_path`
+  - `source_render_plan_path`
+  - `timeline_compile_elapsed_ms`
+  - `recompute_summary`
+- `video_engine_v5.py` 已新增 CLI：
+
+```powershell
+python video_engine_v5.py timeline-compile --timeline <timeline.json> --base_render_plan <render_plan.json> --output <render_plan_from_timeline.json>
+```
+
+- `video_engine_worker.py` 已新增 worker task type：
+
+```json
+{
+  "type": "timeline-compile",
+  "timeline_path": "timeline.json",
+  "base_render_plan_path": "render_plan.json",
+  "output_path": "render_plan_from_timeline.json"
+}
+```
+
+- `video_engine_v5.py --help` 已展示 `timeline-compile`。
+- 已新增 `tests/smoke_v5_timeline_compile.py`。
+- 已将 `tests/smoke_v5_timeline_compile.py` 接入 `scripts/check.mjs` 的 core/full smoke suite。
+
+已验证编译行为：
+
+- timeline 编辑后可重新 compile 生成新的 render_plan。
+- disabled clip 不进入 render_plan。
+- 修改标题后，新 render_plan 中 title segment 文案变化。
+- 修改 duration 后，新 render_plan 总时长变化。
+- 拖拽排序后，新 render_plan 片段顺序变化。
+- BGM volume 编辑后，新 render_plan audio settings 变化。
+- 模块、CLI、worker 三条路径均可输出 render_plan。
+
+验证命令：
+
+```powershell
+python tests\smoke_v5_timeline_compile.py
+python -m py_compile video_engine\timeline_compile.py video_engine\timeline.py video_engine_v5.py video_engine_worker.py tests\smoke_v5_timeline_compile.py
+python video_engine_v5.py --help
+npm run check
+```
+
+结果：全部通过。
+
+`npm run check` 当前核心套件已扩展为 15 步，其中新增：
+
+- `tests/smoke_v5_timeline_compile.py`
+
+阶段 8 结论：
+
+> Timeline 已能编译回 Render Plan；基础编辑可以影响新的 render_plan 输出，并保留现有 render 主链路的稳定性。当前前端尚未把“重新编译”按钮切到 `timeline-compile` 自动流程，可以在后续阶段与 Build Report V2 / Recovery 闭环一起接入。
+
 ## 十二、阶段 9：Build Report V2 兼容扩展
 
 ### 目标
@@ -836,9 +986,12 @@ tests/smoke_v5_timeline_compile.py
 - `video_engine/render_diagnostics.py`
 - `video_engine/render_cache.py`
 - `video_engine/render_stable.py`
+- `video_engine_v5.py`
+- `src-tauri/src/lib.rs`
 - `src/lib/engine.ts`
-- `src/components/RenderQueuePanel.tsx`
-- `src/features/render/RenderExplainabilityPanel.tsx`
+- `src/lib/diagnostics.ts`
+- `src/App.tsx`
+- `src/styles.css`
 - `tests/smoke_v5_build_report_v2.py`
 
 ### 任务
@@ -882,6 +1035,60 @@ tests/smoke_v5_timeline_compile.py
 tests/smoke_v5_build_report_v2.py
 ```
 
+### 阶段 9 执行结果
+
+执行日期：2026-06-11
+
+已完成：
+
+- `video_engine/render_diagnostics.py` 新增 `_v56_build_report_v2_fields()`，在旧 `build_report.json` 基础上兼容生成 V2 摘要字段：
+  - `timeline_summary`
+  - `route_summary`
+  - `fallback_summary`
+  - `cache_summary`
+  - `recompute_summary`
+  - `performance_summary`
+  - `quality_summary`
+  - `recovery_summary`
+  - `migration_notes`
+  - `report_suggestions`
+- `video_engine/render_cache.py` 的 `_v56_write_build_report()` 已成为 V2 统一补齐入口；standard、stable、失败报告都会自动带上 `build_report_version = "v2"`。
+- `video_engine_v5.py` 与 `video_engine/render_stable.py` 的报告写入已透传 render_plan `metadata`，timeline compile 产生的 `generated_from / timeline_source_path / recompute_summary` 可以进入最终报告。
+- `src-tauri/src/lib.rs` 的 `BuildReportSummary` 已兼容透传 V2 JSON 摘要字段；老报告缺字段时返回空值，不破坏旧恢复摘要读取。
+- `src/lib/engine.ts` 已扩展 `RenderRecoverySummary` 类型，纳入 Build Report V2 摘要字段。
+- `src/lib/diagnostics.ts` 的诊断包 recovery summary 标准化已保留 Build Report V2 字段，导出的诊断包可携带 report summary。
+- `src/App.tsx` 已新增只读 `BuildReportV2Panel`，在结果卡片中展示：
+  - Timeline 来源
+  - render intent
+  - backend / fallback
+  - cache namespace
+  - recompute dirty 状态
+  - original/proxy 画质护栏
+  - segment/chunk fast path
+  - elapsed/output size
+  - report suggestions
+- `src/styles.css` 已新增 Build Report V2 面板样式，保持紧凑可扫读。
+- 新增 `tests/smoke_v5_build_report_v2.py`，验证 V2 字段自动补齐、旧字段保留、timeline/cache/recompute/quality/recovery/fallback 摘要可读。
+- `tests/smoke_v5_build_report_v2.py` 已接入 `scripts/check.mjs` 的 core/full smoke suite。
+
+验证命令：
+
+```powershell
+python tests\smoke_v5_build_report_v2.py
+python -m py_compile video_engine\render_cache.py video_engine\render_diagnostics.py video_engine_v5.py video_engine\render_stable.py tests\smoke_v5_build_report_v2.py
+npm run build:web
+cargo check --manifest-path .\src-tauri\Cargo.toml
+npm run check
+```
+
+结果：全部通过。
+
+`npm run check` 当前核心套件已扩展为 16 步，其中第 10 步执行 `tests/smoke_v5_build_report_v2.py`。
+
+阶段 9 结论：
+
+> Build Report V2 兼容扩展已落地；渲染结果现在可以解释 timeline、route、fallback、cache、recompute、quality、recovery，且老报告读取链路保持兼容。
+
 ## 十三、阶段 10：Recovery / Migration 闭环
 
 ### 目标
@@ -923,6 +1130,58 @@ tests/smoke_v5_build_report_v2.py
 tests/smoke_v5_project_recovery.py
 tests/smoke_v5_schema_migration.py
 ```
+
+### 阶段 10 执行结果
+
+执行日期：2026-06-11
+
+已完成：
+
+- `src-tauri/src/lib.rs` 的项目文档加载已改为 timeline resilient recovery：
+  - 老项目没有 `timeline.json` 时，会从 `render_plan.json` 自动生成 timeline 并写入项目目录。
+  - `timeline.json` 存在但解析/迁移失败时，不覆盖原文件；系统会从 `render_plan.json` 生成内存恢复 timeline，保证项目仍可打开。
+  - timeline 恢复/迁移原因会写入 `migrationNotes`，前端现有迁移卡片可直接展示。
+- `src-tauri/src/lib.rs` 的 timeline schema 迁移已增强：
+  - `timeline_version` 不一致时迁移到 `v1`。
+  - 自动补齐 `project_ref / source_ref / tracks / clip_index / dependency_graph / metadata / performance_policy`。
+  - 自动补齐 `invalidation_rules_version`。
+  - 自动补齐 preview/final performance policy，保持 final `uses_original_source = true`、`allow_proxy = false`。
+- `video_engine/timeline.py` 新增：
+  - `migrate_timeline_document()`
+  - `recover_timeline_document()`
+- `video_engine_v5.py` 的 `timeline-generate` 已具备恢复容错：
+  - existing timeline JSON 损坏时记录 log 并继续生成。
+  - 迁移成功的 existing timeline 会尽量保留旧 clip_id 身份。
+- session snapshot 已在前序阶段包含 `v5Timeline`；阶段 10 验证继续保留该闭环。
+- 新增 Rust 单元测试覆盖：
+  - 缺失 timeline 自动生成并写入。
+  - 损坏 timeline 原文件保留、内存恢复 timeline 返回。
+- 新增 Python smoke：
+  - `tests/smoke_v5_project_recovery.py`
+  - `tests/smoke_v5_schema_migration.py`
+- 两个新 smoke 已接入 `scripts/check.mjs` 的 core/full smoke suite。
+
+验证命令：
+
+```powershell
+python tests\smoke_v5_schema_migration.py
+python tests\smoke_v5_project_recovery.py
+python -m py_compile video_engine\timeline.py video_engine_v5.py tests\smoke_v5_project_recovery.py tests\smoke_v5_schema_migration.py
+cargo check --manifest-path .\src-tauri\Cargo.toml
+cargo test --manifest-path .\src-tauri\Cargo.toml project_recovery -- --nocapture
+npm run check
+```
+
+结果：全部通过。
+
+`npm run check` 当前核心套件已扩展为 18 步，其中：
+
+- 第 11 步执行 `tests/smoke_v5_project_recovery.py`
+- 第 12 步执行 `tests/smoke_v5_schema_migration.py`
+
+阶段 10 结论：
+
+> Recovery / Migration 闭环已落地；老项目缺 timeline 可自动生成，坏 timeline 不会阻塞项目打开，也不会被覆盖，迁移和恢复行为会通过 migration notes 告知用户。
 
 ## 十四、阶段闸门
 
@@ -972,7 +1231,7 @@ tests/smoke_v5_schema_migration.py
 
 - [ ] `timeline.json` 能生成。
 - [ ] `v5Timeline` 能进入前端状态。
-- [ ] timeline 能保存和恢复。
+- [x] timeline 能保存和恢复。
 - [ ] RENDER 阶段主时间线来自 `v5Timeline.tracks`。
 - [ ] clip_id 重复生成稳定。
 - [ ] preview cache 不污染 final cache。
@@ -982,10 +1241,10 @@ tests/smoke_v5_schema_migration.py
 - [ ] 禁用 clip 后 compile 不进入 render_plan。
 - [ ] 拖拽排序后 render_plan 顺序变化。
 - [ ] 修改图片时长后总时长变化。
-- [ ] build_report 能解释 route/fallback/cache/recompute/quality。
-- [ ] 老项目没有 timeline 时可自动迁移。
-- [ ] 迁移失败不破坏旧项目。
-- [ ] `npm run check` 通过。
+- [x] build_report 能解释 route/fallback/cache/recompute/quality。
+- [x] 老项目没有 timeline 时可自动迁移。
+- [x] 迁移失败不破坏旧项目。
+- [x] `npm run check` 通过。
 
 ## 十七、一句话执行纲领
 
