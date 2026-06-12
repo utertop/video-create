@@ -200,6 +200,12 @@ export function App() {
   const [isRendering, setIsRendering] = useState(false);
   const [isPreviewRendering, setIsPreviewRendering] = useState(false);
   const [isApplyingTimeline, setIsApplyingTimeline] = useState(false);
+  const [timelineApplyIntent, setTimelineApplyIntent] = useState<"manual" | "preview" | "final" | null>(null);
+  const [timelineAutosave, setTimelineAutosave] = useState<{
+    status: "idle" | "saving" | "saved" | "error";
+    savedAt?: string | null;
+    message?: string | null;
+  }>({ status: "idle" });
   const [renderPreviewPath, setRenderPreviewPath] = useState<string | null>(null);
   const [isCancelling, setIsCancelling] = useState(false);
   const [isPlanningWorkflow, setIsPlanningWorkflow] = useState(false);
@@ -712,7 +718,7 @@ export function App() {
         v5Library: recoveredStudio?.v5Library || loaded.library,
         v5Blueprint: recoveredStudio?.v5Blueprint || loaded.blueprint,
         v5RenderPlan: recoveredStudio?.v5RenderPlan || loaded.renderPlan,
-        v5Timeline: recoveredStudio?.v5Timeline || loaded.timeline,
+        v5Timeline: chooseRecoveredTimeline(recoveredStudio?.v5Timeline, loaded.timeline),
       });
       if (recovered) {
         applyRecoveredWorkspaceRuntimeState(recovered);
@@ -1323,6 +1329,42 @@ export function App() {
     return () => window.clearTimeout(timeoutId);
   }, [sessionRecoveryData, state.outputFolder, v5ProjectDir]);
 
+  useEffect(() => {
+    if (!state.v5Timeline || !v5TimelinePath) {
+      setTimelineAutosave({ status: "idle" });
+      return;
+    }
+    if (!state.v5Timeline.metadata?.dirty) {
+      setTimelineAutosave((current) => (current.status === "idle" ? current : { status: "idle" }));
+      return;
+    }
+    if (isApplyingTimeline) return;
+
+    setTimelineAutosave((current) => (
+      current.status === "saving" ? current : { status: "saving", savedAt: current.savedAt || null }
+    ));
+    const timeoutId = window.setTimeout(() => {
+      const timelineToSave = state.v5Timeline;
+      void saveTimelineV5(v5TimelinePath, JSON.stringify(timelineToSave, null, 2))
+        .then(() => {
+          setTimelineAutosave({
+            status: "saved",
+            savedAt: new Date().toISOString(),
+            message: "Timeline draft autosaved",
+          });
+        })
+        .catch((error) => {
+          console.error("Failed to autosave dirty timeline:", error);
+          setTimelineAutosave({
+            status: "error",
+            message: friendlyErrorMessage(error),
+          });
+        });
+    }, 800);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [state.v5Timeline, v5TimelinePath, isApplyingTimeline]);
+
   async function ensureBackgroundLibrary(target: BackgroundPickerTarget) {
     if (!state.inputFolder) {
       setToast("请先选择素材目录，然后再选择片头/片尾背景图。");
@@ -1496,7 +1538,7 @@ export function App() {
       return;
     }
 
-    const timelineApplied = await ensureTimelineAppliedBeforeRender();
+    const timelineApplied = await ensureTimelineAppliedBeforeRender("final");
     if (!timelineApplied) return;
 
     const preflightOk = await runRenderPreflight();
@@ -1737,7 +1779,7 @@ export function App() {
       setToast("请先完成智能编排并生成 render_plan.json。");
       return;
     }
-    const timelineApplied = await ensureTimelineAppliedBeforeRender();
+    const timelineApplied = await ensureTimelineAppliedBeforeRender("preview");
     if (!timelineApplied) return;
     setIsPreviewRendering(true);
     setToast(null);
@@ -1884,14 +1926,36 @@ export function App() {
     }
   }
 
-  async function onApplyTimelineToRenderPlan(): Promise<boolean> {
+  function timelineApplyCopy(intent: "manual" | "preview" | "final") {
+    if (intent === "preview") {
+      return {
+        phase: "正在应用 Timeline 编辑，用于生成预览...",
+      };
+    }
+    if (intent === "final") {
+      return {
+        phase: "正在应用 Timeline 编辑，用于最终导出...",
+      };
+    }
+    return {
+      phase: "正在应用 Timeline 编辑...",
+    };
+  }
+
+  async function onApplyTimelineToRenderPlan(intent: "manual" | "preview" | "final" = "manual"): Promise<boolean> {
     if (!state.v5Timeline || !state.v5RenderPlan || !v5TimelinePath || !v5PlanPath) {
       setToast("当前没有可应用的 Timeline。请先生成可编辑 Timeline。");
       return false;
     }
+    if (isApplyingTimeline) {
+      setToast("Timeline 正在应用中，请等待当前编译完成。");
+      return false;
+    }
+    const copy = timelineApplyCopy(intent);
     setIsApplyingTimeline(true);
+    setTimelineApplyIntent(intent);
     setToast(null);
-    setPhase("正在应用 Timeline 编辑...");
+    setPhase(copy.phase);
     setProgress(70);
     try {
       await saveTimelineV5(v5TimelinePath, JSON.stringify(state.v5Timeline, null, 2));
@@ -1918,13 +1982,17 @@ export function App() {
       return false;
     } finally {
       setIsApplyingTimeline(false);
+      setTimelineApplyIntent(null);
     }
   }
 
-  async function ensureTimelineAppliedBeforeRender(): Promise<boolean> {
+  async function ensureTimelineAppliedBeforeRender(intent: "preview" | "final"): Promise<boolean> {
     if (!state.v5Timeline?.metadata?.dirty) return true;
-    if (isApplyingTimeline) return false;
-    return await onApplyTimelineToRenderPlan();
+    if (isApplyingTimeline) {
+      setToast("Timeline 正在应用中，请稍后再开始预览或导出。");
+      return false;
+    }
+    return await onApplyTimelineToRenderPlan(intent);
   }
 
   async function onCancel() {
@@ -2477,7 +2545,7 @@ export function App() {
 
                   {(
                     <div className="v5-render-trigger">
-                       <button className="secondary-action" disabled={!state.v5RenderPlan || isPreviewRendering} onClick={onPreviewRenderSample}>
+                       <button className="secondary-action" disabled={!state.v5RenderPlan || isPreviewRendering || isApplyingTimeline} onClick={onPreviewRenderSample}>
                           <Play size={18} /> {isPreviewRendering ? "正在生成低清预览..." : "生成低清小样"}
                        </button>
                        {renderPreviewPath && (
@@ -2489,7 +2557,7 @@ export function App() {
                            <video src={convertFileSrc(renderPreviewPath)} controls />
                          </div>
                        )}
-                       <button className="primary-action pulse-guidance" disabled={!state.outputFolder} onClick={() => onGenerate(false)}>
+                       <button className="primary-action pulse-guidance" disabled={!state.outputFolder || !state.v5RenderPlan || isApplyingTimeline} onClick={() => onGenerate(false)}>
                           {isRendering ? <Clock size={24} /> : <PlayCircle size={24} />} {isRendering ? "Add to render queue" : "Start final render"}
                        </button>
                        <p className="hint-text">点击上方按钮，启动 V5 渲染引擎合并素材并导出视频。</p>
@@ -2507,11 +2575,31 @@ export function App() {
                        {state.v5Timeline ? (
                          <div className="timeline-action-bar">
                            <span>{state.v5Timeline.metadata?.dirty ? "Timeline 有未应用编辑" : "Timeline 已同步到当前渲染计划"}</span>
+                           <span className={`timeline-apply-status${isApplyingTimeline ? " applying" : state.v5Timeline.metadata?.dirty ? " dirty" : ""}`}>
+                             {isApplyingTimeline
+                               ? timelineApplyIntent === "preview"
+                                 ? "正在为预览应用编辑"
+                                 : timelineApplyIntent === "final"
+                                   ? "正在为最终导出应用编辑"
+                                   : "正在应用编辑"
+                               : state.v5Timeline.metadata?.dirty
+                                 ? "预览/导出前会自动应用"
+                                 : "预览和导出已使用最新方案"}
+                           </span>
+                           {timelineAutosave.status !== "idle" ? (
+                             <span className={`timeline-autosave-status ${timelineAutosave.status}`}>
+                               {timelineAutosave.status === "saving"
+                                 ? "草稿保存中"
+                                 : timelineAutosave.status === "saved"
+                                   ? `草稿已保存${timelineAutosave.savedAt ? ` ${new Date(timelineAutosave.savedAt).toLocaleTimeString()}` : ""}`
+                                   : `草稿保存失败${timelineAutosave.message ? `：${timelineAutosave.message}` : ""}`}
+                             </span>
+                           ) : null}
                            <button
                              className={`timeline-apply-btn${state.v5Timeline.metadata?.dirty ? " dirty" : ""}`}
                              type="button"
                              disabled={isApplyingTimeline || isRendering}
-                             onClick={onApplyTimelineToRenderPlan}
+                             onClick={() => onApplyTimelineToRenderPlan("manual")}
                            >
                              {isApplyingTimeline ? <Loader2 className="spin" size={14} /> : <ListChecks size={14} />}
                              {state.v5Timeline.metadata?.dirty ? "应用 Timeline 编辑" : "同步 Timeline"}
@@ -2524,6 +2612,7 @@ export function App() {
                            renderPlan={state.v5RenderPlan}
                            activeSegmentIndex={activeSegmentIndex}
                            isRendering={isRendering}
+                           isApplyingTimeline={isApplyingTimeline}
                            selectedSectionId={selectedAudioSectionId}
                            onSelectSection={(sectionId) => {
                              setSelectedAudioSectionId((current) => (current === sectionId ? null : sectionId));
@@ -2731,6 +2820,21 @@ function friendlyDiagnosticsMessage(diagnostics: StartupDiagnostics): string {
     .map((check) => `${check.label}${check.code ? ` [${check.code}]` : ""}: ${check.message}`)
     .join("\n");
   return `${diagnostics.summary}\n${details}`;
+}
+
+function chooseRecoveredTimeline(
+  draftTimeline: V5Timeline | null | undefined,
+  diskTimeline: V5Timeline | null | undefined,
+): V5Timeline | null {
+  if (!draftTimeline) return diskTimeline || null;
+  if (!diskTimeline) return draftTimeline;
+
+  const draftUpdatedAt = Date.parse(String(draftTimeline.metadata?.updated_at || ""));
+  const diskUpdatedAt = Date.parse(String(diskTimeline.metadata?.updated_at || ""));
+  if (Number.isFinite(diskUpdatedAt) && (!Number.isFinite(draftUpdatedAt) || diskUpdatedAt > draftUpdatedAt)) {
+    return diskTimeline;
+  }
+  return draftTimeline;
 }
 
 function friendlyErrorMessage(error: unknown): string {

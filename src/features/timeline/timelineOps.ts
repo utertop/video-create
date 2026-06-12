@@ -62,9 +62,12 @@ export function updateClipPresentation(
 export function updateClipDuration(timeline: V5Timeline, clipId: string, duration: number): V5Timeline {
   const location = findClipLocation(timeline, clipId);
   if (!location) return timeline;
-  const nextDuration = Math.max(0.1, roundTime(duration));
   const currentClip = timeline.clip_index[clipId];
-  const delta = nextDuration - currentClip.timeline_duration;
+  if (!currentClip) return timeline;
+  const currentDuration = Number(currentClip.timeline_duration || 0);
+  const nextDuration = Number.isFinite(duration) ? Math.max(0.1, roundTime(duration)) : currentDuration;
+  if (!Number.isFinite(nextDuration)) return timeline;
+  const delta = nextDuration - currentDuration;
   const affectedIds = location.track.clip_ids.slice(location.index);
   const now = new Date().toISOString();
   const clipIndex = { ...timeline.clip_index };
@@ -73,12 +76,13 @@ export function updateClipDuration(timeline: V5Timeline, clipId: string, duratio
     const clip = clipIndex[id];
     if (!clip) continue;
     if (id === clipId) {
+      const sourceIn = Number(clip.source_in);
       clipIndex[id] = withEditMetadata(
         {
           ...clip,
           timeline_duration: nextDuration,
           timeline_end: roundTime(clip.timeline_start + nextDuration),
-          source_out: clip.source_in != null ? roundTime(Number(clip.source_in) + nextDuration) : clip.source_out,
+          source_out: Number.isFinite(sourceIn) ? roundTime(sourceIn + nextDuration) : clip.source_out,
         },
         ["timeline_duration", "timeline_end", "source_out"],
         now,

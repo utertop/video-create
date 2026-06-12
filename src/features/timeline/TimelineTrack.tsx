@@ -62,6 +62,7 @@ export function TimelineTrack({
               active={Boolean(activeSegmentId && segmentId === activeSegmentId)}
               linked={Boolean(selectedSectionId && sectionId === selectedSectionId)}
               draggable={editable && track.kind === "video"}
+              dragging={draggingClipId === clip.clip_id}
               dropTarget={Boolean(draggingClipId && dragOverClipId === clip.clip_id && draggingClipId !== clip.clip_id)}
               onSelect={onSelectClip}
               onSelectSection={onSelectSection}
