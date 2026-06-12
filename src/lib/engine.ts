@@ -1092,6 +1092,41 @@ export async function compileV5(blueprintPath: string, libraryPath: string, outp
   return parseV5Json<V5RenderPlan>(jsonStr, "render_plan");
 }
 
+export async function saveTimelineV5(path: string, content: string): Promise<void> {
+  await invoke("save_timeline_v5", { path, content });
+}
+
+export async function timelineGenerateV5({
+  renderPlanPath,
+  outputPath,
+  blueprintPath,
+  libraryPath,
+  existingTimelinePath,
+  projectDir,
+}: {
+  renderPlanPath: string;
+  outputPath: string;
+  blueprintPath?: string | null;
+  libraryPath?: string | null;
+  existingTimelinePath?: string | null;
+  projectDir?: string | null;
+}): Promise<V5Timeline> {
+  const jsonStr = await invoke<string>("timeline_generate_v5", {
+    renderPlanPath,
+    outputPath,
+    blueprintPath: blueprintPath || null,
+    libraryPath: libraryPath || null,
+    existingTimelinePath: existingTimelinePath || null,
+    projectDir: projectDir || null,
+  });
+  return parseV5Json<V5Timeline>(jsonStr, "timeline");
+}
+
+export async function timelineCompileV5(timelinePath: string, baseRenderPlanPath: string, outputPath: string): Promise<V5RenderPlan> {
+  const jsonStr = await invoke<string>("timeline_compile_v5", { timelinePath, baseRenderPlanPath, outputPath });
+  return parseV5Json<V5RenderPlan>(jsonStr, "render_plan");
+}
+
 /** Execute final V5 render. */
 export async function renderV5(planPath: string, outputPath: string, params: RenderV5Params, jobId?: string): Promise<void> {
   await invoke("render_v5", {

@@ -980,6 +980,20 @@ async fn save_blueprint_v5(path: String, content: String) -> Result<(), String> 
 }
 
 #[tauri::command]
+async fn save_timeline_v5(path: String, content: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let target = PathBuf::from(path);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| coded_error("E_TIMELINE_DIR_CREATE_FAILED", format!("无法创建 timeline 目录: {}", e)))?;
+        }
+        std::fs::write(&target, content).map_err(|e| coded_error("E_TIMELINE_SAVE_FAILED", format!("无法保存 timeline: {}", e)))
+    })
+    .await
+    .map_err(|e| coded_error("E_TIMELINE_SAVE_INTERNAL", format!("保存 timeline 后台任务异常: {}", e)))?
+}
+
+#[tauri::command]
 async fn compile_v5(
     app: AppHandle,
     manager: State<'_, JobManager>,
@@ -1015,6 +1029,72 @@ async fn compile_v5(
     })
     .await
     .map_err(|e| coded_error("E_COMPILE_INTERNAL", format!("V5 compile 后台任务异常: {}", e)))?
+}
+
+#[tauri::command]
+async fn timeline_generate_v5(
+    app: AppHandle,
+    manager: State<'_, JobManager>,
+    render_plan_path: String,
+    output_path: String,
+    blueprint_path: Option<String>,
+    library_path: Option<String>,
+    existing_timeline_path: Option<String>,
+    project_dir: Option<String>,
+) -> Result<String, String> {
+    let manager = manager.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let output_path_buf = PathBuf::from(&output_path);
+        run_v5_worker_json_task(
+            &app,
+            &manager,
+            "v5-timeline-generate",
+            json!({
+                "type": "timeline-generate",
+                "id": "v5-timeline-generate",
+                "render_plan_path": render_plan_path,
+                "output_path": output_path,
+                "blueprint_path": blueprint_path,
+                "library_path": library_path,
+                "existing_timeline_path": existing_timeline_path,
+                "project_dir": project_dir,
+            }),
+            &output_path_buf,
+            "生成 timeline 失败",
+        )
+    })
+    .await
+    .map_err(|e| coded_error("E_TIMELINE_GENERATE_INTERNAL", format!("V5 timeline generate 后台任务异常: {}", e)))?
+}
+
+#[tauri::command]
+async fn timeline_compile_v5(
+    app: AppHandle,
+    manager: State<'_, JobManager>,
+    timeline_path: String,
+    base_render_plan_path: String,
+    output_path: String,
+) -> Result<String, String> {
+    let manager = manager.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let output_path_buf = PathBuf::from(&output_path);
+        run_v5_worker_json_task(
+            &app,
+            &manager,
+            "v5-timeline-compile",
+            json!({
+                "type": "timeline-compile",
+                "id": "v5-timeline-compile",
+                "timeline_path": timeline_path,
+                "base_render_plan_path": base_render_plan_path,
+                "output_path": output_path,
+            }),
+            &output_path_buf,
+            "Timeline 编译 render_plan 失败",
+        )
+    })
+    .await
+    .map_err(|e| coded_error("E_TIMELINE_COMPILE_INTERNAL", format!("V5 timeline compile 后台任务异常: {}", e)))?
 }
 
 #[tauri::command]
@@ -4392,7 +4472,10 @@ pub fn run() {
             scan_v5,
             plan_v5,
             save_blueprint_v5,
+            save_timeline_v5,
             compile_v5,
+            timeline_generate_v5,
+            timeline_compile_v5,
             preview_title_v5,
             preview_render_v5,
             render_v5

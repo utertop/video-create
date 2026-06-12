@@ -170,6 +170,20 @@ select {
   gap: 8px;
 }
 
+.sidebar-secondary-nav {
+  display: grid;
+  gap: 8px;
+  margin-top: auto;
+  padding-top: 18px;
+  border-top: 1px solid rgb(255 255 255 / 12%);
+}
+
+.sidebar-secondary-nav .nav-item {
+  min-height: 38px;
+  color: #c8d6cf;
+  font-size: 13px;
+}
+
 .nav-item {
   display: flex;
   align-items: center;
@@ -1683,6 +1697,20 @@ select:focus {
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
+}
+
+.support-page-header {
+  align-items: flex-start;
+  padding-bottom: 18px;
+  border-bottom: 1px solid rgb(39 67 56 / 12%);
+}
+
+.page-subtitle {
+  max-width: 720px;
+  margin: 8px 0 0;
+  color: #5c6d63;
+  font-size: 14px;
+  line-height: 1.6;
 }
 
 .startup-health-badge-group {
@@ -4011,6 +4039,47 @@ select:focus {
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.05em;
+}
+
+.timeline-action-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  color: #c8f6df;
+  font-size: 12px;
+  font-weight: 700;
+  background: rgb(74 222 128 / 8%);
+  border: 1px solid rgb(74 222 128 / 16%);
+  border-radius: 8px;
+}
+
+.timeline-apply-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 0 10px;
+  color: #c8f6df;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+  background: rgb(255 255 255 / 6%);
+  border: 1px solid rgb(200 246 223 / 22%);
+  border-radius: 999px;
+}
+
+.timeline-apply-btn.dirty {
+  color: #082a1a;
+  background: #86efac;
+  border-color: #86efac;
+}
+
+.timeline-apply-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
 }
 
 .segments-timeline {

@@ -64,6 +64,9 @@ import {
   planV5,
   saveBlueprintV5,
   compileV5,
+  saveTimelineV5,
+  timelineCompileV5,
+  timelineGenerateV5,
   renderV5,
   previewRenderV5,
   V5StoryBlueprint,
@@ -196,6 +199,7 @@ export function App() {
   const [result, setResult] = useState<GenerateVideoResult | null>(null);
   const [isRendering, setIsRendering] = useState(false);
   const [isPreviewRendering, setIsPreviewRendering] = useState(false);
+  const [isApplyingTimeline, setIsApplyingTimeline] = useState(false);
   const [renderPreviewPath, setRenderPreviewPath] = useState<string | null>(null);
   const [isCancelling, setIsCancelling] = useState(false);
   const [isPlanningWorkflow, setIsPlanningWorkflow] = useState(false);
@@ -246,6 +250,7 @@ export function App() {
   const sessionFirstExportRecordedRef = useRef(false);
   const startupTelemetryRecordedRef = useRef(false);
   const skipResetRef = useRef(false);
+  const [appView, setAppView] = useState<"studio" | "diagnostics" | "settingsCenter">("studio");
   const [activeNav, setActiveNav] = useState("workspace");
 
   const [hasPreChecked, setHasPreChecked] = useState(false);
@@ -441,8 +446,11 @@ export function App() {
   }, [telemetrySummary]);
 
   function scrollToSection(id: string) {
+    setAppView("studio");
     setActiveNav(id);
-    document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    window.requestAnimationFrame(() => {
+      document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
   }
 
   function captureTelemetryEventContext(renderResult: GenerateVideoResult, recovery?: RenderRecoverySummary | null) {
@@ -1168,6 +1176,7 @@ export function App() {
   }, [state.outputFolder, state.inputFolder]);
 
   const v5PlanPath = useMemo(() => v5ProjectDir ? `${v5ProjectDir}\\render_plan.json` : "", [v5ProjectDir]);
+  const v5TimelinePath = useMemo(() => v5ProjectDir ? `${v5ProjectDir}\\timeline.json` : "", [v5ProjectDir]);
 
   const v5FinalOutputName = useMemo(() => {
     const outputName = state.outputName || "travel_video";
@@ -1487,6 +1496,9 @@ export function App() {
       return;
     }
 
+    const timelineApplied = await ensureTimelineAppliedBeforeRender();
+    if (!timelineApplied) return;
+
     const preflightOk = await runRenderPreflight();
     if (!preflightOk) return;
 
@@ -1725,6 +1737,8 @@ export function App() {
       setToast("请先完成智能编排并生成 render_plan.json。");
       return;
     }
+    const timelineApplied = await ensureTimelineAppliedBeforeRender();
+    if (!timelineApplied) return;
     setIsPreviewRendering(true);
     setToast(null);
     try {
@@ -1842,9 +1856,25 @@ export function App() {
       setPhase("正在编译渲染计划...");
       setProgress(60);
       const plan = await compileV5(bpPath, libPath, `${v5ProjectDir}\\render_plan.json`);
+      setPhase("正在生成可编辑 Timeline...");
+      setProgress(82);
+      let timeline: V5Timeline | null = null;
+      try {
+        timeline = await timelineGenerateV5({
+          renderPlanPath: v5PlanPath || `${v5ProjectDir}\\render_plan.json`,
+          outputPath: v5TimelinePath || `${v5ProjectDir}\\timeline.json`,
+          blueprintPath: bpPath,
+          libraryPath: libPath,
+          existingTimelinePath: v5TimelinePath || null,
+          projectDir: v5ProjectDir || null,
+        });
+      } catch (error) {
+        console.warn("Timeline generation failed; render plan fallback remains available:", error);
+        setToast(`渲染计划已生成，但 Timeline 自动生成失败，将先使用 fallback 展示：${friendlyErrorMessage(error)}`);
+      }
       
       // 3. 进入渲染阶段
-      state.patch({ v5Blueprint: blueprintForCompile, v5RenderPlan: plan, v5Timeline: null, v5Stage: "RENDER" });
+      state.patch({ v5Blueprint: blueprintForCompile, v5RenderPlan: plan, v5Timeline: timeline, v5Stage: "RENDER" });
       rememberCurrentProject();
       setPhase("渲染计划就绪");
       setProgress(100);
@@ -1852,6 +1882,49 @@ export function App() {
       console.error("Confirm Blueprint Error:", error);
       setToast(`确认失败：${friendlyErrorMessage(error)}`);
     }
+  }
+
+  async function onApplyTimelineToRenderPlan(): Promise<boolean> {
+    if (!state.v5Timeline || !state.v5RenderPlan || !v5TimelinePath || !v5PlanPath) {
+      setToast("当前没有可应用的 Timeline。请先生成可编辑 Timeline。");
+      return false;
+    }
+    setIsApplyingTimeline(true);
+    setToast(null);
+    setPhase("正在应用 Timeline 编辑...");
+    setProgress(70);
+    try {
+      await saveTimelineV5(v5TimelinePath, JSON.stringify(state.v5Timeline, null, 2));
+      const nextPlan = await timelineCompileV5(v5TimelinePath, v5PlanPath, v5PlanPath);
+      const nextTimeline: V5Timeline = {
+        ...state.v5Timeline,
+        metadata: {
+          ...(state.v5Timeline.metadata || {}),
+          dirty: false,
+          dirty_reason: null,
+          last_edit_operation: "timeline_compile",
+        },
+      };
+      await saveTimelineV5(v5TimelinePath, JSON.stringify(nextTimeline, null, 2));
+      state.patch({ v5Timeline: nextTimeline, v5RenderPlan: nextPlan, v5Stage: "RENDER" });
+      rememberCurrentProject();
+      setPhase("Timeline 已应用到渲染计划");
+      setProgress(100);
+      setToast("Timeline 编辑已应用，预览和导出会使用新的 render_plan.json。");
+      return true;
+    } catch (error) {
+      console.error("Apply Timeline Error:", error);
+      setToast(`Timeline 应用失败：${friendlyErrorMessage(error)}`);
+      return false;
+    } finally {
+      setIsApplyingTimeline(false);
+    }
+  }
+
+  async function ensureTimelineAppliedBeforeRender(): Promise<boolean> {
+    if (!state.v5Timeline?.metadata?.dirty) return true;
+    if (isApplyingTimeline) return false;
+    return await onApplyTimelineToRenderPlan();
   }
 
   async function onCancel() {
@@ -1949,7 +2022,7 @@ export function App() {
           </div>
         </div>
 
-        <nav className="nav-list" aria-label="主导航">
+        <nav className="nav-list" aria-label="主工作台流程">
           <button className={`nav-item${activeNav === "workspace" ? " active" : ""}`} onClick={() => scrollToSection("workspace")}>
             <ImagePlus size={18} />
             素材
@@ -1967,26 +2040,92 @@ export function App() {
             AI 蓝图
           </button>
         </nav>
+        <div className="sidebar-secondary-nav" aria-label="辅助页面">
+          <button className={`nav-item${appView === "studio" ? " active" : ""}`} onClick={() => setAppView("studio")}>
+            <LayoutGrid size={18} />
+            主工作台
+          </button>
+          <button className={`nav-item${appView === "diagnostics" ? " active" : ""}`} onClick={() => setAppView("diagnostics")}>
+            <ListChecks size={18} />
+            诊断中心
+          </button>
+          <button className={`nav-item${appView === "settingsCenter" ? " active" : ""}`} onClick={() => setAppView("settingsCenter")}>
+            <Settings2 size={18} />
+            设置中心
+          </button>
+        </div>
       </aside>
 
       <section className="workspace" id="workspace">
         {toast && <Toast title={state.v5Stage === "BLUEPRINT" ? "蓝图生成成功" : "提示"} message={toast} onClose={() => setToast(null)} />}
         <div className="workspace-inner">
-        <StartupHealthCard diagnostics={startupDiagnostics} loading={startupDiagnosticsLoading} />
-        <TelemetrySummaryCard
-          enabled={state.telemetryEnabled}
-          summary={telemetrySummary}
-          isClearing={isClearingTelemetry}
-          onClear={onClearTelemetryHistory}
-          remoteEndpoint={remoteTelemetryEndpoint}
-          remoteUploadEnabled={remoteUploadEnabledDraft}
-          isSavingSettings={isSavingTelemetrySettings}
-          isFlushingRemote={isFlushingRemoteTelemetry}
-          onRemoteEndpointChange={setRemoteTelemetryEndpoint}
-          onRemoteUploadEnabledChange={setRemoteUploadEnabledDraft}
-          onSaveRemoteSettings={onSaveRemoteTelemetrySettings}
-          onFlushRemoteQueue={onFlushRemoteTelemetryQueue}
-        />
+        {appView === "diagnostics" ? (
+          <>
+            <header className="topbar support-page-header">
+              <div>
+                <p className="eyebrow">SUPPORT & DIAGNOSTICS</p>
+                <h1>诊断中心</h1>
+                <p className="page-subtitle">排障、支持和研发验证集中在这里，不进入用户制作视频的主流程。</p>
+              </div>
+              <div className="topbar-actions">
+                <button className="secondary-action" disabled={isExportingDiagnostics} onClick={onExportDiagnostics}>
+                  {isExportingDiagnostics ? <Loader2 className="spin" size={18} /> : <ListChecks size={18} />}
+                  {isExportingDiagnostics ? "正在导出诊断包" : "导出诊断包"}
+                </button>
+              </div>
+            </header>
+            <StartupHealthCard diagnostics={startupDiagnostics} loading={startupDiagnosticsLoading} />
+            {(preflightLoading || preflightDiagnostics) && (
+              <DiagnosticsCard
+                title="渲染前预检"
+                kicker="RENDER PREFLIGHT"
+                diagnostics={preflightDiagnostics}
+                loading={preflightLoading}
+                loadingText="正在检查素材、输出目录和渲染计划..."
+              />
+            )}
+            {projectMigrationNotes.length > 0 && projectMigrationSource && (
+              <ProjectMigrationCard notes={projectMigrationNotes} source={projectMigrationSource} />
+            )}
+          </>
+        ) : appView === "settingsCenter" ? (
+          <>
+            <header className="topbar support-page-header">
+              <div>
+                <p className="eyebrow">PREFERENCES & ACCOUNT</p>
+                <h1>设置中心</h1>
+                <p className="page-subtitle">偏好、授权、远程上报和后续账号能力集中在这里。</p>
+              </div>
+            </header>
+            <TelemetrySummaryCard
+              enabled={state.telemetryEnabled}
+              summary={telemetrySummary}
+              isClearing={isClearingTelemetry}
+              onClear={onClearTelemetryHistory}
+              remoteEndpoint={remoteTelemetryEndpoint}
+              remoteUploadEnabled={remoteUploadEnabledDraft}
+              isSavingSettings={isSavingTelemetrySettings}
+              isFlushingRemote={isFlushingRemoteTelemetry}
+              onRemoteEndpointChange={setRemoteTelemetryEndpoint}
+              onRemoteUploadEnabledChange={setRemoteUploadEnabledDraft}
+              onSaveRemoteSettings={onSaveRemoteTelemetrySettings}
+              onFlushRemoteQueue={onFlushRemoteTelemetryQueue}
+            />
+            <section className="startup-health-card">
+              <div className="startup-health-head">
+                <div>
+                  <span className="startup-health-kicker">ACCOUNT</span>
+                  <strong>邮箱授权登录</strong>
+                </div>
+                <span className="startup-health-badge pending">Planned</span>
+              </div>
+              <p className="telemetry-summary-note">
+                后续可用于绑定授权、同步诊断包和支持工单；当前版本先保留本地设置与手动诊断包导出。
+              </p>
+            </section>
+          </>
+        ) : (
+          <>
         {projectMigrationNotes.length > 0 && projectMigrationSource && (
           <ProjectMigrationCard notes={projectMigrationNotes} source={projectMigrationSource} />
         )}
@@ -2365,6 +2504,20 @@ export function App() {
                           {selectedAudioSectionId ? <span>章节聚焦: {selectedAudioSectionId}</span> : null}
                           {isRendering && progress !== null && <span className="current-progress-text">进度: {progress}%</span>}
                        </div>
+                       {state.v5Timeline ? (
+                         <div className="timeline-action-bar">
+                           <span>{state.v5Timeline.metadata?.dirty ? "Timeline 有未应用编辑" : "Timeline 已同步到当前渲染计划"}</span>
+                           <button
+                             className={`timeline-apply-btn${state.v5Timeline.metadata?.dirty ? " dirty" : ""}`}
+                             type="button"
+                             disabled={isApplyingTimeline || isRendering}
+                             onClick={onApplyTimelineToRenderPlan}
+                           >
+                             {isApplyingTimeline ? <Loader2 className="spin" size={14} /> : <ListChecks size={14} />}
+                             {state.v5Timeline.metadata?.dirty ? "应用 Timeline 编辑" : "同步 Timeline"}
+                           </button>
+                         </div>
+                       ) : null}
                        <div ref={segmentsTimelineRef}>
                          <TimelineEditor
                            timeline={state.v5Timeline}
@@ -2441,6 +2594,8 @@ export function App() {
             </div>
           </section>
         </div>
+          </>
+        )}
         </div>
       </section>
     </main>
