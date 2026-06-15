@@ -896,8 +896,10 @@ def test_stable_render_output_validate_failure_report_is_written() -> None:
 
     report = engine.read_json(str(root / ".video_create_project" / "build_report.json"))
     assert report["failed_stage"] == "output_validate"
-    assert report["failure"]["code"] == "output_validation_failed"
+    assert report["failure"]["code"] == "output_validate_failed"
     assert report["recovery"]["resumable"] is True
+    assert report["recovery_summary"]["failure_code"] == "output_validate_failed"
+    assert report["recovery_summary"]["retryable"] is True
 
 
 if __name__ == "__main__":
@@ -908,8 +910,15 @@ if __name__ == "__main__":
     test_backend_execution_result_defaults_to_selected_backend()
     test_render_diagnostics_expose_route_observability()
     test_render_backend_selector_keeps_preview_on_legacy_backend()
+    test_standard_visual_chunk_groups_prefer_ffmpeg_for_safe_image_units()
+    test_standard_visual_chunk_groups_prefer_ffmpeg_for_safe_image_overlay_units()
+    test_standard_visual_chunk_groups_prefer_ffmpeg_for_static_card_units()
+    test_standard_visual_chunk_groups_prefer_ffmpeg_for_safe_video_fit_units()
     test_stable_chunk_cache_key_tracks_source_file_changes()
     test_proxy_media_cache_is_opt_in_and_reportable()
     test_proxy_media_manifest_is_preferred_for_preview()
     test_stable_render_failure_report_preserves_resume_metadata()
+    test_stable_render_concat_failure_report_is_written()
+    test_stable_render_audio_mix_failure_report_is_written()
+    test_stable_render_output_validate_failure_report_is_written()
     print("V5 render scheduler smoke test passed")
