@@ -1,54 +1,23 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
-import shutil
-import subprocess
 import sys
 from pathlib import Path
-
-from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import video_engine_v5 as engine
-
-
-def make_image(path: Path, color: tuple[int, int, int]) -> None:
-    image = Image.new("RGB", (960, 540), color)
-    image.save(path, quality=92)
-
-
-def make_bgm(path: Path, frequency: int, duration: float = 3.0) -> None:
-    import imageio_ffmpeg
-
-    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
-    subprocess.run(
-        [
-            ffmpeg,
-            "-y",
-            "-f",
-            "lavfi",
-            "-i",
-            f"sine=frequency={frequency}:sample_rate=48000:duration={duration}",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "128k",
-            str(path),
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
+from tests._helpers import (
+    four_image_transition_plan,
+    make_bgm,
+    make_image,
+    reset_dir,
+    visual_chunk_cache_params,
+)
 
 
 def test_standard_render_reuses_visual_base_when_only_bgm_changes() -> None:
-    root = Path("tests/tmp_vcs_audio_visual_cache_standard")
-    if root.exists():
-        shutil.rmtree(root)
-    root.mkdir(parents=True)
+    root = reset_dir(Path("tests/tmp_vcs_audio_visual_cache_standard"))
 
     first = root / "first.jpg"
     second = root / "second.jpg"
@@ -148,10 +117,7 @@ def test_standard_render_reuses_visual_base_when_only_bgm_changes() -> None:
 
 
 def test_stable_chunk_cache_key_ignores_bgm_only_changes() -> None:
-    root = Path("tests/tmp_vcs_audio_visual_cache_stable")
-    if root.exists():
-        shutil.rmtree(root)
-    root.mkdir(parents=True)
+    root = reset_dir(Path("tests/tmp_vcs_audio_visual_cache_stable"))
 
     image_path = root / "photo.jpg"
     make_image(image_path, (84, 108, 152))
@@ -222,10 +188,7 @@ def test_stable_chunk_cache_key_ignores_bgm_only_changes() -> None:
 
 
 def test_standard_visual_chunk_cache_reuses_unchanged_chunk_groups() -> None:
-    root = Path("tests/tmp_vcs_audio_visual_chunk_reuse")
-    if root.exists():
-        shutil.rmtree(root)
-    root.mkdir(parents=True)
+    root = reset_dir(Path("tests/tmp_vcs_audio_visual_chunk_reuse"))
 
     colors = [
         (66, 102, 144),
@@ -314,10 +277,7 @@ def test_standard_visual_chunk_cache_reuses_unchanged_chunk_groups() -> None:
 
 
 def test_transition_aware_visual_chunk_reuse_keeps_unaffected_neighbors() -> None:
-    root = Path("tests/tmp_vcs_audio_visual_transition_units")
-    if root.exists():
-        shutil.rmtree(root)
-    root.mkdir(parents=True)
+    root = reset_dir(Path("tests/tmp_vcs_audio_visual_transition_units"))
 
     colors = [
         (74, 110, 152),
@@ -405,320 +365,40 @@ def test_transition_aware_visual_chunk_reuse_keeps_unaffected_neighbors() -> Non
 
 
 def test_fade_through_dark_expands_transition_unit_forward() -> None:
-    root = Path("tests/tmp_vcs_audio_visual_fade_radius")
-    if root.exists():
-        shutil.rmtree(root)
-    root.mkdir(parents=True)
-
-    sources = []
-    for idx, color in enumerate(((72, 108, 152), (96, 140, 86), (154, 96, 70), (112, 86, 164)), 1):
-        path = root / f"fade_{idx}.jpg"
-        make_image(path, color)
-        sources.append(path)
-
-    plan = {
-        "document_type": "render_plan",
-        "render_settings": {"fps": 12, "aspect_ratio": "16:9", "quality": "draft"},
-        "total_duration": 4.0,
-        "segments": [
-            {
-                "segment_id": "seg_fade_00001",
-                "type": "image",
-                "source_path": str(sources[0]),
-                "duration": 1.0,
-                "start_time": 0.0,
-                "end_time": 1.0,
-                "text": "Fade 1",
-                "transition_config": {"type": "cut", "duration": 0},
-                "motion_config": {"type": "none"},
-            },
-            {
-                "segment_id": "seg_fade_00002",
-                "type": "image",
-                "source_path": str(sources[1]),
-                "duration": 1.0,
-                "start_time": 1.0,
-                "end_time": 2.0,
-                "text": "Fade 2",
-                "transition_config": {"type": "cut", "duration": 0},
-                "motion_config": {"type": "none"},
-            },
-            {
-                "segment_id": "seg_fade_00003",
-                "type": "image",
-                "source_path": str(sources[2]),
-                "duration": 1.0,
-                "start_time": 2.0,
-                "end_time": 3.0,
-                "text": "Fade 3",
-                "transition": "fade_through_dark",
-                "transition_config": {"type": "fade_through_dark", "duration": 0.34},
-                "motion_config": {"type": "none"},
-            },
-            {
-                "segment_id": "seg_fade_00004",
-                "type": "image",
-                "source_path": str(sources[3]),
-                "duration": 1.0,
-                "start_time": 3.0,
-                "end_time": 4.0,
-                "text": "Fade 4",
-                "transition_config": {"type": "cut", "duration": 0},
-                "motion_config": {"type": "none"},
-            },
-        ],
-    }
-    params = {
-        "preview": True,
-        "preview_height": 360,
-        "fps": 12,
-        "quality": "draft",
-        "visual_base_chunk_cache": True,
-        "visual_base_chunk_max_segments": 2,
-        "visual_base_chunk_seconds": 30,
-        "audio": {"music_mode": "off"},
-    }
-
+    root = reset_dir(Path("tests/tmp_vcs_audio_visual_fade_radius"))
+    cut = {"type": "cut", "duration": 0}
+    plan = four_image_transition_plan(root, "fade", [cut, cut, {"type": "fade_through_dark", "duration": 0.34}, cut])
+    params = visual_chunk_cache_params()
     renderer = engine.Renderer(plan, str(root / "fade.mp4"), params)
     units = renderer._build_standard_visual_transition_units()
     assert [len(unit) for unit in units] == [1, 3], "fade_through_dark should pull the following segment into the same local invalidation unit"
 
 
 def test_quick_zoom_stays_local_to_previous_and_current() -> None:
-    root = Path("tests/tmp_vcs_audio_visual_quick_zoom_radius")
-    if root.exists():
-        shutil.rmtree(root)
-    root.mkdir(parents=True)
-
-    sources = []
-    for idx, color in enumerate(((68, 112, 150), (98, 142, 82), (150, 94, 72), (114, 90, 162)), 1):
-        path = root / f"zoom_{idx}.jpg"
-        make_image(path, color)
-        sources.append(path)
-
-    plan = {
-        "document_type": "render_plan",
-        "render_settings": {"fps": 12, "aspect_ratio": "16:9", "quality": "draft"},
-        "total_duration": 4.0,
-        "segments": [
-            {
-                "segment_id": "seg_zoom_00001",
-                "type": "image",
-                "source_path": str(sources[0]),
-                "duration": 1.0,
-                "start_time": 0.0,
-                "end_time": 1.0,
-                "text": "Zoom 1",
-                "transition_config": {"type": "cut", "duration": 0},
-                "motion_config": {"type": "none"},
-            },
-            {
-                "segment_id": "seg_zoom_00002",
-                "type": "image",
-                "source_path": str(sources[1]),
-                "duration": 1.0,
-                "start_time": 1.0,
-                "end_time": 2.0,
-                "text": "Zoom 2",
-                "transition_config": {"type": "cut", "duration": 0},
-                "motion_config": {"type": "none"},
-            },
-            {
-                "segment_id": "seg_zoom_00003",
-                "type": "image",
-                "source_path": str(sources[2]),
-                "duration": 1.0,
-                "start_time": 2.0,
-                "end_time": 3.0,
-                "text": "Zoom 3",
-                "transition": "quick_zoom",
-                "transition_config": {"type": "quick_zoom", "duration": 0.18},
-                "motion_config": {"type": "none"},
-            },
-            {
-                "segment_id": "seg_zoom_00004",
-                "type": "image",
-                "source_path": str(sources[3]),
-                "duration": 1.0,
-                "start_time": 3.0,
-                "end_time": 4.0,
-                "text": "Zoom 4",
-                "transition_config": {"type": "cut", "duration": 0},
-                "motion_config": {"type": "none"},
-            },
-        ],
-    }
-    params = {
-        "preview": True,
-        "preview_height": 360,
-        "fps": 12,
-        "quality": "draft",
-        "visual_base_chunk_cache": True,
-        "visual_base_chunk_max_segments": 2,
-        "visual_base_chunk_seconds": 30,
-        "audio": {"music_mode": "off"},
-    }
-
+    root = reset_dir(Path("tests/tmp_vcs_audio_visual_quick_zoom_radius"))
+    cut = {"type": "cut", "duration": 0}
+    plan = four_image_transition_plan(root, "zoom", [cut, cut, {"type": "quick_zoom", "duration": 0.18}, cut])
+    params = visual_chunk_cache_params()
     renderer = engine.Renderer(plan, str(root / "zoom.mp4"), params)
     units = renderer._build_standard_visual_transition_units()
     assert [len(unit) for unit in units] == [1, 2, 1], "quick_zoom should stay local to the previous/current pair"
 
 
 def test_fade_through_white_expands_transition_unit_forward() -> None:
-    root = Path("tests/tmp_vcs_audio_visual_white_radius")
-    if root.exists():
-        shutil.rmtree(root)
-    root.mkdir(parents=True)
-
-    sources = []
-    for idx, color in enumerate(((78, 118, 146), (104, 146, 88), (160, 102, 76), (118, 94, 170)), 1):
-        path = root / f"white_{idx}.jpg"
-        make_image(path, color)
-        sources.append(path)
-
-    plan = {
-        "document_type": "render_plan",
-        "render_settings": {"fps": 12, "aspect_ratio": "16:9", "quality": "draft"},
-        "total_duration": 4.0,
-        "segments": [
-            {
-                "segment_id": "seg_white_00001",
-                "type": "image",
-                "source_path": str(sources[0]),
-                "duration": 1.0,
-                "start_time": 0.0,
-                "end_time": 1.0,
-                "text": "White 1",
-                "transition_config": {"type": "cut", "duration": 0},
-                "motion_config": {"type": "none"},
-            },
-            {
-                "segment_id": "seg_white_00002",
-                "type": "image",
-                "source_path": str(sources[1]),
-                "duration": 1.0,
-                "start_time": 1.0,
-                "end_time": 2.0,
-                "text": "White 2",
-                "transition_config": {"type": "cut", "duration": 0},
-                "motion_config": {"type": "none"},
-            },
-            {
-                "segment_id": "seg_white_00003",
-                "type": "image",
-                "source_path": str(sources[2]),
-                "duration": 1.0,
-                "start_time": 2.0,
-                "end_time": 3.0,
-                "text": "White 3",
-                "transition": "fade_through_white",
-                "transition_config": {"type": "fade_through_white", "duration": 0.46},
-                "motion_config": {"type": "none"},
-            },
-            {
-                "segment_id": "seg_white_00004",
-                "type": "image",
-                "source_path": str(sources[3]),
-                "duration": 1.0,
-                "start_time": 3.0,
-                "end_time": 4.0,
-                "text": "White 4",
-                "transition_config": {"type": "cut", "duration": 0},
-                "motion_config": {"type": "none"},
-            },
-        ],
-    }
-    params = {
-        "preview": True,
-        "preview_height": 360,
-        "fps": 12,
-        "quality": "draft",
-        "visual_base_chunk_cache": True,
-        "visual_base_chunk_max_segments": 2,
-        "visual_base_chunk_seconds": 30,
-        "audio": {"music_mode": "off"},
-    }
-
+    root = reset_dir(Path("tests/tmp_vcs_audio_visual_white_radius"))
+    cut = {"type": "cut", "duration": 0}
+    plan = four_image_transition_plan(root, "white", [cut, cut, {"type": "fade_through_white", "duration": 0.46}, cut])
+    params = visual_chunk_cache_params()
     renderer = engine.Renderer(plan, str(root / "white.mp4"), params)
     units = renderer._build_standard_visual_transition_units()
     assert [len(unit) for unit in units] == [1, 3], "fade_through_white should pull the following segment into the same local invalidation unit"
 
 
 def test_flash_cut_stays_local_to_previous_and_current() -> None:
-    root = Path("tests/tmp_vcs_audio_visual_flash_cut_radius")
-    if root.exists():
-        shutil.rmtree(root)
-    root.mkdir(parents=True)
-
-    sources = []
-    for idx, color in enumerate(((70, 116, 152), (100, 146, 84), (152, 98, 74), (120, 92, 166)), 1):
-        path = root / f"flash_{idx}.jpg"
-        make_image(path, color)
-        sources.append(path)
-
-    plan = {
-        "document_type": "render_plan",
-        "render_settings": {"fps": 12, "aspect_ratio": "16:9", "quality": "draft"},
-        "total_duration": 4.0,
-        "segments": [
-            {
-                "segment_id": "seg_flash_00001",
-                "type": "image",
-                "source_path": str(sources[0]),
-                "duration": 1.0,
-                "start_time": 0.0,
-                "end_time": 1.0,
-                "text": "Flash 1",
-                "transition_config": {"type": "cut", "duration": 0},
-                "motion_config": {"type": "none"},
-            },
-            {
-                "segment_id": "seg_flash_00002",
-                "type": "image",
-                "source_path": str(sources[1]),
-                "duration": 1.0,
-                "start_time": 1.0,
-                "end_time": 2.0,
-                "text": "Flash 2",
-                "transition_config": {"type": "cut", "duration": 0},
-                "motion_config": {"type": "none"},
-            },
-            {
-                "segment_id": "seg_flash_00003",
-                "type": "image",
-                "source_path": str(sources[2]),
-                "duration": 1.0,
-                "start_time": 2.0,
-                "end_time": 3.0,
-                "text": "Flash 3",
-                "transition": "flash_cut",
-                "transition_config": {"type": "flash_cut", "duration": 0.16},
-                "motion_config": {"type": "none"},
-            },
-            {
-                "segment_id": "seg_flash_00004",
-                "type": "image",
-                "source_path": str(sources[3]),
-                "duration": 1.0,
-                "start_time": 3.0,
-                "end_time": 4.0,
-                "text": "Flash 4",
-                "transition_config": {"type": "cut", "duration": 0},
-                "motion_config": {"type": "none"},
-            },
-        ],
-    }
-    params = {
-        "preview": True,
-        "preview_height": 360,
-        "fps": 12,
-        "quality": "draft",
-        "visual_base_chunk_cache": True,
-        "visual_base_chunk_max_segments": 2,
-        "visual_base_chunk_seconds": 30,
-        "audio": {"music_mode": "off"},
-    }
-
+    root = reset_dir(Path("tests/tmp_vcs_audio_visual_flash_cut_radius"))
+    cut = {"type": "cut", "duration": 0}
+    plan = four_image_transition_plan(root, "flash", [cut, cut, {"type": "flash_cut", "duration": 0.16}, cut])
+    params = visual_chunk_cache_params()
     renderer = engine.Renderer(plan, str(root / "flash.mp4"), params)
     units = renderer._build_standard_visual_transition_units()
     assert [len(unit) for unit in units] == [1, 2, 1], "flash_cut should stay local to the previous/current pair"
@@ -734,3 +414,4 @@ if __name__ == "__main__":
     test_quick_zoom_stays_local_to_previous_and_current()
     test_flash_cut_stays_local_to_previous_and_current()
     print("V5 audio visual cache smoke test passed")
+

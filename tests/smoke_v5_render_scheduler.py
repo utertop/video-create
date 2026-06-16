@@ -1,14 +1,11 @@
-import shutil
-import subprocess
-import sys
+﻿import sys
 from pathlib import Path
-from typing import Dict, Tuple
-
-import imageio_ffmpeg
+from typing import Dict
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import video_engine_v5 as engine
+from tests._helpers import long_image_plan, make_image, make_video, reset_dir, stable_failure_plan
 
 
 def test_compile_emits_render_scheduler_hints() -> None:
@@ -157,17 +154,7 @@ def test_renderer_applies_runtime_render_routes() -> None:
 
 
 def test_render_backend_selector_prefers_stable_for_long_video_exports() -> None:
-    plan = {
-        "total_duration": 720.0,
-        "render_settings": {
-            "fps": 12,
-            "aspect_ratio": "16:9",
-            "performance_mode": "balanced",
-            "render_mode": "auto",
-        },
-        "segments": [{"segment_id": f"seg_{idx:03d}", "type": "image", "duration": 8.0} for idx in range(60)],
-    }
-
+    plan = long_image_plan()
     decision = engine._v56_resolve_render_backend(plan, {"performance_mode": "balanced", "render_mode": "auto"})
 
     assert decision["backend_name"] == "ffmpeg_stable_backend"
@@ -175,19 +162,8 @@ def test_render_backend_selector_prefers_stable_for_long_video_exports() -> None
     assert decision["reason"] == "stable_renderer_selected"
     assert "legacy_moviepy_backend" in (decision.get("fallback_chain") or [])
 
-
 def test_render_backend_selector_returns_formal_decision_type() -> None:
-    plan = {
-        "total_duration": 720.0,
-        "render_settings": {
-            "fps": 12,
-            "aspect_ratio": "16:9",
-            "performance_mode": "balanced",
-            "render_mode": "auto",
-        },
-        "segments": [{"segment_id": f"seg_{idx:03d}", "type": "image", "duration": 8.0} for idx in range(60)],
-    }
-
+    plan = long_image_plan()
     decision = engine._v56_resolve_render_backend_decision(plan, {"performance_mode": "balanced", "render_mode": "auto"})
 
     assert isinstance(decision, engine.BackendDecision)
@@ -195,7 +171,6 @@ def test_render_backend_selector_returns_formal_decision_type() -> None:
     assert decision.backend_family == "long_video_stable"
     assert decision.reason == "stable_renderer_selected"
     assert decision.to_dict()["backend_name"] == "ffmpeg_stable_backend"
-
 
 def test_backend_execution_result_defaults_to_selected_backend() -> None:
     decision = engine.BackendDecision(
@@ -291,17 +266,7 @@ def test_render_diagnostics_expose_route_observability() -> None:
 
 
 def test_render_backend_selector_keeps_preview_on_legacy_backend() -> None:
-    plan = {
-        "total_duration": 12.0,
-        "render_settings": {
-            "fps": 12,
-            "aspect_ratio": "16:9",
-            "performance_mode": "balanced",
-            "render_mode": "auto",
-        },
-        "segments": [{"segment_id": "seg_preview", "type": "image", "duration": 2.0}],
-    }
-
+    plan = long_image_plan(total_duration=12.0, segment_count=1, segment_duration=2.0)
     decision = engine._v56_resolve_render_backend(plan, {"preview": True, "fps": 12})
 
     assert decision["backend_name"] == "legacy_moviepy_backend"
@@ -310,15 +275,12 @@ def test_render_backend_selector_keeps_preview_on_legacy_backend() -> None:
 
 
 def test_standard_visual_chunk_groups_prefer_ffmpeg_for_safe_image_units() -> None:
-    root = Path("tests/tmp_vcs_standard_visual_ffmpeg_image_chunk")
-    if root.exists():
-        shutil.rmtree(root)
-    root.mkdir(parents=True)
+    root = reset_dir(Path("tests/tmp_vcs_standard_visual_ffmpeg_image_chunk"))
 
     first = root / "first.jpg"
     second = root / "second.jpg"
-    engine.Image.new("RGB", (960, 540), (82, 116, 164)).save(first, quality=92)
-    engine.Image.new("RGB", (960, 540), (148, 92, 74)).save(second, quality=92)
+    make_image(first, (82, 116, 164))
+    make_image(second, (148, 92, 74))
 
     plan = {
         "total_duration": 4.0,
@@ -368,15 +330,12 @@ def test_standard_visual_chunk_groups_prefer_ffmpeg_for_safe_image_units() -> No
 
 
 def test_standard_visual_chunk_groups_prefer_ffmpeg_for_safe_image_overlay_units() -> None:
-    root = Path("tests/tmp_vcs_standard_visual_ffmpeg_image_overlay_chunk")
-    if root.exists():
-        shutil.rmtree(root)
-    root.mkdir(parents=True)
+    root = reset_dir(Path("tests/tmp_vcs_standard_visual_ffmpeg_image_overlay_chunk"))
 
     first = root / "first.jpg"
     second = root / "second.jpg"
-    engine.Image.new("RGB", (960, 540), (96, 126, 176)).save(first, quality=92)
-    engine.Image.new("RGB", (960, 540), (160, 104, 84)).save(second, quality=92)
+    make_image(first, (96, 126, 176))
+    make_image(second, (160, 104, 84))
 
     plan = {
         "total_duration": 4.0,
@@ -434,13 +393,10 @@ def test_standard_visual_chunk_groups_prefer_ffmpeg_for_safe_image_overlay_units
 
 
 def test_standard_visual_chunk_groups_prefer_ffmpeg_for_static_card_units() -> None:
-    root = Path("tests/tmp_vcs_standard_visual_ffmpeg_card_chunk")
-    if root.exists():
-        shutil.rmtree(root)
-    root.mkdir(parents=True)
+    root = reset_dir(Path("tests/tmp_vcs_standard_visual_ffmpeg_card_chunk"))
 
     background = root / "bg.jpg"
-    engine.Image.new("RGB", (960, 540), (78, 110, 150)).save(background, quality=92)
+    make_image(background, (78, 110, 150))
 
     plan = {
         "total_duration": 2.4,
@@ -499,43 +455,12 @@ def test_standard_visual_chunk_groups_prefer_ffmpeg_for_static_card_units() -> N
 
 
 def test_standard_visual_chunk_groups_prefer_ffmpeg_for_safe_video_fit_units() -> None:
-    root = Path("tests/tmp_vcs_standard_visual_ffmpeg_video_chunk")
-    if root.exists():
-        shutil.rmtree(root)
-    root.mkdir(parents=True)
+    root = reset_dir(Path("tests/tmp_vcs_standard_visual_ffmpeg_video_chunk"))
 
     first = root / "first.mp4"
     second = root / "second.mp4"
-    subprocess.check_call(
-        [
-            imageio_ffmpeg.get_ffmpeg_exe(),
-            "-y",
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc=size=640x360:rate=12:duration=1.0",
-            "-pix_fmt",
-            "yuv420p",
-            str(first),
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    subprocess.check_call(
-        [
-            imageio_ffmpeg.get_ffmpeg_exe(),
-            "-y",
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc=size=640x360:rate=12:duration=1.0",
-            "-pix_fmt",
-            "yuv420p",
-            str(second),
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    make_video(first)
+    make_video(second)
 
     plan = {
         "total_duration": 2.0,
@@ -589,10 +514,7 @@ def test_standard_visual_chunk_groups_prefer_ffmpeg_for_safe_video_fit_units() -
 
 
 def test_stable_chunk_cache_key_tracks_source_file_changes() -> None:
-    root = Path("tests/tmp_vcs_smart_invalidation")
-    if root.exists():
-        shutil.rmtree(root)
-    root.mkdir(parents=True)
+    root = reset_dir(Path("tests/tmp_vcs_smart_invalidation"))
 
     source = root / "clip.mp4"
     source.write_bytes(b"old source")
@@ -615,13 +537,10 @@ def test_stable_chunk_cache_key_tracks_source_file_changes() -> None:
 
 
 def test_proxy_media_cache_is_opt_in_and_reportable() -> None:
-    root = Path("tests/tmp_vcs_proxy_media")
-    if root.exists():
-        shutil.rmtree(root)
-    root.mkdir(parents=True)
+    root = reset_dir(Path("tests/tmp_vcs_proxy_media"))
 
     source = root / "image_01.jpg"
-    engine.Image.new("RGB", (320, 180), (64, 120, 180)).save(source, quality=90)
+    make_image(source, (64, 120, 180), size=(320, 180), quality=90)
     plan = {"render_settings": {"fps": 12, "aspect_ratio": "16:9"}, "segments": []}
     renderer = engine.Renderer(
         plan,
@@ -644,13 +563,10 @@ def test_proxy_media_cache_is_opt_in_and_reportable() -> None:
 
 
 def test_proxy_media_manifest_is_preferred_for_preview() -> None:
-    root = Path("tests/tmp_vcs_proxy_manifest")
-    if root.exists():
-        shutil.rmtree(root)
-    root.mkdir(parents=True)
+    root = reset_dir(Path("tests/tmp_vcs_proxy_manifest"))
 
     source = root / "image_01.jpg"
-    engine.Image.new("RGB", (1280, 720), (92, 138, 188)).save(source, quality=92)
+    make_image(source, (92, 138, 188), size=(1280, 720))
     library = engine.Scanner(str(root), recursive=True).scan()
     manifest = library.get("proxy_media_manifest") or {}
     asset_entry = (manifest.get("assets") or {}).get(str(source.resolve()))
@@ -684,15 +600,12 @@ def test_proxy_media_manifest_is_preferred_for_preview() -> None:
 
 
 def test_stable_render_failure_report_preserves_resume_metadata() -> None:
-    root = Path("tests/tmp_vcs_stable_failure_recovery")
-    if root.exists():
-        shutil.rmtree(root)
-    root.mkdir(parents=True)
+    root = reset_dir(Path("tests/tmp_vcs_stable_failure_recovery"))
 
     first = root / "first.jpg"
     second = root / "second.jpg"
-    engine.Image.new("RGB", (960, 540), (84, 112, 166)).save(first, quality=92)
-    engine.Image.new("RGB", (960, 540), (152, 94, 70)).save(second, quality=92)
+    make_image(first, (84, 112, 166))
+    make_image(second, (152, 94, 70))
 
     plan = {
         "render_settings": {
@@ -761,58 +674,9 @@ def test_stable_render_failure_report_preserves_resume_metadata() -> None:
     assert manifest["chunks"]["chunk_000.mp4"]["attempt_count"] == 1
 
 
-def _stable_failure_plan(root: Path) -> Tuple[Dict, Path, Dict]:
-    first = root / "first.jpg"
-    second = root / "second.jpg"
-    engine.Image.new("RGB", (960, 540), (84, 112, 166)).save(first, quality=92)
-    engine.Image.new("RGB", (960, 540), (152, 94, 70)).save(second, quality=92)
-    plan = {
-        "render_settings": {
-            "fps": 12,
-            "aspect_ratio": "16:9",
-            "edit_strategy": "long_stable",
-            "performance_mode": "stable",
-            "render_mode": "long_stable",
-        },
-        "total_duration": 2.0,
-        "segments": [
-            {
-                "segment_id": "seg_fail_0001",
-                "type": "image",
-                "source_path": str(first),
-                "duration": 1.0,
-                "start_time": 0.0,
-                "end_time": 1.0,
-                "text": None,
-                "transition": "cut",
-                "transition_config": {"type": "cut", "duration": 0},
-                "motion_config": {"type": "gentle_push"},
-            },
-            {
-                "segment_id": "seg_fail_0002",
-                "type": "image",
-                "source_path": str(second),
-                "duration": 1.0,
-                "start_time": 1.0,
-                "end_time": 2.0,
-                "text": None,
-                "transition": "cut",
-                "transition_config": {"type": "cut", "duration": 0},
-                "motion_config": {"type": "slow_push"},
-            },
-        ],
-    }
-    output = root / "output.mp4"
-    params = {"fps": 12, "quality": "draft", "render_mode": "long_stable", "performance_mode": "stable"}
-    return plan, output, params
-
-
 def test_stable_render_concat_failure_report_is_written() -> None:
-    root = Path("tests/tmp_vcs_stable_concat_failure")
-    if root.exists():
-        shutil.rmtree(root)
-    root.mkdir(parents=True)
-    plan, output, params = _stable_failure_plan(root)
+    root = reset_dir(Path("tests/tmp_vcs_stable_concat_failure"))
+    plan, output, params = stable_failure_plan(root)
 
     original_copy = engine._v56_concat_chunks_ffmpeg
     original_reencode = engine._v56_concat_chunks_ffmpeg_reencode
@@ -843,11 +707,8 @@ def test_stable_render_concat_failure_report_is_written() -> None:
 
 
 def test_stable_render_audio_mix_failure_report_is_written() -> None:
-    root = Path("tests/tmp_vcs_stable_audio_failure")
-    if root.exists():
-        shutil.rmtree(root)
-    root.mkdir(parents=True)
-    plan, output, params = _stable_failure_plan(root)
+    root = reset_dir(Path("tests/tmp_vcs_stable_audio_failure"))
+    plan, output, params = stable_failure_plan(root)
 
     original_safe_mix = engine._v56_safe_apply_final_bgm_mix
     engine._v56_safe_apply_final_bgm_mix = lambda *args, **kwargs: (False, RuntimeError("forced audio mix failure"))
@@ -867,11 +728,8 @@ def test_stable_render_audio_mix_failure_report_is_written() -> None:
 
 
 def test_stable_render_output_validate_failure_report_is_written() -> None:
-    root = Path("tests/tmp_vcs_stable_output_validate_failure")
-    if root.exists():
-        shutil.rmtree(root)
-    root.mkdir(parents=True)
-    plan, output, params = _stable_failure_plan(root)
+    root = reset_dir(Path("tests/tmp_vcs_stable_output_validate_failure"))
+    plan, output, params = stable_failure_plan(root)
 
     original_validate = engine._v56_validate_video
     original_safe_mix = engine._v56_safe_apply_final_bgm_mix
@@ -922,3 +780,5 @@ if __name__ == "__main__":
     test_stable_render_audio_mix_failure_report_is_written()
     test_stable_render_output_validate_failure_report_is_written()
     print("V5 render scheduler smoke test passed")
+
+
