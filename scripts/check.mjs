@@ -3,6 +3,8 @@ import process from "node:process";
 
 const full = process.argv.includes("--full");
 
+printEnvironmentSummary();
+
 const coreSmokeTests = [
   "tests/smoke_v5_timeline_schema.py",
   "tests/smoke_v5_timeline_generate.py",
@@ -122,6 +124,39 @@ for (const [index, step] of steps.entries()) {
 }
 
 console.log(`\nProduct check passed (${full ? "full" : "core"} suite).`);
+
+function printEnvironmentSummary() {
+  const summary = [
+    ["mode", full ? "full" : "core"],
+    ["cwd", process.cwd()],
+    ["platform", `${process.platform} ${process.arch}`],
+    ["node", process.version],
+    ["npm", readCommandOutput(npmCommand(), ["--version"])],
+    ["vite", readCommandOutput(npmCommand(), ["exec", "--", "vite", "--version"])],
+    ["python", readCommandOutput("python", ["--version"])],
+    ["cargo", readCommandOutput("cargo", ["--version"])],
+  ];
+
+  console.log("Product check environment:");
+  for (const [label, value] of summary) {
+    console.log(`- ${label}: ${value || "unavailable"}`);
+  }
+}
+
+function readCommandOutput(command, args) {
+  const commandArgs = process.platform === "win32" && command.endsWith(".cmd")
+    ? ["/d", "/c", command, ...args]
+    : args;
+  const executable = process.platform === "win32" && command.endsWith(".cmd")
+    ? process.env.ComSpec || "cmd.exe"
+    : command;
+  const result = spawnSync(executable, commandArgs, {
+    cwd: process.cwd(),
+    encoding: "utf8",
+  });
+  if (result.error || result.status !== 0) return "unavailable";
+  return `${result.stdout || result.stderr}`.trim();
+}
 
 function spawnStep(step) {
   const env = {
