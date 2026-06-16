@@ -12,6 +12,7 @@ from .render_routes import (
     _v56_is_ffmpeg_card_chunk_candidate,
     _v56_is_ffmpeg_fitted_video_chunk_route,
     _v56_is_ffmpeg_image_chunk_candidate,
+    _v56_segment_route_for_chunk_planning,
 )
 
 _emit_event: Callable[..., None] = lambda _event_type, **_payload: None
@@ -124,6 +125,8 @@ def _v56_segment_cache_key(seg: Dict[str, Any], params: Dict[str, Any]) -> str:
         "background_source_path_2": seg.get("background_source_path_2"),
         "source_fingerprints": _v56_segment_source_fingerprints(seg),
         "overlay_text": seg.get("overlay_text"),
+        "overlay_subtitle": seg.get("overlay_subtitle"),
+        "overlay_duration": seg.get("overlay_duration"),
         "title_style": seg.get("title_style"),
         "overlay_title_style": seg.get("overlay_title_style"),
         "params_title_style": params.get("title_style") if seg.get("type") == "title" else None,
@@ -157,7 +160,7 @@ def _v56_build_chunk_groups(
     current_keys: List[str] = []
 
     def chunk_route_payload(items: List[Dict[str, Any]]) -> Dict[str, Any]:
-        routes = [str(seg.get("runtime_render_route") or seg.get("render_route") or "moviepy_required") for seg in items]
+        routes = [_v56_segment_route_for_chunk_planning(seg, params) for seg in items]
         route_counts: Dict[str, int] = {}
         for route in routes:
             route_counts[route] = route_counts.get(route, 0) + 1

@@ -15,6 +15,7 @@ from video_engine.render_cache import (
 from video_engine.render_routes import (
     _v56_chunk_route_family,
     _v56_is_ffmpeg_fitted_video_chunk_route,
+    _v56_segment_route_for_chunk_planning,
 )
 
 
@@ -110,7 +111,7 @@ def standard_visual_transition_influence(seg: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def standard_visual_chunk_route_payload(renderer: Any, items: List[Dict[str, Any]]) -> Dict[str, Any]:
-    routes = [str(seg.get("runtime_render_route") or seg.get("render_route") or "moviepy_required") for seg in items]
+    routes = [_v56_segment_route_for_chunk_planning(seg, renderer.params) for seg in items]
     route_counts: Dict[str, int] = {}
     for route in routes:
         route_counts[route] = route_counts.get(route, 0) + 1

@@ -237,6 +237,7 @@ def test_ffmpeg_image_chunk_renders_safe_image_only_stable_chunk() -> None:
     assert report["diagnostics"]["observability"]["fast_path_coverage"]["chunks"]["fast_path_count"] == 1
     assert report["diagnostics"]["observability"]["timing_highlights"]["measured_step_count"] >= 1
     assert report["timings"]["concat_strategy"] in {"ffmpeg_copy", "ffmpeg_reencode", "moviepy_fallback"}
+    assert report["chunk_routes"][0].get("status") != "moviepy_fallback"
     assert report["recovery"]["resumable"] is True
     assert report["recovery"]["reused_chunk_count"] >= 0
 
@@ -473,6 +474,72 @@ def test_ffmpeg_fitted_video_chunk_renders_safe_video_motion_and_overlay() -> No
     overlay_fitted = list((root / ".video_create_project" / "render_cache" / "overlay_fitted_videos").glob("*.mp4"))
     assert motion_fitted, "expected motion-fitted video cache for safe video chunk"
     assert overlay_fitted, "expected cached overlay-fitted video segment"
+
+
+def test_ffmpeg_fitted_video_chunk_allows_fade_only_overlay_alias() -> None:
+    root = Path("tests/tmp_vcs_ffmpeg_overlay_alias_chunk")
+    if root.exists():
+        shutil.rmtree(root)
+    root.mkdir(parents=True)
+
+    source = root / "source.mp4"
+    make_video(source)
+
+    plan = {
+        "render_settings": {
+            "fps": 12,
+            "aspect_ratio": "16:9",
+            "edit_strategy": "long_stable",
+            "performance_mode": "stable",
+            "render_mode": "long_stable",
+        },
+        "total_duration": 1.0,
+        "segments": [
+            {
+                "segment_id": "seg_vid_overlay_alias",
+                "type": "video",
+                "source_path": str(source),
+                "duration": 1.0,
+                "start_time": 0.0,
+                "end_time": 1.0,
+                "text": None,
+                "subtitle": None,
+                "transition": "cut",
+                "transition_config": {"type": "cut", "duration": 0},
+                "motion_config": {"type": "none"},
+                "keep_audio": False,
+                "overlay_text": "Quiet Cut",
+                "overlay_subtitle": "Fade only subtitle",
+                "overlay_duration": 1.0,
+                "overlay_title_style": {
+                    "preset": "minimal_editorial",
+                    "motion": "fade_only",
+                    "position": "lower_left",
+                },
+            }
+        ],
+    }
+    output = root / "output.mp4"
+    params = {"fps": 12, "quality": "draft", "render_mode": "long_stable", "performance_mode": "stable"}
+
+    groups = engine._v56_build_chunk_groups(plan["segments"], 30, params)
+    assert groups
+    assert groups[0]["runtime_chunk_route"] == "ffmpeg_fitted_video_chunk"
+    assert groups[0]["runtime_chunk_route_counts"].get("video_fit") == 1
+
+    engine.V56StableRenderer(plan, str(output), params).render()
+    ok, reason, _duration = engine._v56_validate_video(output, min_size=512)
+    assert ok, reason
+
+    report = engine.read_json(str(root / ".video_create_project" / "build_report.json"))
+    assert report["selected_backend"] == "ffmpeg_stable_backend"
+    route_counts = ((report.get("chunk_scheduler") or {}).get("route_counts") or {})
+    assert route_counts.get("ffmpeg_fitted_video_chunk") == 1
+    assert report["chunk_routes"][0]["route"] == "ffmpeg_fitted_video_chunk"
+    assert report["chunk_routes"][0].get("status") != "moviepy_fallback"
+
+    overlay_fitted = list((root / ".video_create_project" / "render_cache" / "overlay_fitted_videos").glob("*.mp4"))
+    assert overlay_fitted, "expected cached overlay-fitted video segment for fade_only alias"
 
 
 def test_ffmpeg_video_segment_cache_stats() -> None:
@@ -878,6 +945,11 @@ if __name__ == "__main__":
     test_encoder_selection_respects_explicit_cpu_override()
     test_ffmpeg_priority_fits_simple_video_segments()
     test_ffmpeg_video_segment_cache_stats()
+    test_ffmpeg_image_chunk_renders_safe_image_only_stable_chunk()
+    test_ffmpeg_card_chunk_renders_safe_static_cards()
+    test_ffmpeg_image_chunk_renders_safe_image_overlay_stable_chunk()
+    test_ffmpeg_fitted_video_chunk_renders_safe_video_motion_and_overlay()
+    test_ffmpeg_fitted_video_chunk_allows_fade_only_overlay_alias()
     test_ffmpeg_priority_writes_lightweight_chunk_directly()
     test_ffmpeg_direct_chunk_unifies_source_and_silent_audio()
     test_ffmpeg_concat_keeps_audio_chunks_out_of_moviepy()

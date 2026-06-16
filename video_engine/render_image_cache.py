@@ -182,7 +182,7 @@ def ffmpeg_prerender_image_segment(
         "photo_segments_ffmpeg",
         source,
         ".mp4",
-        f"photo_seg_ffmpeg_v1|duration={round(float(duration or 0.0), 3)}|fps={fps}|motion={motion_key}",
+        f"photo_seg_ffmpeg_v2|duration={round(float(duration or 0.0), 3)}|fps={fps}|motion={motion_key}",
     )
     if out.exists() and out.stat().st_size > 1024:
         emit_event_fn("log", message=f"FFmpeg image segment cache hit: {out.name}")
@@ -210,11 +210,16 @@ def ffmpeg_prerender_image_segment(
 
     fg_filter = f"[1:v]scale={base_w}:{base_h}[fg]"
     if amount > 0:
-        zoom_expr = f"(1+{amount:.6f}*t/{segment_duration:.6f})"
+        frame_span = max(float(fps) * segment_duration, 1.0)
+        zoompan_expr = f"1+{amount:.6f}*on/{frame_span:.6f}"
         fg_filter = (
             "[1:v]"
-            f"scale='max(2,trunc({base_w}*{zoom_expr}/2)*2)':"
-            f"'max(2,trunc({base_h}*{zoom_expr}/2)*2)':eval=frame"
+            f"scale={base_w}:{base_h},"
+            f"zoompan=z='{zoompan_expr}':d=1:"
+            "x='iw/2-(iw/zoom/2)':"
+            "y='ih/2-(ih/zoom/2)':"
+            f"s={base_w}x{base_h}:fps={fps},"
+            f"trim=duration={segment_duration:.6f},setpts=PTS-STARTPTS"
             "[fg]"
         )
     filter_complex = ";".join(

@@ -8,6 +8,8 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from video_engine.render_routes import _v56_is_video_overlay_fitted_safe
+
 
 EmitEvent = Callable[..., None]
 QualityToCrf = Callable[[Any], str]
@@ -111,7 +113,7 @@ def can_use_ffmpeg_fitted_video(renderer: Any, seg: Dict[str, Any]) -> bool:
     motion_type = str((seg.get("motion_config") or {}).get("type") or "none")
     if motion_type not in {"none", "still_hold"} and renderer._ffmpeg_video_motion_cache_spec(seg.get("motion_config")) is None:
         return False
-    return renderer._video_overlay_fitted_safe(seg)
+    return _v56_is_video_overlay_fitted_safe(seg)
 
 
 def ffmpeg_fit_video_segment(

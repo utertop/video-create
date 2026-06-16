@@ -9,6 +9,7 @@ import render_backends as backends
 import video_engine_v5 as engine
 
 mlt_backend_module = importlib.import_module("render_backends.mlt_backend")
+render_stable_module = importlib.import_module("video_engine.render_stable")
 
 
 def test_merge_backend_reason_tags_deduplicates_and_preserves_order() -> None:
@@ -245,7 +246,7 @@ def test_v56_render_backend_dispatch_routes_mlt_backend_decision() -> None:
         available=False,
         reason=backends.MLT_BACKEND_REASON_NOT_INSTALLED,
     )
-    original_ffmpeg = engine.run_ffmpeg_stable_backend
+    original_ffmpeg = render_stable_module.run_ffmpeg_stable_backend
 
     def fake_ffmpeg_backend(engine_module, selected_decision, plan, output, params, plan_path=None):
         _ = (engine_module, plan, output, params, plan_path)
@@ -254,7 +255,7 @@ def test_v56_render_backend_dispatch_routes_mlt_backend_decision() -> None:
             actual_backend_name=backends.FFMPEG_STABLE_BACKEND_NAME,
         )
 
-    engine.run_ffmpeg_stable_backend = fake_ffmpeg_backend
+    render_stable_module.run_ffmpeg_stable_backend = fake_ffmpeg_backend
     try:
         execution = engine._v56_run_render_backend(
             decision,
@@ -263,7 +264,7 @@ def test_v56_render_backend_dispatch_routes_mlt_backend_decision() -> None:
             {"engine": "mlt_experimental"},
         )
     finally:
-        engine.run_ffmpeg_stable_backend = original_ffmpeg
+        render_stable_module.run_ffmpeg_stable_backend = original_ffmpeg
         mlt_backend_module.probe_mlt_runtime = original_probe
 
     assert execution.selected_backend_name == backends.MLT_BACKEND_NAME
@@ -291,8 +292,8 @@ def test_v56_render_backend_dispatch_routes_mlt_backend_decision_direct() -> Non
         available=False,
         reason=backends.MLT_BACKEND_REASON_NOT_INSTALLED,
     )
-    original_ffmpeg = engine.run_ffmpeg_stable_backend
-    original_legacy = engine.run_legacy_moviepy_backend
+    original_ffmpeg = render_stable_module.run_ffmpeg_stable_backend
+    original_legacy = render_stable_module.run_legacy_moviepy_backend
 
     def fail_ffmpeg(*args, **kwargs):
         raise RuntimeError("forced ffmpeg fallback failure")
@@ -304,8 +305,8 @@ def test_v56_render_backend_dispatch_routes_mlt_backend_decision_direct() -> Non
             actual_backend_name=backends.LEGACY_MOVIEPY_BACKEND_NAME,
         )
 
-    engine.run_ffmpeg_stable_backend = fail_ffmpeg
-    engine.run_legacy_moviepy_backend = fake_legacy_backend
+    render_stable_module.run_ffmpeg_stable_backend = fail_ffmpeg
+    render_stable_module.run_legacy_moviepy_backend = fake_legacy_backend
     try:
         execution = engine._v56_run_render_backend(
             decision,
@@ -314,8 +315,8 @@ def test_v56_render_backend_dispatch_routes_mlt_backend_decision_direct() -> Non
             {"engine": "mlt_experimental"},
         )
     finally:
-        engine.run_ffmpeg_stable_backend = original_ffmpeg
-        engine.run_legacy_moviepy_backend = original_legacy
+        render_stable_module.run_ffmpeg_stable_backend = original_ffmpeg
+        render_stable_module.run_legacy_moviepy_backend = original_legacy
         mlt_backend_module.probe_mlt_runtime = original_probe
 
     assert execution.actual_backend_name == backends.LEGACY_MOVIEPY_BACKEND_NAME
@@ -338,7 +339,7 @@ def test_v56_render_backend_dispatch_routes_mlt_backend_selected_branch() -> Non
         ],
         capability_flags=list(backends.MLT_BACKEND_CAPABILITY_FLAGS),
     )
-    original_run_mlt = engine.run_mlt_backend
+    original_run_mlt = render_stable_module.run_mlt_backend
 
     def fake_mlt_backend(engine_module, selected_decision, plan, output, params, plan_path=None):
         _ = (engine_module, plan, output, params, plan_path)
@@ -347,7 +348,7 @@ def test_v56_render_backend_dispatch_routes_mlt_backend_selected_branch() -> Non
             actual_backend_name=backends.MLT_BACKEND_NAME,
         )
 
-    engine.run_mlt_backend = fake_mlt_backend
+    render_stable_module.run_mlt_backend = fake_mlt_backend
     try:
         execution = engine._v56_run_render_backend(
             decision,
@@ -356,7 +357,7 @@ def test_v56_render_backend_dispatch_routes_mlt_backend_selected_branch() -> Non
             {"engine": "mlt_experimental"},
         )
     finally:
-        engine.run_mlt_backend = original_run_mlt
+        render_stable_module.run_mlt_backend = original_run_mlt
 
     assert execution.actual_backend_name == backends.MLT_BACKEND_NAME
     assert execution.fallback_used is None
