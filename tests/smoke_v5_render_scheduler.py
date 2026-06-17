@@ -392,7 +392,7 @@ def test_standard_visual_chunk_groups_prefer_ffmpeg_for_safe_image_overlay_units
     assert groups[0]["runtime_chunk_route_reason"] == "all_segments_ffmpeg_image_chunk_safe"
 
 
-def test_standard_visual_chunk_groups_prefer_ffmpeg_for_static_card_units() -> None:
+def test_standard_visual_chunk_groups_prefer_ffmpeg_for_prerendered_card_motion_units() -> None:
     root = reset_dir(Path("tests/tmp_vcs_standard_visual_ffmpeg_card_chunk"))
 
     background = root / "bg.jpg"
@@ -412,23 +412,23 @@ def test_standard_visual_chunk_groups_prefer_ffmpeg_for_static_card_units() -> N
                 "segment_id": "seg_title_1",
                 "type": "title",
                 "duration": 1.2,
-                "text": "Static Title",
-                "subtitle": "Card unit",
+                "text": "Animated Title",
+                "subtitle": "Prerendered card unit",
                 "start_time": 0.0,
                 "end_time": 1.2,
                 "transition_config": {"type": "cut", "duration": 0},
-                "title_style": {"preset": "cinematic_bold", "motion": "static_hold"},
+                "title_style": {"preset": "cinematic_bold", "motion": "fade_slide_up"},
             },
             {
                 "segment_id": "seg_end_1",
                 "type": "end",
                 "duration": 1.2,
-                "text": "Static End",
-                "subtitle": "Card unit",
+                "text": "Postcard End",
+                "subtitle": "Prerendered card unit",
                 "start_time": 1.2,
                 "end_time": 2.4,
                 "transition_config": {"type": "cut", "duration": 0},
-                "title_style": {"preset": "cinematic_bold", "motion": "static_hold"},
+                "title_style": {"preset": "travel_postcard", "motion": "postcard_drift"},
             },
         ],
     }
@@ -443,8 +443,8 @@ def test_standard_visual_chunk_groups_prefer_ffmpeg_for_static_card_units() -> N
             "performance_mode": "balanced",
             "title_background_path": str(background),
             "end_background_path": str(background),
-            "title_style": {"preset": "cinematic_bold", "motion": "static_hold"},
-            "end_title_style": {"preset": "cinematic_bold", "motion": "static_hold"},
+            "title_style": {"preset": "cinematic_bold", "motion": "fade_slide_up"},
+            "end_title_style": {"preset": "travel_postcard", "motion": "postcard_drift"},
         },
     )
     groups = renderer._build_standard_visual_chunk_groups()
@@ -770,7 +770,7 @@ if __name__ == "__main__":
     test_render_backend_selector_keeps_preview_on_legacy_backend()
     test_standard_visual_chunk_groups_prefer_ffmpeg_for_safe_image_units()
     test_standard_visual_chunk_groups_prefer_ffmpeg_for_safe_image_overlay_units()
-    test_standard_visual_chunk_groups_prefer_ffmpeg_for_static_card_units()
+    test_standard_visual_chunk_groups_prefer_ffmpeg_for_prerendered_card_motion_units()
     test_standard_visual_chunk_groups_prefer_ffmpeg_for_safe_video_fit_units()
     test_stable_chunk_cache_key_tracks_source_file_changes()
     test_proxy_media_cache_is_opt_in_and_reportable()

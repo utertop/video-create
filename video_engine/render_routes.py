@@ -15,6 +15,8 @@ _V56_SAFE_OVERLAY_MOTIONS = {
     "postcard_drift",
 }
 
+_V56_SAFE_CARD_MOTIONS = set(_V56_SAFE_OVERLAY_MOTIONS)
+
 
 def _visual_segment_mix(segments: List[Dict[str, Any]]) -> Dict[str, int]:
     visual_segments = [seg for seg in segments if str(seg.get("type") or "") in {"image", "video"}]
@@ -221,7 +223,7 @@ def _v56_is_ffmpeg_card_chunk_candidate(
     if transition_type not in {"none", "cut"} or transition_duration > 0.05:
         return False
     motion = str(_v56_resolved_card_style(seg, params).get("motion") or "fade_slide_up")
-    return motion == "static_hold"
+    return motion in _V56_SAFE_CARD_MOTIONS
 
 
 def _v56_is_ffmpeg_fitted_video_chunk_route(route: str) -> bool:

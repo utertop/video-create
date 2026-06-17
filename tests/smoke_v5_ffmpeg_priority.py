@@ -148,7 +148,9 @@ def test_ffmpeg_image_chunk_renders_safe_image_only_stable_chunk() -> None:
 
     rendered = list((root / ".video_create_project" / "render_cache" / "photo_segments_ffmpeg").glob("*.mp4"))
     assert rendered, "expected FFmpeg image segment cache"
-def test_ffmpeg_card_chunk_renders_safe_static_cards() -> None:
+
+
+def test_ffmpeg_card_chunk_renders_safe_prerendered_card_motions() -> None:
     root = reset_dir(Path("tests/tmp_vcs_ffmpeg_card_chunk"))
 
     background = root / "background.jpg"
@@ -168,25 +170,25 @@ def test_ffmpeg_card_chunk_renders_safe_static_cards() -> None:
                 "segment_id": "seg_title_0001",
                 "type": "title",
                 "duration": 1.1,
-                "text": "Static Title",
+                "text": "Animated Title",
                 "subtitle": "FFmpeg card chunk",
                 "start_time": 0.0,
                 "end_time": 1.1,
                 "transition": "cut",
                 "transition_config": {"type": "cut", "duration": 0},
-                "title_style": {"preset": "cinematic_bold", "motion": "static_hold"},
+                "title_style": {"preset": "cinematic_bold", "motion": "fade_slide_up"},
             },
             {
                 "segment_id": "seg_end_0001",
                 "type": "end",
                 "duration": 1.1,
-                "text": "Static End",
+                "text": "Postcard End",
                 "subtitle": "FFmpeg card chunk",
                 "start_time": 1.1,
                 "end_time": 2.2,
                 "transition": "cut",
                 "transition_config": {"type": "cut", "duration": 0},
-                "title_style": {"preset": "cinematic_bold", "motion": "static_hold"},
+                "title_style": {"preset": "travel_postcard", "motion": "postcard_drift"},
             },
         ],
     }
@@ -198,8 +200,8 @@ def test_ffmpeg_card_chunk_renders_safe_static_cards() -> None:
         "performance_mode": "stable",
         "title_background_path": str(background),
         "end_background_path": str(background),
-        "title_style": {"preset": "cinematic_bold", "motion": "static_hold"},
-        "end_title_style": {"preset": "cinematic_bold", "motion": "static_hold"},
+        "title_style": {"preset": "cinematic_bold", "motion": "fade_slide_up"},
+        "end_title_style": {"preset": "travel_postcard", "motion": "postcard_drift"},
     }
 
     groups = engine._v56_build_chunk_groups(plan["segments"], 30, params)
@@ -215,7 +217,9 @@ def test_ffmpeg_card_chunk_renders_safe_static_cards() -> None:
     assert route_counts.get("ffmpeg_card_chunk") == 1
 
     rendered = list((root / ".video_create_project" / "render_cache" / "card_segments").glob("*.mp4"))
-    assert rendered, "expected static card segment cache"
+    assert rendered, "expected prerendered card segment cache"
+
+
 def test_ffmpeg_image_chunk_renders_safe_image_overlay_stable_chunk() -> None:
     root = reset_dir(Path("tests/tmp_vcs_ffmpeg_image_overlay_chunk"))
 
@@ -780,7 +784,7 @@ def test_ffmpeg_motion_cache_handles_simple_video_motion() -> None:
 
 
 if __name__ == "__main__":
-    for test in [test_encoder_selection_prefers_hardware_for_long_stable_exports, test_encoder_selection_keeps_preview_on_cpu, test_encoder_selection_respects_explicit_cpu_override, test_ffmpeg_priority_fits_simple_video_segments, test_ffmpeg_video_segment_cache_stats, test_ffmpeg_image_chunk_renders_safe_image_only_stable_chunk, test_ffmpeg_card_chunk_renders_safe_static_cards, test_ffmpeg_image_chunk_renders_safe_image_overlay_stable_chunk, test_ffmpeg_fitted_video_chunk_renders_safe_video_motion_and_overlay, test_ffmpeg_fitted_video_chunk_allows_fade_only_overlay_alias, test_ffmpeg_priority_writes_lightweight_chunk_directly, test_ffmpeg_direct_chunk_unifies_source_and_silent_audio, test_ffmpeg_concat_keeps_audio_chunks_out_of_moviepy, test_ffmpeg_fitted_video_allows_lightweight_overlay_and_soft_transition, test_ffmpeg_fitted_video_rejects_unsafe_overlay_or_motion_for_safe_expansion, test_ffmpeg_motion_cache_handles_simple_video_motion]:
+    for test in [test_encoder_selection_prefers_hardware_for_long_stable_exports, test_encoder_selection_keeps_preview_on_cpu, test_encoder_selection_respects_explicit_cpu_override, test_ffmpeg_priority_fits_simple_video_segments, test_ffmpeg_video_segment_cache_stats, test_ffmpeg_image_chunk_renders_safe_image_only_stable_chunk, test_ffmpeg_card_chunk_renders_safe_prerendered_card_motions, test_ffmpeg_image_chunk_renders_safe_image_overlay_stable_chunk, test_ffmpeg_fitted_video_chunk_renders_safe_video_motion_and_overlay, test_ffmpeg_fitted_video_chunk_allows_fade_only_overlay_alias, test_ffmpeg_priority_writes_lightweight_chunk_directly, test_ffmpeg_direct_chunk_unifies_source_and_silent_audio, test_ffmpeg_concat_keeps_audio_chunks_out_of_moviepy, test_ffmpeg_fitted_video_allows_lightweight_overlay_and_soft_transition, test_ffmpeg_fitted_video_rejects_unsafe_overlay_or_motion_for_safe_expansion, test_ffmpeg_motion_cache_handles_simple_video_motion]:
         test()
     print("V5 FFmpeg priority smoke test passed")
 
