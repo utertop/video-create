@@ -115,6 +115,7 @@ export type {
   V5TimelinePerformancePolicy,
   V5TimelinePresentation,
   V5TimelinePreviewMode,
+  V5TimelinePreviewQualityProfile,
   V5TimelineProjectRef,
   V5TimelineRecomputeScope,
   V5TimelineSourceRef,

@@ -3,6 +3,7 @@ import type {
   V5TimelineClip,
   V5TimelineContentRef,
   V5TimelinePresentation,
+  V5TimelinePreviewQualityProfile,
 } from "../../lib/engine";
 import { resolveRecomputeScope, type TimelineEditOperation } from "./timelineInvalidation";
 
@@ -153,6 +154,59 @@ export function updateBgmCueVolume(timeline: V5Timeline, clipId: string, volume:
   );
 }
 
+export function updatePreviewQualityProfile(
+  timeline: V5Timeline,
+  profile: V5TimelinePreviewQualityProfile,
+): V5Timeline {
+  const resolved = resolvePreviewQualityProfile(profile);
+  const now = new Date().toISOString();
+  return {
+    ...timeline,
+    performance_policy: {
+      ...(timeline.performance_policy || {
+        final: {
+          uses_original_source: true,
+          allow_proxy: false,
+          cache_namespace: "final",
+        },
+        cache_fingerprint_version: "timeline_cache_v1",
+      }),
+      preview: {
+        ...(timeline.performance_policy?.preview || { cache_namespace: "preview" }),
+        profile,
+        mode: resolved.mode,
+        height: resolved.height,
+        fps: resolved.fps,
+        cache_namespace: "preview",
+      },
+      final: {
+        ...(timeline.performance_policy?.final || {}),
+        uses_original_source: true,
+        allow_proxy: false,
+        cache_namespace: "final",
+      },
+      thumbnail: {
+        ...(timeline.performance_policy?.thumbnail || {}),
+        cache_namespace: "thumbnail",
+      },
+      proxy: {
+        ...(timeline.performance_policy?.proxy || {}),
+        cache_namespace: "proxy",
+      },
+      cache_fingerprint_version: timeline.performance_policy?.cache_fingerprint_version || "timeline_cache_v1",
+    },
+    metadata: {
+      ...(timeline.metadata || {}),
+      updated_at: now,
+      editor_mode: "guided",
+      preview_settings_dirty: true,
+      preview_quality_profile: profile,
+      preview_quality_updated_at: now,
+      last_edit_operation: "preview_quality_change",
+    },
+  };
+}
+
 function applyClipEdit(
   timeline: V5Timeline,
   clipId: string,
@@ -248,4 +302,24 @@ function findClipLocation(timeline: V5Timeline, clipId: string) {
 
 function roundTime(value: number): number {
   return Math.round(value * 1000) / 1000;
+}
+
+function resolvePreviewQualityProfile(profile: V5TimelinePreviewQualityProfile): {
+  mode: "low_res" | "proxy" | "original";
+  height?: number;
+  fps: number;
+} {
+  switch (profile) {
+    case "performance":
+      return { mode: "low_res", height: 540, fps: 15 };
+    case "high":
+      return { mode: "proxy", height: 1080, fps: 30 };
+    case "original":
+      return { mode: "original", fps: 30 };
+    case "auto":
+      return { mode: "proxy", height: 720, fps: 24 };
+    case "balanced":
+    default:
+      return { mode: "proxy", height: 720, fps: 24 };
+  }
 }

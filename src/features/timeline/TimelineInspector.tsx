@@ -1,5 +1,6 @@
 import { X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { TITLE_MOTIONS, TITLE_PRESETS } from "../../components/TitleStylePreview";
 import type { V5TimelineClip, V5TimelinePresentation } from "../../lib/engine";
 import { formatTimelineTime } from "./TimelineRuler";
 
@@ -23,18 +24,26 @@ interface TimelineInspectorProps {
   onMoveClip: (clipId: string, targetIndex: number) => void;
 }
 
-const TITLE_PRESETS = [
-  "cinematic_bold",
-  "travel_postcard",
-  "minimal_editorial",
-  "film_subtitle",
-  "documentary_lower_third",
-];
-
 const TITLE_MAX_LENGTH = 80;
 const SUBTITLE_MAX_LENGTH = 160;
 const DURATION_MIN_SECONDS = 0.1;
 const DURATION_MAX_SECONDS = 300;
+const TRANSITION_MAX_SECONDS = 3;
+
+const TITLE_POSITIONS = [
+  { value: "center", label: "Center" },
+  { value: "lower_center", label: "Lower Center" },
+  { value: "lower_left", label: "Lower Left" },
+];
+
+const TRANSITION_TYPES = [
+  { value: "none", label: "None" },
+  { value: "cut", label: "Cut" },
+  { value: "soft_crossfade", label: "Soft Crossfade" },
+  { value: "fade_through_dark", label: "Fade Through Dark" },
+  { value: "fade_through_white", label: "Fade Through White" },
+  { value: "bridge_blur", label: "Bridge Blur" },
+];
 
 export function TimelineInspector({
   clip,
@@ -70,6 +79,10 @@ export function TimelineInspector({
   const isDurationEditable = clip ? ["image_asset", "title_card", "chapter_card"].includes(clip.kind) : false;
   const isAudioClip = clip?.kind === "audio_bgm";
   const currentPreset = clip?.presentation?.title_style?.preset || "";
+  const currentMotion = clip?.presentation?.title_style?.motion || "";
+  const currentPosition = clip?.presentation?.title_style?.position || "";
+  const currentTransitionType = clip?.presentation?.transition_type || "";
+  const currentTransitionDuration = safeTransitionDuration(clip?.presentation?.transition_duration);
   const bgmVolume = typeof clip?.metadata?.bgm_volume === "number" ? clip.metadata.bgm_volume : 0.28;
   const controlsDisabled = !editable || isApplyingTimeline;
 
@@ -124,6 +137,18 @@ export function TimelineInspector({
     const numericValue = Number(value);
     if (!isValidDuration(numericValue)) return;
     onUpdateDuration(clip.clip_id, numericValue);
+  };
+
+  const handleTransitionTypeChange = (value: string) => {
+    const nextDuration = value === "none" || value === "cut"
+      ? 0
+      : currentTransitionDuration > 0
+        ? currentTransitionDuration
+        : 0.3;
+    onUpdatePresentation(clip.clip_id, {
+      transition_type: value,
+      transition_duration: nextDuration,
+    });
   };
 
   return (
@@ -242,9 +267,81 @@ export function TimelineInspector({
                   >
                     <option value="">Default</option>
                     {TITLE_PRESETS.map((preset) => (
-                      <option key={preset} value={preset}>{preset}</option>
+                      <option key={preset.value} value={preset.value}>{preset.label}</option>
                     ))}
                   </select>
+                </label>
+                <label>
+                  <span>Motion</span>
+                  <select
+                    value={currentMotion}
+                    disabled={controlsDisabled}
+                    onChange={(event) =>
+                      onUpdatePresentation(clip.clip_id, {
+                        title_style: {
+                          ...(clip.presentation?.title_style || {}),
+                          motion: event.currentTarget.value,
+                        },
+                      })
+                    }
+                  >
+                    <option value="">Default</option>
+                    {TITLE_MOTIONS.map((motion) => (
+                      <option key={motion.value} value={motion.value}>{motion.label}</option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  <span>Position</span>
+                  <select
+                    value={currentPosition}
+                    disabled={controlsDisabled}
+                    onChange={(event) =>
+                      onUpdatePresentation(clip.clip_id, {
+                        title_style: {
+                          ...(clip.presentation?.title_style || {}),
+                          position: event.currentTarget.value,
+                        },
+                      })
+                    }
+                  >
+                    <option value="">Default</option>
+                    {TITLE_POSITIONS.map((position) => (
+                      <option key={position.value} value={position.value}>{position.label}</option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  <span>Transition</span>
+                  <select
+                    value={currentTransitionType}
+                    disabled={controlsDisabled}
+                    onChange={(event) => handleTransitionTypeChange(event.currentTarget.value)}
+                  >
+                    <option value="">Default</option>
+                    {TRANSITION_TYPES.map((transition) => (
+                      <option key={transition.value} value={transition.value}>{transition.label}</option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  <span>Transition Duration</span>
+                  <div className="timeline-duration-control">
+                    <input
+                      type="number"
+                      min="0"
+                      max={TRANSITION_MAX_SECONDS}
+                      step="0.05"
+                      value={currentTransitionDuration}
+                      disabled={controlsDisabled || !currentTransitionType || currentTransitionType === "none" || currentTransitionType === "cut"}
+                      onChange={(event) =>
+                        onUpdatePresentation(clip.clip_id, {
+                          transition_duration: clampTransitionDuration(Number(event.currentTarget.value)),
+                        })
+                      }
+                    />
+                    <span>seconds</span>
+                  </div>
                 </label>
               </>
             ) : (
@@ -352,4 +449,13 @@ function roundDuration(value: number): number {
 
 function isValidDuration(value: number): boolean {
   return Number.isFinite(value) && value >= DURATION_MIN_SECONDS && value <= DURATION_MAX_SECONDS;
+}
+
+function safeTransitionDuration(value: number | null | undefined): number {
+  return clampTransitionDuration(Number(value ?? 0));
+}
+
+function clampTransitionDuration(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.round(Math.max(0, Math.min(TRANSITION_MAX_SECONDS, value)) * 100) / 100;
 }

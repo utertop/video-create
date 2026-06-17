@@ -1221,7 +1221,9 @@ export function App() {
       setTimelineAutosave({ status: "idle" });
       return;
     }
-    if (!state.v5Timeline.metadata?.dirty) {
+    const timelineForAutosave = state.v5Timeline;
+    const needsTimelineSave = Boolean(timelineForAutosave.metadata?.dirty || timelineForAutosave.metadata?.preview_settings_dirty);
+    if (!needsTimelineSave) {
       setTimelineAutosave((current) => (current.status === "idle" ? current : { status: "idle" }));
       return;
     }
@@ -1231,9 +1233,23 @@ export function App() {
       current.status === "saving" ? current : { status: "saving", savedAt: current.savedAt || null }
     ));
     const timeoutId = window.setTimeout(() => {
-      const timelineToSave = state.v5Timeline;
+      const shouldClearPreviewSettingsDirty = Boolean(
+        timelineForAutosave.metadata?.preview_settings_dirty && !timelineForAutosave.metadata?.dirty,
+      );
+      const timelineToSave = shouldClearPreviewSettingsDirty
+        ? {
+            ...timelineForAutosave,
+            metadata: {
+              ...(timelineForAutosave.metadata || {}),
+              preview_settings_dirty: false,
+            },
+          }
+        : timelineForAutosave;
       void saveTimelineV5(v5TimelinePath, JSON.stringify(timelineToSave, null, 2))
         .then(() => {
+          if (shouldClearPreviewSettingsDirty) {
+            state.patch({ v5Timeline: timelineToSave });
+          }
           setTimelineAutosave({
             status: "saved",
             savedAt: new Date().toISOString(),

@@ -10,6 +10,7 @@ from video_engine.timeline import (
     update_clip_duration,
     update_clip_enabled,
     update_clip_presentation,
+    update_preview_quality_profile,
 )
 
 
@@ -59,6 +60,13 @@ def _timeline() -> dict:
                 **_clip("clip_bgm_1", "audio_bgm", "track_audio_main", 0, 9),
                 "metadata": {"bgm_volume": 0.28},
             },
+        },
+        "performance_policy": {
+            "preview": {"profile": "balanced", "mode": "proxy", "height": 720, "fps": 24, "cache_namespace": "preview"},
+            "final": {"uses_original_source": True, "allow_proxy": False, "cache_namespace": "final"},
+            "thumbnail": {"cache_namespace": "thumbnail"},
+            "proxy": {"cache_namespace": "proxy"},
+            "cache_fingerprint_version": "timeline_cache_v1",
         },
         "metadata": {"editor_mode": "auto", "dirty": False},
     }
@@ -135,10 +143,34 @@ def test_bgm_volume_edit_stays_audio_scoped() -> None:
     assert clip["invalidation_hint"]["requires_audio_relayout"] is False
 
 
+def test_preview_quality_profile_updates_preview_policy_only() -> None:
+    timeline = update_preview_quality_profile(_timeline(), "high")
+    preview = timeline["performance_policy"]["preview"]
+    final = timeline["performance_policy"]["final"]
+    assert preview["profile"] == "high"
+    assert preview["mode"] == "proxy"
+    assert preview["height"] == 1080
+    assert preview["fps"] == 30
+    assert preview["cache_namespace"] == "preview"
+    assert final["uses_original_source"] is True
+    assert final["allow_proxy"] is False
+    assert final["cache_namespace"] == "final"
+    assert timeline["metadata"]["preview_settings_dirty"] is True
+    assert timeline["metadata"]["last_edit_operation"] == "preview_quality_change"
+    assert timeline["metadata"].get("dirty") is False
+
+    original = update_preview_quality_profile(timeline, "original")
+    original_preview = original["performance_policy"]["preview"]
+    assert original_preview["profile"] == "original"
+    assert original_preview["mode"] == "original"
+    assert "height" not in original_preview
+
+
 if __name__ == "__main__":
     test_clip_enable_edit_marks_dirty_and_scoped()
     test_title_content_and_style_edits_are_clip_scoped()
     test_duration_edit_shifts_following_clips()
     test_move_clip_reorders_and_relays_track()
     test_bgm_volume_edit_stays_audio_scoped()
+    test_preview_quality_profile_updates_preview_policy_only()
     print("V5 timeline edit ops smoke test passed")

@@ -555,6 +555,58 @@ def update_bgm_cue_volume(timeline: Dict[str, Any], clip_id: str, volume: float)
     )
 
 
+def update_preview_quality_profile(timeline: Dict[str, Any], profile: str) -> Dict[str, Any]:
+    result = copy.deepcopy(timeline if isinstance(timeline, dict) else {})
+    profile = str(profile or "balanced")
+    if profile not in {"auto", "performance", "balanced", "high", "original"}:
+        profile = "balanced"
+    resolved = _resolve_preview_quality_profile(profile)
+    policy = dict(result.get("performance_policy") or {})
+    preview = dict(policy.get("preview") or {})
+    preview.update(
+        {
+            "profile": profile,
+            "mode": resolved["mode"],
+            "fps": resolved["fps"],
+            "cache_namespace": "preview",
+        }
+    )
+    if resolved.get("height") is None:
+        preview.pop("height", None)
+    else:
+        preview["height"] = resolved["height"]
+    policy["preview"] = preview
+
+    final = dict(policy.get("final") or {})
+    final.update(
+        {
+            "uses_original_source": True,
+            "allow_proxy": False,
+            "cache_namespace": "final",
+        }
+    )
+    policy["final"] = final
+    policy["thumbnail"] = {**dict(policy.get("thumbnail") or {}), "cache_namespace": "thumbnail"}
+    policy["proxy"] = {**dict(policy.get("proxy") or {}), "cache_namespace": "proxy"}
+    policy["cache_fingerprint_version"] = policy.get("cache_fingerprint_version") or TIMELINE_CACHE_FINGERPRINT_VERSION
+    result["performance_policy"] = policy
+
+    now = datetime.now().isoformat()
+    metadata = dict(result.get("metadata") or {})
+    metadata.update(
+        {
+            "updated_at": now,
+            "editor_mode": "guided",
+            "preview_settings_dirty": True,
+            "preview_quality_profile": profile,
+            "preview_quality_updated_at": now,
+            "last_edit_operation": "preview_quality_change",
+        }
+    )
+    result["metadata"] = metadata
+    return result
+
+
 def build_clip_from_segment(
     segment: Dict[str, Any],
     occurrence: int,
@@ -688,6 +740,7 @@ def default_performance_policy(render_plan: Dict[str, Any]) -> Dict[str, Any]:
     settings = render_plan.get("render_settings") or {}
     return {
         "preview": {
+            "profile": "balanced",
             "mode": "proxy",
             "height": int(settings.get("preview_height") or 540),
             "fps": min(int(settings.get("fps") or 30), 15),
@@ -704,6 +757,16 @@ def default_performance_policy(render_plan: Dict[str, Any]) -> Dict[str, Any]:
         "proxy": {"cache_namespace": "proxy"},
         "cache_fingerprint_version": TIMELINE_CACHE_FINGERPRINT_VERSION,
     }
+
+
+def _resolve_preview_quality_profile(profile: str) -> Dict[str, Any]:
+    if profile == "performance":
+        return {"mode": "low_res", "height": 540, "fps": 15}
+    if profile == "high":
+        return {"mode": "proxy", "height": 1080, "fps": 30}
+    if profile == "original":
+        return {"mode": "original", "height": None, "fps": 30}
+    return {"mode": "proxy", "height": 720, "fps": 24}
 
 
 def _audio_clip(

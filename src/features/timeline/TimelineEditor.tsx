@@ -1,8 +1,16 @@
 import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
-import type { V5RenderPlan, V5RenderSegment, V5Timeline, V5TimelineClip, V5TimelineTrack } from "../../lib/engine";
+import type {
+  V5RenderPlan,
+  V5RenderSegment,
+  V5Timeline,
+  V5TimelineClip,
+  V5TimelinePreviewQualityProfile,
+  V5TimelineTrack,
+} from "../../lib/engine";
 import { TimelineInspector } from "./TimelineInspector";
 import {
   moveClip,
+  updatePreviewQualityProfile,
   updateBgmCueVolume,
   updateClipContent,
   updateClipDuration,
@@ -32,6 +40,14 @@ interface TimelineViewModel {
   clipCount: number;
 }
 
+const PREVIEW_QUALITY_OPTIONS: Array<{ value: V5TimelinePreviewQualityProfile; label: string }> = [
+  { value: "auto", label: "Auto" },
+  { value: "performance", label: "Performance" },
+  { value: "balanced", label: "Balanced" },
+  { value: "high", label: "High" },
+  { value: "original", label: "Original" },
+];
+
 export function TimelineEditor({
   timeline,
   renderPlan,
@@ -57,6 +73,7 @@ export function TimelineEditor({
   const basePixelsPerSecond = resolvePixelsPerSecond(viewModel.duration);
   const pixelsPerSecond = basePixelsPerSecond * zoomLevel;
   const dirty = Boolean(timeline?.metadata?.dirty);
+  const previewProfile = resolvePreviewQualityProfile(timeline);
   const timelineHistory = useTimelineHistory(timeline, onTimelineChange);
   const orderedClipIds = useMemo(() => {
     const ids: string[] = [];
@@ -77,6 +94,11 @@ export function TimelineEditor({
   const handleMoveClip = (clipId: string, targetIndex: number) => {
     if (!timeline || !editable) return;
     commitTimeline(moveClip(timeline, clipId, targetIndex));
+  };
+
+  const handlePreviewQualityChange = (profile: V5TimelinePreviewQualityProfile) => {
+    if (!timeline || !editable) return;
+    onTimelineChange?.(updatePreviewQualityProfile(timeline, profile));
   };
 
   const handleDrop = (targetClipId: string) => {
@@ -163,6 +185,18 @@ export function TimelineEditor({
         <button type="button" onClick={() => setZoomLevel(1)}>
           Fit
         </button>
+        <label className="timeline-preview-quality-control">
+          <span>Preview</span>
+          <select
+            value={previewProfile}
+            disabled={!editable || isApplyingTimeline}
+            onChange={(event) => handlePreviewQualityChange(event.currentTarget.value as V5TimelinePreviewQualityProfile)}
+          >
+            {PREVIEW_QUALITY_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
+          </select>
+        </label>
       </div>
 
       <div className="timeline-editor-grid">
@@ -257,6 +291,18 @@ function buildTimelineViewModel(timeline: V5Timeline | null, renderPlan: V5Rende
   }
 
   return buildFallbackTimelineViewModel(renderPlan);
+}
+
+function resolvePreviewQualityProfile(timeline: V5Timeline | null): V5TimelinePreviewQualityProfile {
+  const metadataProfile = timeline?.metadata?.preview_quality_profile;
+  if (metadataProfile && PREVIEW_QUALITY_OPTIONS.some((option) => option.value === metadataProfile)) return metadataProfile;
+  const policyProfile = timeline?.performance_policy?.preview?.profile;
+  if (policyProfile && PREVIEW_QUALITY_OPTIONS.some((option) => option.value === policyProfile)) return policyProfile;
+  const preview = timeline?.performance_policy?.preview;
+  if (preview?.mode === "original") return "original";
+  if (preview?.mode === "low_res") return "performance";
+  if ((preview?.height || 0) >= 1080) return "high";
+  return "balanced";
 }
 
 function buildFallbackTimelineViewModel(renderPlan: V5RenderPlan | null): TimelineViewModel {

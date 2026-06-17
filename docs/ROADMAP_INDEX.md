@@ -37,6 +37,7 @@
 ### 2. 产品成熟度与渲染后端主线
 
 - [PRO_EDITOR_GAP_AND_MATURITY_ROADMAP.md](./PRO_EDITOR_GAP_AND_MATURITY_ROADMAP.md)
+- [AUTOMATED_PRO_TIMELINE_WORKBENCH_PLAN_2026_06.md](./AUTOMATED_PRO_TIMELINE_WORKBENCH_PLAN_2026_06.md)
 - [DAVINCI_BENCHMARK_GAP_AND_EXECUTION_ROADMAP.md](./DAVINCI_BENCHMARK_GAP_AND_EXECUTION_ROADMAP.md)
 - [DAVINCI_P0_EXECUTION_TASKLIST.md](./DAVINCI_P0_EXECUTION_TASKLIST.md)
 - [TIMELINE_SCHEMA_V1.md](./TIMELINE_SCHEMA_V1.md)
@@ -49,6 +50,7 @@
 适合在以下问题下优先查看：
 
 - 当前项目和 `Final Cut Pro / DaVinci Resolve / Premiere Pro` 的差距在哪里
+- 自动化剪辑项目应该如何向专业化时间轴工作台靠拢
 - 如果真要往“更像达芬奇”的方向走，最该先补哪些能力
 - 如果现在就开始做，P0 应该拆成哪些可执行任务
 - 时间线内核第一版的数据模型应该怎么定义
@@ -63,6 +65,7 @@
 这组文档回答的是：
 
 - 当前项目的真实定位
+- 自动生成初剪、时间轴微调、局部重算、稳定导出的可执行方案
 - 当前距离成熟商业产品还有多远
 - 与专业剪辑器的关键差距
 - 对标达芬奇的能力差距表与建议执行顺序

@@ -18,6 +18,7 @@ from video_engine.timeline import (
     update_clip_content,
     update_clip_duration,
     update_clip_enabled,
+    update_clip_presentation,
 )
 from video_engine.timeline_compile import compile_from_timeline
 
@@ -107,6 +108,15 @@ def edited_timeline(base_timeline: Dict[str, Any]) -> Dict[str, Any]:
 
     timeline = update_clip_enabled(timeline, image_1, False)
     timeline = update_clip_content(timeline, title_clip_id, {"title_text": "Edited Timeline Title"})
+    timeline = update_clip_presentation(
+        timeline,
+        title_clip_id,
+        {
+            "title_style": {"preset": "travel_postcard", "motion": "postcard_drift", "position": "lower_center"},
+            "transition_type": "soft_crossfade",
+            "transition_duration": 0.45,
+        },
+    )
     timeline = update_clip_duration(timeline, image_2, 4.5)
     timeline = move_clip(timeline, image_3, 0)
     timeline = update_bgm_cue_volume(timeline, audio_clip_id, 0.42)
@@ -128,7 +138,13 @@ def assert_compiled_from_timeline(plan: Dict[str, Any]) -> None:
 
     assert "asset_image_01" not in asset_order
     assert asset_order.index("asset_image_03") < asset_order.index("asset_image_02")
-    assert any(seg.get("text") == "Edited Timeline Title" for seg in segments)
+    title_segment = next(seg for seg in segments if seg.get("text") == "Edited Timeline Title")
+    assert title_segment["title_style"]["preset"] == "travel_postcard"
+    assert title_segment["title_style"]["motion"] == "postcard_drift"
+    assert title_segment["title_style"]["position"] == "lower_center"
+    assert title_segment["transition"] == "soft_crossfade"
+    assert title_segment["transition_config"]["type"] == "soft_crossfade"
+    assert title_segment["transition_config"]["duration"] == 0.45
 
     image_2 = next(seg for seg in segments if seg.get("asset_id") == "asset_image_02")
     assert image_2["duration"] == 4.5

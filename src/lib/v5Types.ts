@@ -99,6 +99,7 @@ export type V5TimelineRecomputeScope =
   | "final_render_only"
   | "full_rebuild";
 export type V5TimelinePreviewMode = "proxy" | "low_res" | "original";
+export type V5TimelinePreviewQualityProfile = "auto" | "performance" | "balanced" | "high" | "original";
 export type V5TimelineCacheNamespace = "preview" | "final" | "thumbnail" | "proxy";
 
 export interface V5Timeline {
@@ -236,6 +237,7 @@ export interface V5TimelineDependency {
 
 export interface V5TimelinePerformancePolicy {
   preview: {
+    profile?: V5TimelinePreviewQualityProfile;
     mode: V5TimelinePreviewMode;
     height?: number;
     fps?: number;
@@ -266,6 +268,9 @@ export interface V5TimelineMetadata {
   dirty?: boolean;
   dirty_reason?: string | null;
   last_edit_operation?: string | null;
+  preview_settings_dirty?: boolean;
+  preview_quality_profile?: V5TimelinePreviewQualityProfile;
+  preview_quality_updated_at?: string | null;
 }
 
 export interface V5MediaLibrary {
@@ -619,4 +624,3 @@ export interface V5CacheEntry {
   segment_path?: string | null;
   generated_at?: string;
 }
-
