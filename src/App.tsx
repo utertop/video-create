@@ -22,7 +22,7 @@ import {
   MapPin,
   Palmtree,
 } from "lucide-react";
-import { useMemo, useState, useEffect, useRef } from "react";
+import { useMemo, useState, useEffect, useRef, useCallback } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { listen } from "@tauri-apps/api/event";
 import { convertFileSrc } from "@tauri-apps/api/core";
@@ -59,6 +59,7 @@ import {
   saveTimelineV5,
   timelineCompileV5,
   timelineGenerateV5,
+  timelinePreviewAssetsV5,
   renderV5,
   previewRenderV5,
   V5StoryBlueprint,
@@ -159,6 +160,13 @@ export function App() {
     savedAt?: string | null;
     message?: string | null;
   }>({ status: "idle" });
+  const [isTimelinePreviewAssetsRefreshing, setIsTimelinePreviewAssetsRefreshing] = useState(false);
+  const [timelinePreviewAssetsProgress, setTimelinePreviewAssetsProgress] = useState<{
+    current: number;
+    total: number;
+    status: string;
+    message: string | null;
+  } | null>(null);
   const [renderPreviewPath, setRenderPreviewPath] = useState<string | null>(null);
   const [isCancelling, setIsCancelling] = useState(false);
   const [isPlanningWorkflow, setIsPlanningWorkflow] = useState(false);
@@ -209,6 +217,8 @@ export function App() {
   const sessionFirstExportRecordedRef = useRef(false);
   const startupTelemetryRecordedRef = useRef(false);
   const skipResetRef = useRef(false);
+  const previewAssetsRequestRef = useRef(0);
+  const previewAssetsRefreshingRef = useRef(false);
   const [appView, setAppView] = useState<"studio" | "diagnostics" | "settingsCenter">("studio");
   const [activeNav, setActiveNav] = useState("workspace");
 
@@ -672,6 +682,7 @@ export function App() {
         v5Blueprint: recoveredStudio?.v5Blueprint || loaded.blueprint,
         v5RenderPlan: recoveredStudio?.v5RenderPlan || loaded.renderPlan,
         v5Timeline: chooseRecoveredTimeline(recoveredStudio?.v5Timeline, loaded.timeline),
+        v5TimelinePreviewManifest: recoveredStudio?.v5TimelinePreviewManifest || loaded.timelinePreviewManifest,
       });
       if (recovered) {
         applyRecoveredWorkspaceRuntimeState(recovered);
@@ -700,6 +711,7 @@ export function App() {
         v5Blueprint: null,
         v5RenderPlan: null,
         v5Timeline: null,
+        v5TimelinePreviewManifest: null,
         titleBackgroundPath: null,
         endBackgroundPath: null,
       });
@@ -1058,6 +1070,16 @@ export function App() {
       const raw = event.payload;
       const structured = parseVideoEvent(raw);
       if (structured) {
+        if (structured.type === "timeline_preview_assets") {
+          setTimelinePreviewAssetsProgress({
+            current: Number(structured.current || 0),
+            total: Math.max(1, Number(structured.total || 1)),
+            status: String(structured.status || "running"),
+            message: structured.message || null,
+          });
+          applyStructuredEvent(structured, setLogs, setMaterials, setPhotoSegmentCache, setVideoSegmentCache, setProxyMedia);
+          return;
+        }
         syncRenderQueueEvent(structured);
         const nextPhase = derivePhaseFromStructuredEvent(structured);
         if (nextPhase) setPhase(nextPhase);
@@ -1133,6 +1155,7 @@ export function App() {
 
   const v5PlanPath = useMemo(() => v5ProjectDir ? `${v5ProjectDir}\\render_plan.json` : "", [v5ProjectDir]);
   const v5TimelinePath = useMemo(() => v5ProjectDir ? `${v5ProjectDir}\\timeline.json` : "", [v5ProjectDir]);
+  const v5TimelinePreviewManifestPath = useMemo(() => v5ProjectDir ? `${v5ProjectDir}\\timeline_preview_manifest.json` : "", [v5ProjectDir]);
 
   const v5FinalOutputName = useMemo(() => buildV5FinalOutputName(state.outputName), [state.outputName]);
 
@@ -1268,6 +1291,96 @@ export function App() {
     return () => window.clearTimeout(timeoutId);
   }, [state.v5Timeline, v5TimelinePath, isApplyingTimeline]);
 
+  const refreshTimelinePreviewAssets = useCallback(async () => {
+    if (!state.v5Timeline || !v5TimelinePath || !v5TimelinePreviewManifestPath || !v5ProjectDir || isApplyingTimeline || isRendering) {
+      return;
+    }
+    if (previewAssetsRefreshingRef.current) {
+      await cancelVideo("v5-timeline-preview-assets").catch((error) => {
+        console.warn("Failed to cancel previous timeline preview assets task:", error);
+      });
+      await new Promise((resolve) => window.setTimeout(resolve, 350));
+    }
+    const timelineForAssets = state.v5Timeline;
+    const libraryPath = `${v5ProjectDir}\\media_library.json`;
+    const requestId = previewAssetsRequestRef.current + 1;
+    previewAssetsRequestRef.current = requestId;
+
+    previewAssetsRefreshingRef.current = true;
+    setIsTimelinePreviewAssetsRefreshing(true);
+    setTimelinePreviewAssetsProgress({
+      current: 0,
+      total: 1,
+      status: "running",
+      message: "Preparing timeline preview assets",
+    });
+    try {
+      await saveTimelineV5(v5TimelinePath, JSON.stringify(timelineForAssets, null, 2));
+      const manifest = await timelinePreviewAssetsV5({
+        timelinePath: v5TimelinePath,
+        outputPath: v5TimelinePreviewManifestPath,
+        libraryPath,
+        projectDir: v5ProjectDir,
+        batchSize: 4,
+      });
+      if (previewAssetsRequestRef.current !== requestId) return;
+      state.patch({ v5TimelinePreviewManifest: manifest });
+      setTimelinePreviewAssetsProgress((current) => ({
+        current: current?.total || 1,
+        total: current?.total || 1,
+        status: "done",
+        message: "Timeline preview assets ready",
+      }));
+    } catch (error) {
+      if (previewAssetsRequestRef.current !== requestId) return;
+      console.warn("Timeline preview assets refresh failed:", error);
+      setTimelinePreviewAssetsProgress((current) => ({
+        current: current?.current || 0,
+        total: current?.total || 1,
+        status: "failed",
+        message: friendlyErrorMessage(error),
+      }));
+      setToast(`Timeline 预览资产刷新失败：${friendlyErrorMessage(error)}`);
+    } finally {
+      if (previewAssetsRequestRef.current === requestId) {
+        previewAssetsRefreshingRef.current = false;
+        setIsTimelinePreviewAssetsRefreshing(false);
+      }
+    }
+  }, [
+    state.v5Timeline,
+    state.patch,
+    v5ProjectDir,
+    v5TimelinePath,
+    v5TimelinePreviewManifestPath,
+    isApplyingTimeline,
+    isRendering,
+  ]);
+
+  useEffect(() => {
+    if (!state.v5Timeline || !v5TimelinePath || !v5TimelinePreviewManifestPath || !v5ProjectDir) {
+      if (state.v5TimelinePreviewManifest) state.patch({ v5TimelinePreviewManifest: null });
+      previewAssetsRefreshingRef.current = false;
+      setIsTimelinePreviewAssetsRefreshing(false);
+      return;
+    }
+    if (isApplyingTimeline || isRendering) return;
+
+    const timeoutId = window.setTimeout(() => {
+      void refreshTimelinePreviewAssets();
+    }, 1100);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [
+    state.v5Timeline,
+    v5TimelinePath,
+    v5TimelinePreviewManifestPath,
+    v5ProjectDir,
+    isApplyingTimeline,
+    isRendering,
+    refreshTimelinePreviewAssets,
+  ]);
+
   async function ensureBackgroundLibrary(target: BackgroundPickerTarget) {
     if (!state.inputFolder) {
       setToast("请先选择素材目录，然后再选择片头/片尾背景图。");
@@ -1294,7 +1407,7 @@ export function App() {
     setProgressDetail(null);
     try {
       const library = await scanV5(state.inputFolder, v5ProjectDir, state.recursive);
-      state.patch({ v5Library: library, v5Blueprint: null, v5RenderPlan: null, v5Timeline: null });
+      state.patch({ v5Library: library, v5Blueprint: null, v5RenderPlan: null, v5Timeline: null, v5TimelinePreviewManifest: null });
       setToast(target.kind === "title" ? "请选择片头文案背景图片。" : target.kind === "end" ? "请选择片尾文案背景图片。" : `请选择章节「${target.sectionTitle}」背景图片或视频帧。`);
     } catch (error) {
       console.error("Prepare background library failed:", error);
@@ -1307,10 +1420,10 @@ export function App() {
 
   function onSelectBackgroundAsset(target: BackgroundPickerTarget, asset: V5Asset) {
     if (target.kind === "title") {
-      state.patch({ titleBackgroundPath: asset.absolute_path, v5Timeline: null });
+      state.patch({ titleBackgroundPath: asset.absolute_path, v5Timeline: null, v5TimelinePreviewManifest: null });
       setToast(`已选择片头卡背景：${asset.file.name}`);
     } else if (target.kind === "end") {
-      state.patch({ endBackgroundPath: asset.absolute_path, v5Timeline: null });
+      state.patch({ endBackgroundPath: asset.absolute_path, v5Timeline: null, v5TimelinePreviewManifest: null });
       setToast(`已选择片尾背景：${asset.file.name}`);
     } else if (state.v5Blueprint) {
       const updated = updateBlueprintSection(state.v5Blueprint, target.sectionId, (section) => ({
@@ -1323,7 +1436,7 @@ export function App() {
         },
         user_overridden: true,
       }));
-      state.patch({ v5Blueprint: updated, v5Timeline: null });
+      state.patch({ v5Blueprint: updated, v5Timeline: null, v5TimelinePreviewManifest: null });
       setToast(`已为章节「${target.sectionTitle}」选择背景：${asset.file.name}`);
     }
     setBackgroundPickerTarget(null);
@@ -1331,10 +1444,10 @@ export function App() {
 
   function onClearBackgroundAsset(target: BackgroundPickerTarget) {
     if (target.kind === "title") {
-      state.patch({ titleBackgroundPath: null, v5Timeline: null });
+      state.patch({ titleBackgroundPath: null, v5Timeline: null, v5TimelinePreviewManifest: null });
       setToast("片头背景已恢复默认：使用成片第一个画面首帧虚化。");
     } else if (target.kind === "end") {
-      state.patch({ endBackgroundPath: null, v5Timeline: null });
+      state.patch({ endBackgroundPath: null, v5Timeline: null, v5TimelinePreviewManifest: null });
       setToast("片尾背景已恢复默认：使用成片最后一个画面尾帧虚化。");
     } else if (state.v5Blueprint) {
       const updated = updateBlueprintSection(state.v5Blueprint, target.sectionId, (section) => ({
@@ -1346,7 +1459,7 @@ export function App() {
           user_overridden: false,
         },
       }));
-      state.patch({ v5Blueprint: updated, v5Timeline: null });
+      state.patch({ v5Blueprint: updated, v5Timeline: null, v5TimelinePreviewManifest: null });
       setToast(`章节「${target.sectionTitle}」背景已恢复默认。`);
     }
     setBackgroundPickerTarget(null);
@@ -1703,7 +1816,7 @@ export function App() {
     setToast(null);
     try {
       const library = await scanV5(state.inputFolder, v5ProjectDir, state.recursive);
-      state.patch({ v5Library: library, v5Blueprint: null, v5RenderPlan: null, v5Timeline: null });
+      state.patch({ v5Library: library, v5Blueprint: null, v5RenderPlan: null, v5Timeline: null, v5TimelinePreviewManifest: null });
       
       setPhase("规划故事蓝图中...");
       setProgress(40);
@@ -1721,7 +1834,7 @@ export function App() {
           gui_title_applied: true,
         },
       };
-      state.patch({ v5Blueprint: blueprintWithGuiText, v5RenderPlan: null, v5Timeline: null, v5Stage: "BLUEPRINT" });
+      state.patch({ v5Blueprint: blueprintWithGuiText, v5RenderPlan: null, v5Timeline: null, v5TimelinePreviewManifest: null, v5Stage: "BLUEPRINT" });
       rememberCurrentProject();
       
       setPhase("蓝图就绪");
@@ -1788,7 +1901,7 @@ export function App() {
       }
       
       // 3. 进入渲染阶段
-      state.patch({ v5Blueprint: blueprintForCompile, v5RenderPlan: plan, v5Timeline: timeline, v5Stage: "RENDER" });
+      state.patch({ v5Blueprint: blueprintForCompile, v5RenderPlan: plan, v5Timeline: timeline, v5TimelinePreviewManifest: null, v5Stage: "RENDER" });
       rememberCurrentProject();
       setPhase("渲染计划就绪");
       setProgress(100);
@@ -1842,7 +1955,7 @@ export function App() {
         },
       };
       await saveTimelineV5(v5TimelinePath, JSON.stringify(nextTimeline, null, 2));
-      state.patch({ v5Timeline: nextTimeline, v5RenderPlan: nextPlan, v5Stage: "RENDER" });
+      state.patch({ v5Timeline: nextTimeline, v5RenderPlan: nextPlan, v5TimelinePreviewManifest: null, v5Stage: "RENDER" });
       rememberCurrentProject();
       setPhase("Timeline 已应用到渲染计划");
       setProgress(100);
@@ -2384,7 +2497,7 @@ export function App() {
                           .map((ref) => ref.asset_id),
                       })
                     }
-                    onUpdate={(bp) => state.patch({ v5Blueprint: bp, v5Timeline: null })}
+                    onUpdate={(bp) => state.patch({ v5Blueprint: bp, v5Timeline: null, v5TimelinePreviewManifest: null })}
                   />
                   <div className="blueprint-actions">
                      <button className="secondary-action" onClick={() => state.patch({ v5Stage: "INPUT" })}>重新扫描</button>
@@ -2486,10 +2599,14 @@ export function App() {
                            isRendering={isRendering}
                            isApplyingTimeline={isApplyingTimeline}
                            selectedSectionId={selectedAudioSectionId}
+                           previewManifest={state.v5TimelinePreviewManifest}
+                           previewAssetsRefreshing={isTimelinePreviewAssetsRefreshing}
+                           previewAssetsProgress={timelinePreviewAssetsProgress}
+                           onRefreshPreviewAssets={() => void refreshTimelinePreviewAssets()}
                            onSelectSection={(sectionId) => {
                              setSelectedAudioSectionId((current) => (current === sectionId ? null : sectionId));
                            }}
-                           onTimelineChange={(timeline) => state.patch({ v5Timeline: timeline })}
+                           onTimelineChange={(timeline) => state.patch({ v5Timeline: timeline, v5TimelinePreviewManifest: null })}
                          />
                        </div>
                     </div>

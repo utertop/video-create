@@ -15,6 +15,7 @@ import type {
   V5RenderPlan,
   V5StoryBlueprint,
   V5Timeline,
+  V5TimelinePreviewManifest,
   V5TitleStyle,
 } from "./engine";
 import type { ProgressTone } from "../components/ProgressBar";
@@ -73,6 +74,7 @@ export interface StudioDraft {
   v5Blueprint: V5StoryBlueprint | null;
   v5RenderPlan: V5RenderPlan | null;
   v5Timeline: V5Timeline | null;
+  v5TimelinePreviewManifest: V5TimelinePreviewManifest | null;
 }
 
 export interface SessionRecoveryData {
@@ -123,4 +125,3 @@ export function formatSnapshotSavedAt(timestamp: string): string {
   if (Number.isNaN(date.getTime())) return "最近保存";
   return `保存于 ${date.toLocaleString()}`;
 }
-

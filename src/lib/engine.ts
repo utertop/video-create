@@ -17,6 +17,7 @@ import type {
   V5RenderSettings,
   V5StoryBlueprint,
   V5Timeline,
+  V5TimelinePreviewManifest,
   V5TitleStyle,
 } from "./v5Types";
 
@@ -114,6 +115,9 @@ export type {
   V5TimelineMetadata,
   V5TimelinePerformancePolicy,
   V5TimelinePresentation,
+  V5TimelinePreviewArtifact,
+  V5TimelinePreviewManifest,
+  V5TimelinePreviewManifestClip,
   V5TimelinePreviewMode,
   V5TimelinePreviewQualityProfile,
   V5TimelineProjectRef,
@@ -251,6 +255,8 @@ export async function loadProjectDocumentsV5(projectDir: string): Promise<Projec
     renderPlan?: unknown;
     render_plan?: unknown;
     timeline?: unknown;
+    timelinePreviewManifest?: unknown;
+    timeline_preview_manifest?: unknown;
   }>("load_project_documents_v5", { projectDir });
 
   return {
@@ -261,6 +267,9 @@ export async function loadProjectDocumentsV5(projectDir: string): Promise<Projec
     blueprint: payload.blueprint ? parseV5Value<V5StoryBlueprint>(payload.blueprint, "story_blueprint") : null,
     renderPlan: (payload.renderPlan || payload.render_plan) ? parseV5Value<V5RenderPlan>(payload.renderPlan || payload.render_plan, "render_plan") : null,
     timeline: payload.timeline ? parseV5Value<V5Timeline>(payload.timeline, "timeline") : null,
+    timelinePreviewManifest: (payload.timelinePreviewManifest || payload.timeline_preview_manifest)
+      ? parseV5Value<V5TimelinePreviewManifest>(payload.timelinePreviewManifest || payload.timeline_preview_manifest, "timeline_preview_manifest")
+      : null,
   };
 }
 
@@ -360,6 +369,55 @@ export async function timelineGenerateV5({
 export async function timelineCompileV5(timelinePath: string, baseRenderPlanPath: string, outputPath: string): Promise<V5RenderPlan> {
   const jsonStr = await invoke<string>("timeline_compile_v5", { timelinePath, baseRenderPlanPath, outputPath });
   return parseV5Json<V5RenderPlan>(jsonStr, "render_plan");
+}
+
+export async function timelinePreviewManifestV5({
+  timelinePath,
+  outputPath,
+  libraryPath,
+  proxyManifestPath,
+  projectDir,
+}: {
+  timelinePath: string;
+  outputPath: string;
+  libraryPath?: string | null;
+  proxyManifestPath?: string | null;
+  projectDir?: string | null;
+}): Promise<V5TimelinePreviewManifest> {
+  const jsonStr = await invoke<string>("timeline_preview_manifest_v5", {
+    timelinePath,
+    outputPath,
+    libraryPath: libraryPath || null,
+    proxyManifestPath: proxyManifestPath || null,
+    projectDir: projectDir || null,
+  });
+  return parseV5Json<V5TimelinePreviewManifest>(jsonStr, "timeline_preview_manifest");
+}
+
+export async function timelinePreviewAssetsV5({
+  timelinePath,
+  outputPath,
+  libraryPath,
+  proxyManifestPath,
+  projectDir,
+  batchSize = 8,
+}: {
+  timelinePath: string;
+  outputPath: string;
+  libraryPath?: string | null;
+  proxyManifestPath?: string | null;
+  projectDir?: string | null;
+  batchSize?: number;
+}): Promise<V5TimelinePreviewManifest> {
+  const jsonStr = await invoke<string>("timeline_preview_assets_v5", {
+    timelinePath,
+    outputPath,
+    libraryPath: libraryPath || null,
+    proxyManifestPath: proxyManifestPath || null,
+    projectDir: projectDir || null,
+    batchSize,
+  });
+  return parseV5Json<V5TimelinePreviewManifest>(jsonStr, "timeline_preview_manifest");
 }
 
 /** Execute final V5 render. */

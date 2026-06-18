@@ -1,5 +1,42 @@
 # 自动化剪辑工作台专业化执行方案, 2026-06-17
 
+## 2026-06-18 Implementation Status
+
+已完成：
+- Preview quality 档位 UI 与 `performance_policy.preview` 写入。
+- `timeline-preview-manifest` V1：
+  - Python API：`build_timeline_preview_manifest(...)`
+  - CLI：`python video_engine_v5.py timeline-preview-manifest ...`
+  - Worker task：`type = "timeline-preview-manifest"`
+  - Tauri command / TS bridge：`timelinePreviewManifestV5(...)`
+  - Manifest 记录每个 clip 的 `thumbnail`、`proxy`、`waveform`、`preview_segment` 状态、路径、cache namespace、preview profile、height、fps、source fingerprint。
+- `timeline-preview-assets` 增量生成器：
+  - Python API：`generate_timeline_preview_assets(...)`
+  - CLI：`python video_engine_v5.py timeline-preview-assets ...`
+  - Worker task：`type = "timeline-preview-assets"`
+  - Tauri command / TS bridge：`timelinePreviewAssetsV5(...)`
+  - 按 manifest 生成 timeline thumbnail、FFmpeg waveform peak JSON、视频 proxy、local preview segment，并回写 ready/planned/failed 状态。
+  - 支持 `batch_size` 分批进度事件，避免大量 clip 时每个资产刷新 UI。
+- Timeline preview assets 后台队列 V1：
+  - Timeline autosave 后自动延迟触发 preview assets 生成。
+  - 新任务开始前会取消旧的 `v5-timeline-preview-assets` worker 任务，避免过期 manifest 覆盖新结果。
+  - 生成过程通过 `timeline_preview_assets` 事件上报 `current/total/percent/status/clip_id/artifact_kind/message`。
+  - Timeline toolbar 显示 `Assets current/total` 进度，生成中禁用重复刷新。
+  - 最终渲染或 Timeline apply 期间不启动 preview assets 任务，避免争用主渲染资源。
+- Timeline UI 已消费 manifest：
+  - visual clip 显示 thumbnail。
+  - audio clip 读取 waveform JSON 并显示峰值条。
+  - proxy/preview segment ready 时显示资产状态点。
+  - 资产失败时显示 failed 状态点，Toolbar 可手动刷新预览资产。
+  - 项目/session 恢复会保留 `timeline_preview_manifest.json`。
+- waveform 生成已从 WAV 扩展为 FFmpeg PCM 解码路径，支持 MP3/AAC/M4A 以及带音轨视频的波形峰值生成。
+- 测试覆盖：`tests/smoke_v5_timeline_preview_manifest.py`，并已通过 `npm.cmd run check` core suite。
+
+仍待下一阶段实现：
+- 更细的后台队列并发限速、失败重试和断点恢复。
+- 更精细的 clip range preview segment，包括 source in/out、转场、叠字和音频预览。
+- UI 上显示 failed 资产的诊断入口和手动重建按钮。
+
 ## 文档定位
 
 这份文档用于回答一个核心问题：
@@ -1105,7 +1142,7 @@ npm.cmd run check
 - 待补：`tests/smoke_v5_timeline_recompute_summary.py`
 - 待补：`tests/smoke_v5_preview_cache_namespace.py`
 - 待补：`tests/smoke_v5_timeline_preview_quality_guard.py`
-- 待补：`tests/smoke_v5_timeline_media_manifest.py`
+- 已补：`tests/smoke_v5_timeline_preview_manifest.py`
 
 ---
 
@@ -1323,7 +1360,7 @@ timeline schema
 | Invalidation | 编辑操作映射 recompute scope | 已有 | `timelineInvalidation.ts`, `video_engine/timeline.py` | preview/final quality scope 已有规则 |
 | Build Report | timeline compile recompute summary | 部分已有 | `timeline_compile.py` | 需要继续扩展 preview/final cache 摘要 |
 | Preview Render | 低清小样生成 | 已有但非 timeline 专用 | `previewRenderV5`, worker preview-render | 还不是 clip/range 局部 preview 工作流 |
-| Proxy Media | proxy manifest 用于 preview 源选择 | 部分已有 | `render_proxy.py`, render scheduler smoke | 尚未形成 timeline preview manifest |
+| Proxy Media | proxy manifest 用于 preview 源选择 | 部分已有 | `render_proxy.py`, render scheduler smoke, `smoke_v5_timeline_preview_manifest.py` | timeline preview manifest V1 已形成，实际 proxy 生成/命中接入待补 |
 | Final Render 保护 | final policy 不允许 proxy | schema 已有 | `performance_policy.final.allow_proxy = false` | 还需要 preview/final cache namespace smoke |
 
 ### A.3 当前前端编辑能力细分
@@ -1349,7 +1386,7 @@ timeline schema
 | ripple delete | 无 | 无 | 无 | 待补 |
 | duplicate clip | 无 | 无 | 无 | 待补 |
 | subtitle track 编辑 | schema 有 | UI 无 | compile 不完整 | 待补 |
-| preview quality 选择 | 有 | `updatePreviewQualityProfile` 写入 `performance_policy.preview` | 不需要 compile，preview-only scope 已有 | 基础 UI 已有，cache/manifest 待补 |
+| preview quality 选择 | 有 | `updatePreviewQualityProfile` 写入 `performance_policy.preview` | 不需要 compile，preview-only scope 已有 | 基础 UI、manifest V1、增量资产生成与 UI 消费已补 |
 | clip/range preview | UI 无专用入口 | 无 | worker 可预览整小样 | 待补 |
 
 ### A.4 当前后端 compile 能力细分
@@ -1414,7 +1451,7 @@ timeline schema
 待补测试：
 
 - `tests/smoke_v5_timeline_preview_quality_guard.py`
-- `tests/smoke_v5_timeline_media_manifest.py`
+- `tests/smoke_v5_timeline_preview_manifest.py`
 - `tests/smoke_v5_timeline_preview_cache_namespace.py`
 - `tests/smoke_v5_timeline_split_ripple.py`
 - `tests/smoke_v5_timeline_source_in_out.py`
@@ -2082,7 +2119,7 @@ timeline_end = timeline_start + timeline_duration
 | Compile | timeline -> render_plan | `smoke_v5_timeline_compile.py` |
 | Worker/CLI | 桌面调用链 | `smoke_v5_timeline_generate.py`, `smoke_v5_timeline_compile.py` |
 | Invalidation | 重算范围 | `smoke_v5_timeline_invalidation.py` |
-| Preview | 预览质量、manifest、cache namespace | preview quality policy 已有，manifest/cache namespace 待补 |
+| Preview | 预览质量、manifest、cache namespace | preview quality policy、manifest V1、增量资产生成器与 UI 消费已补 |
 | Render Route | FFmpeg/MoviePy 路由 | `smoke_v5_render_scheduler.py`, `smoke_v5_ffmpeg_priority.py` |
 | Recovery | 保存、恢复、迁移 | `smoke_v5_project_recovery.py` |
 
@@ -2107,7 +2144,7 @@ timeline_end = timeline_start + timeline_duration
 | --- | --- | --- |
 | preview quality change | invalidation=`preview_only`，不触发 render_plan recompile | 已有 `smoke_v5_timeline_edit_ops.py` 基础覆盖；后续补 `smoke_v5_timeline_preview_quality_guard.py` |
 | final quality change | invalidation=`final_render_only`，不清 preview manifest | `smoke_v5_timeline_preview_quality_guard.py` |
-| preview manifest | 每个 clip 有 thumbnail/proxy/waveform/preview status 字段 | `smoke_v5_timeline_media_manifest.py` |
+| preview manifest | 每个 clip 有 thumbnail/proxy/waveform/preview status 字段 | `smoke_v5_timeline_preview_manifest.py` |
 | cache namespace | preview cache key 含 preview namespace/height/fps | `smoke_v5_preview_cache_namespace.py` |
 | final protection | final report 不使用 `preview_segments` 作为 final source | `smoke_v5_preview_cache_namespace.py` |
 | high preview | `profile=high` 写入 1080p 或原尺寸策略 | 已有 `smoke_v5_timeline_edit_ops.py` 基础覆盖；后续补 UI/manifest 覆盖 |
@@ -2162,7 +2199,7 @@ npm.cmd run build:web
 python tests\smoke_v5_render_scheduler.py
 python tests\smoke_v5_worker_protocol.py
 python tests\smoke_v5_timeline_preview_quality_guard.py
-python tests\smoke_v5_timeline_media_manifest.py
+python tests\smoke_v5_timeline_preview_manifest.py
 ```
 
 每次改 FFmpeg route：

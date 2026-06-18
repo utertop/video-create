@@ -200,6 +200,7 @@ export function captureStudioDraft(state: StudioState): StudioDraft {
     v5Blueprint: state.v5Blueprint,
     v5RenderPlan: state.v5RenderPlan,
     v5Timeline: state.v5Timeline,
+    v5TimelinePreviewManifest: state.v5TimelinePreviewManifest,
   };
 }
 
@@ -211,6 +212,7 @@ export function hasMeaningfulStudioDraft(draft: StudioDraft): boolean {
       draft.v5Blueprint ||
       draft.v5RenderPlan ||
       draft.v5Timeline ||
+      draft.v5TimelinePreviewManifest ||
       draft.titleBackgroundPath ||
       draft.endBackgroundPath ||
       draft.musicPath ||

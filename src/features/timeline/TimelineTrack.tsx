@@ -1,4 +1,4 @@
-import type { V5TimelineClip, V5TimelineTrack } from "../../lib/engine";
+import type { V5TimelineClip, V5TimelinePreviewManifest, V5TimelineTrack } from "../../lib/engine";
 import { TimelineClip } from "./TimelineClip";
 
 interface TimelineTrackProps {
@@ -9,6 +9,7 @@ interface TimelineTrackProps {
   selectedClipId: string | null;
   activeSegmentId: string | null;
   selectedSectionId: string | null;
+  previewManifest?: V5TimelinePreviewManifest | null;
   editable: boolean;
   draggingClipId: string | null;
   dragOverClipId: string | null;
@@ -28,6 +29,7 @@ export function TimelineTrack({
   selectedClipId,
   activeSegmentId,
   selectedSectionId,
+  previewManifest,
   editable,
   draggingClipId,
   dragOverClipId,
@@ -61,6 +63,7 @@ export function TimelineTrack({
               selected={selectedClipId === clip.clip_id}
               active={Boolean(activeSegmentId && segmentId === activeSegmentId)}
               linked={Boolean(selectedSectionId && sectionId === selectedSectionId)}
+              previewEntry={previewManifest?.clips?.[clip.clip_id] || null}
               draggable={editable && track.kind === "video"}
               dragging={draggingClipId === clip.clip_id}
               dropTarget={Boolean(draggingClipId && dragOverClipId === clip.clip_id && draggingClipId !== clip.clip_id)}

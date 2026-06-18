@@ -13,6 +13,7 @@ import {
   V5RenderPlan,
   V5StoryBlueprint,
   V5Timeline,
+  V5TimelinePreviewManifest,
   V5TitleStyle,
 } from "../lib/engine";
 
@@ -56,6 +57,7 @@ export interface StudioState {
   v5Blueprint: V5StoryBlueprint | null;
   v5RenderPlan: V5RenderPlan | null;
   v5Timeline: V5Timeline | null;
+  v5TimelinePreviewManifest: V5TimelinePreviewManifest | null;
 
   setInputFolder: (folder: string | null) => void;
   setOutputFolder: (folder: string | null) => void;
@@ -103,6 +105,7 @@ export const selectStudioAppState = (state: StudioState): StudioAppState => ({
   v5Blueprint: state.v5Blueprint,
   v5RenderPlan: state.v5RenderPlan,
   v5Timeline: state.v5Timeline,
+  v5TimelinePreviewManifest: state.v5TimelinePreviewManifest,
   setInputFolder: state.setInputFolder,
   setOutputFolder: state.setOutputFolder,
   patch: state.patch,
@@ -148,6 +151,7 @@ export const useStudio = create<StudioState>((set) => ({
   v5Blueprint: null,
   v5RenderPlan: null,
   v5Timeline: null,
+  v5TimelinePreviewManifest: null,
 
   setInputFolder: (folder) => set({
     inputFolder: folder,
@@ -156,6 +160,7 @@ export const useStudio = create<StudioState>((set) => ({
     v5Blueprint: null,
     v5RenderPlan: null,
     v5Timeline: null,
+    v5TimelinePreviewManifest: null,
     titleBackgroundPath: null,
     endBackgroundPath: null,
   }),

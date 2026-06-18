@@ -102,6 +102,7 @@ struct ProjectDocumentsLoadResult {
     blueprint: Option<Value>,
     render_plan: Option<Value>,
     timeline: Option<Value>,
+    timeline_preview_manifest: Option<Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -786,6 +787,76 @@ async fn timeline_compile_v5(
     })
     .await
     .map_err(|e| coded_error("E_TIMELINE_COMPILE_INTERNAL", format!("V5 timeline compile 后台任务异常: {}", e)))?
+}
+
+#[tauri::command]
+async fn timeline_preview_manifest_v5(
+    app: AppHandle,
+    manager: State<'_, JobManager>,
+    timeline_path: String,
+    output_path: String,
+    library_path: Option<String>,
+    proxy_manifest_path: Option<String>,
+    project_dir: Option<String>,
+) -> Result<String, String> {
+    let manager = manager.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let output_path_buf = PathBuf::from(&output_path);
+        run_v5_worker_json_task(
+            &app,
+            &manager,
+            "v5-timeline-preview-manifest",
+            json!({
+                "type": "timeline-preview-manifest",
+                "id": "v5-timeline-preview-manifest",
+                "timeline_path": timeline_path,
+                "output_path": output_path,
+                "library_path": library_path,
+                "proxy_manifest_path": proxy_manifest_path,
+                "project_dir": project_dir,
+            }),
+            &output_path_buf,
+            "Timeline preview manifest failed",
+        )
+    })
+    .await
+    .map_err(|e| coded_error("E_TIMELINE_PREVIEW_MANIFEST_INTERNAL", format!("V5 timeline preview manifest task failed: {}", e)))?
+}
+
+#[tauri::command]
+async fn timeline_preview_assets_v5(
+    app: AppHandle,
+    manager: State<'_, JobManager>,
+    timeline_path: String,
+    output_path: String,
+    library_path: Option<String>,
+    proxy_manifest_path: Option<String>,
+    project_dir: Option<String>,
+    batch_size: Option<i64>,
+) -> Result<String, String> {
+    let manager = manager.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let output_path_buf = PathBuf::from(&output_path);
+        run_v5_worker_json_task(
+            &app,
+            &manager,
+            "v5-timeline-preview-assets",
+            json!({
+                "type": "timeline-preview-assets",
+                "id": "v5-timeline-preview-assets",
+                "timeline_path": timeline_path,
+                "output_path": output_path,
+                "library_path": library_path,
+                "proxy_manifest_path": proxy_manifest_path,
+                "project_dir": project_dir,
+                "batch_size": batch_size.unwrap_or(8),
+            }),
+            &output_path_buf,
+            "Timeline preview assets failed",
+        )
+    })
+    .await
+    .map_err(|e| coded_error("E_TIMELINE_PREVIEW_ASSETS_INTERNAL", format!("V5 timeline preview assets task failed: {}", e)))?
 }
 
 #[tauri::command]
@@ -2511,6 +2582,12 @@ fn load_project_documents_v5_blocking(project_dir: String) -> Result<ProjectDocu
     let blueprint = load_and_migrate_project_doc(&root.join("story_blueprint.json"), "story_blueprint", &mut migrated, &mut migration_notes)?;
     let render_plan = load_and_migrate_project_doc(&root.join("render_plan.json"), "render_plan", &mut migrated, &mut migration_notes)?;
     let timeline = load_timeline_doc_resilient(&root, &library, &blueprint, &render_plan, &mut migrated, &mut migration_notes)?;
+    let timeline_preview_manifest = load_and_migrate_project_doc(
+        &root.join("timeline_preview_manifest.json"),
+        "timeline_preview_manifest",
+        &mut migrated,
+        &mut migration_notes,
+    )?;
 
     Ok(ProjectDocumentsLoadResult {
         project_dir,
@@ -2520,6 +2597,7 @@ fn load_project_documents_v5_blocking(project_dir: String) -> Result<ProjectDocu
         blueprint,
         render_plan,
         timeline,
+        timeline_preview_manifest,
     })
 }
 
@@ -3946,6 +4024,8 @@ pub fn run() {
             compile_v5,
             timeline_generate_v5,
             timeline_compile_v5,
+            timeline_preview_manifest_v5,
+            timeline_preview_assets_v5,
             preview_title_v5,
             preview_render_v5,
             render_v5

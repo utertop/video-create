@@ -34,6 +34,8 @@ export interface VideoEvent {
   job_id?: string;
   status?: string;
   position?: number;
+  clip_id?: string | null;
+  artifact_kind?: string | null;
 }
 
 export interface PhotoSegmentCacheStats {

@@ -20,7 +20,7 @@ export type EditStrategy =
 // V5 common type definitions
 // =========================
 
-export type V5DocumentType = "media_library" | "story_blueprint" | "render_plan" | "timeline";
+export type V5DocumentType = "media_library" | "story_blueprint" | "render_plan" | "timeline" | "timeline_preview_manifest";
 export type V5DirectoryType = "city" | "date" | "scenic_spot" | "chapter" | "unknown";
 export type V5AssetType = "image" | "video" | "audio";
 export type V5Orientation = "landscape" | "portrait" | "square";
@@ -114,6 +114,77 @@ export interface V5Timeline {
   invalidation_rules_version?: string;
   performance_policy?: V5TimelinePerformancePolicy;
   metadata?: V5TimelineMetadata;
+}
+
+export interface V5TimelinePreviewManifest {
+  schema_version: string;
+  document_type: "timeline_preview_manifest";
+  manifest_version: "timeline_preview_manifest_v1" | string;
+  timeline_version: V5TimelineVersion;
+  generated_at: string;
+  timeline_path?: string | null;
+  project_ref?: V5TimelineProjectRef;
+  source_ref?: V5TimelineSourceRef | Record<string, unknown>;
+  preview_policy: V5TimelinePerformancePolicy["preview"];
+  final_policy?: V5TimelinePerformancePolicy["final"];
+  cache_namespaces: Record<V5TimelineCacheNamespace | string, string>;
+  cache_roots?: {
+    asset_cache_root?: string | null;
+    render_cache_root?: string | null;
+  };
+  summary: {
+    total_clips: number;
+    visual_clips: number;
+    audio_clips: number;
+    thumbnail_ready: number;
+    thumbnail_planned: number;
+    thumbnail_failed: number;
+    proxy_ready: number;
+    proxy_planned: number;
+    proxy_failed: number;
+    waveform_ready: number;
+    waveform_planned: number;
+    waveform_failed: number;
+    preview_segment_ready: number;
+    preview_segment_planned: number;
+    preview_segment_failed: number;
+    missing_sources: number;
+    [key: string]: number;
+  };
+  clips: Record<string, V5TimelinePreviewManifestClip>;
+}
+
+export interface V5TimelinePreviewManifestClip {
+  clip_id: string;
+  kind: V5TimelineClipKind | string;
+  track_id?: string | null;
+  enabled: boolean;
+  timeline_start: number;
+  timeline_duration: number;
+  timeline_end: number;
+  source_ref?: {
+    asset_id?: string | null;
+    source_path?: string | null;
+    source_state?: "ready" | "missing" | "generated" | string;
+    source_fingerprint?: Record<string, unknown> | null;
+  };
+  artifact_key: string;
+  thumbnail: V5TimelinePreviewArtifact;
+  proxy: V5TimelinePreviewArtifact;
+  waveform: V5TimelinePreviewArtifact;
+  preview_segment: V5TimelinePreviewArtifact;
+}
+
+export interface V5TimelinePreviewArtifact {
+  cache_namespace: V5TimelineCacheNamespace | string;
+  path?: string | null;
+  status: "ready" | "planned" | "missing_source" | "not_applicable" | "bypass_original" | string;
+  cache_key?: string;
+  profile?: V5TimelinePreviewQualityProfile | string;
+  mode?: V5TimelinePreviewMode | string;
+  height?: number;
+  fps?: number;
+  source?: string;
 }
 
 export interface V5TimelineProjectRef {

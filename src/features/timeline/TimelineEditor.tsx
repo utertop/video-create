@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
+import { RefreshCw } from "lucide-react";
 import type {
   V5RenderPlan,
   V5RenderSegment,
   V5Timeline,
   V5TimelineClip,
+  V5TimelinePreviewManifest,
   V5TimelinePreviewQualityProfile,
   V5TimelineTrack,
 } from "../../lib/engine";
@@ -28,6 +30,10 @@ interface TimelineEditorProps {
   isRendering: boolean;
   isApplyingTimeline?: boolean;
   selectedSectionId: string | null;
+  previewManifest?: V5TimelinePreviewManifest | null;
+  previewAssetsRefreshing?: boolean;
+  previewAssetsProgress?: { current: number; total: number; status: string; message: string | null } | null;
+  onRefreshPreviewAssets?: () => void;
   onSelectSection: (sectionId: string | null) => void;
   onTimelineChange?: (timeline: V5Timeline) => void;
 }
@@ -55,6 +61,10 @@ export function TimelineEditor({
   isRendering,
   isApplyingTimeline = false,
   selectedSectionId,
+  previewManifest = null,
+  previewAssetsRefreshing = false,
+  previewAssetsProgress = null,
+  onRefreshPreviewAssets,
   onSelectSection,
   onTimelineChange,
 }: TimelineEditorProps) {
@@ -161,6 +171,11 @@ export function TimelineEditor({
           </span>
         </div>
         <div className="timeline-editor-status">
+          <span className={`timeline-preview-assets-badge${previewAssetsRefreshing ? " refreshing" : ""}`}>
+            {previewAssetsRefreshing && previewAssetsProgress
+              ? `Assets ${previewAssetsProgress.current}/${previewAssetsProgress.total}`
+              : previewManifest ? assetSummaryLabel(previewManifest) : "Assets pending"}
+          </span>
           <span className={`timeline-sync-badge${dirty ? " dirty" : ""}${isApplyingTimeline ? " applying" : ""}`}>
             {isApplyingTimeline ? "Applying edits" : dirty ? "Unapplied edits" : "Synced"}
           </span>
@@ -197,6 +212,15 @@ export function TimelineEditor({
             ))}
           </select>
         </label>
+        <button
+          type="button"
+          className="timeline-preview-assets-refresh-btn"
+          disabled={!timeline || previewAssetsRefreshing || isApplyingTimeline}
+          title="Refresh preview assets"
+          onClick={onRefreshPreviewAssets}
+        >
+          <RefreshCw size={14} className={previewAssetsRefreshing ? "spin" : undefined} />
+        </button>
       </div>
 
       <div className="timeline-editor-grid">
@@ -223,6 +247,7 @@ export function TimelineEditor({
                   selectedClipId={selectedClipId}
                   activeSegmentId={activeSegmentId}
                   selectedSectionId={selectedSectionId}
+                  previewManifest={previewManifest}
                   editable={editable}
                   draggingClipId={draggingClipId}
                   dragOverClipId={dragOverClipId}
@@ -303,6 +328,27 @@ function resolvePreviewQualityProfile(timeline: V5Timeline | null): V5TimelinePr
   if (preview?.mode === "low_res") return "performance";
   if ((preview?.height || 0) >= 1080) return "high";
   return "balanced";
+}
+
+function assetSummaryLabel(manifest: V5TimelinePreviewManifest): string {
+  const summary = manifest.summary || {};
+  const ready =
+    Number(summary.thumbnail_ready || 0) +
+    Number(summary.waveform_ready || 0) +
+    Number(summary.proxy_ready || 0) +
+    Number(summary.preview_segment_ready || 0);
+  const planned =
+    Number(summary.thumbnail_planned || 0) +
+    Number(summary.waveform_planned || 0) +
+    Number(summary.proxy_planned || 0) +
+    Number(summary.preview_segment_planned || 0);
+  const failed =
+    Number(summary.thumbnail_failed || 0) +
+    Number(summary.waveform_failed || 0) +
+    Number(summary.proxy_failed || 0) +
+    Number(summary.preview_segment_failed || 0);
+  if (failed > 0) return `Assets ${ready} ready / ${failed} failed`;
+  return planned > 0 ? `Assets ${ready} ready / ${planned} pending` : `Assets ${ready} ready`;
 }
 
 function buildFallbackTimelineViewModel(renderPlan: V5RenderPlan | null): TimelineViewModel {

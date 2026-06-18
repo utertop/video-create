@@ -4339,6 +4339,39 @@ select:focus {
   opacity: 0.45;
 }
 
+.timeline-preview-assets-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 9px;
+  color: #bbf7d0;
+  font-size: 0.68rem;
+  font-weight: 900;
+  background: rgb(34 197 94 / 12%);
+  border: 1px solid rgb(134 239 172 / 22%);
+  border-radius: 999px;
+}
+
+.timeline-preview-assets-badge.refreshing {
+  color: #fde68a;
+  background: rgb(245 158 11 / 14%);
+  border-color: rgb(253 230 138 / 26%);
+}
+
+.timeline-preview-assets-refresh-btn {
+  display: inline-grid;
+  width: 30px;
+  min-width: 30px;
+  height: 30px;
+  place-items: center;
+  padding: 0;
+}
+
+.timeline-preview-assets-refresh-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
 .timeline-source-badge {
   flex: 0 0 auto;
   padding: 6px 10px;
@@ -4480,6 +4513,66 @@ select:focus {
   border: 1px solid rgb(165 180 252 / 30%);
   border-left: 3px solid #818cf8;
   border-radius: 7px;
+}
+
+.timeline-clip-thumbnail {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0.38;
+  pointer-events: none;
+}
+
+.timeline-clip::after {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  content: "";
+  background: linear-gradient(90deg, rgb(4 12 10 / 80%), rgb(4 12 10 / 34%));
+}
+
+.timeline-clip-waveform {
+  position: absolute;
+  inset: 8px 8px 8px 8px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  opacity: 0.54;
+  pointer-events: none;
+}
+
+.timeline-clip-waveform i {
+  flex: 1 1 0;
+  min-width: 2px;
+  background: linear-gradient(180deg, #99f6e4, #2dd4bf);
+  border-radius: 999px;
+  box-shadow: 0 0 8px rgb(45 212 191 / 18%);
+}
+
+.timeline-clip-asset-dot {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 2;
+  width: 7px;
+  height: 7px;
+  pointer-events: none;
+  background: #86efac;
+  border-radius: 999px;
+  box-shadow: 0 0 0 2px rgb(6 20 14 / 74%), 0 0 10px rgb(134 239 172 / 38%);
+}
+
+.timeline-clip.preview-asset-failed .timeline-clip-asset-dot {
+  background: #f87171;
+  box-shadow: 0 0 0 2px rgb(32 10 10 / 74%), 0 0 10px rgb(248 113 113 / 42%);
+}
+
+.timeline-clip > span,
+.timeline-clip > strong {
+  position: relative;
+  z-index: 1;
 }
 
 .timeline-clip:hover,

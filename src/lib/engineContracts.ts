@@ -11,6 +11,7 @@ import type {
   V5RenderPlan,
   V5StoryBlueprint,
   V5Timeline,
+  V5TimelinePreviewManifest,
   V5TitleStyle,
 } from "./v5Types";
 
@@ -82,6 +83,7 @@ export interface ProjectDocumentsLoadResult {
   blueprint: V5StoryBlueprint | null;
   renderPlan: V5RenderPlan | null;
   timeline: V5Timeline | null;
+  timelinePreviewManifest: V5TimelinePreviewManifest | null;
 }
 
 export type BuildReportJsonObject = Record<string, unknown>;
@@ -249,4 +251,3 @@ export interface RenderV5Params {
   chapter_background_mode?: V5ChapterBackgroundMode;
   audio?: V5AudioSettings | null;
 }
-

@@ -88,7 +88,11 @@ from video_engine.plan import (
     set_plan_event_emitter,
 )
 from video_engine.compile import Compiler, set_compile_event_emitter
-from video_engine.timeline import recover_timeline_document
+from video_engine.timeline import (
+    build_timeline_preview_manifest,
+    generate_timeline_preview_assets_with_events,
+    recover_timeline_document,
+)
 from video_engine.timeline_compile import compile_from_timeline
 from video_engine import render_diagnostics as render_diagnostics_helpers
 from video_engine import render_chunks as render_chunks_helpers
@@ -138,12 +142,14 @@ usage:
   python video_engine_v5.py compile --blueprint <story_blueprint.json> --library <media_library.json> --output <render_plan.json>
   python video_engine_v5.py timeline-generate --render_plan <render_plan.json> --output <timeline.json> [--blueprint <story_blueprint.json>]
   python video_engine_v5.py timeline-compile --timeline <timeline.json> --base_render_plan <render_plan.json> --output <render_plan.json>
+  python video_engine_v5.py timeline-preview-manifest --timeline <timeline.json> --output <timeline_preview_manifest.json> [--library <media_library.json>]
+  python video_engine_v5.py timeline-preview-assets --timeline <timeline.json> --output <timeline_preview_manifest.json> [--library <media_library.json>]
   python video_engine_v5.py render  --plan <render_plan.json> --output <video.mp4> [--params <json>]
   python video_engine_v5.py preview-render --plan <render_plan.json> --output <preview.mp4>
   python video_engine_v5.py preview-title --title <text> --style_json <json> --output <preview.mp4>
 
 Pipeline:
-  scan -> media_library.json -> plan -> story_blueprint.json -> compile -> render_plan.json -> timeline-generate -> timeline.json -> timeline-compile -> render_plan.json
+  scan -> media_library.json -> plan -> story_blueprint.json -> compile -> render_plan.json -> timeline-generate -> timeline.json -> timeline-preview-assets -> timeline_preview_manifest.json -> timeline-compile -> render_plan.json
   render -> final mp4
 
 Notes:
@@ -1923,6 +1929,53 @@ def command_timeline_compile(args: argparse.Namespace) -> None:
         emit_event("artifact", artifact="render_plan", path=args.output, message="render plan compiled from timeline")
 
 
+def command_timeline_preview_manifest(args: argparse.Namespace) -> None:
+    timeline = read_json(args.timeline)
+    library = read_json(args.library) if getattr(args, "library", None) else None
+    proxy_manifest = read_json(args.proxy_manifest) if getattr(args, "proxy_manifest", None) else None
+    result = build_timeline_preview_manifest(
+        timeline,
+        media_library=library,
+        proxy_media_manifest=proxy_manifest,
+        project_dir=getattr(args, "project_dir", None),
+        timeline_path=getattr(args, "timeline", None),
+    )
+    write_json(args.output, result)
+    if args.output:
+        emit_event(
+            "artifact",
+            artifact="timeline_preview_manifest",
+            path=args.output,
+            message="timeline preview manifest generated",
+        )
+
+
+def command_timeline_preview_assets(args: argparse.Namespace) -> None:
+    timeline = read_json(args.timeline)
+    library = read_json(args.library) if getattr(args, "library", None) else None
+    proxy_manifest = read_json(args.proxy_manifest) if getattr(args, "proxy_manifest", None) else None
+    manifest = build_timeline_preview_manifest(
+        timeline,
+        media_library=library,
+        proxy_media_manifest=proxy_manifest,
+        project_dir=getattr(args, "project_dir", None),
+        timeline_path=getattr(args, "timeline", None),
+    )
+    result = generate_timeline_preview_assets_with_events(
+        manifest,
+        emit_event_fn=emit_event,
+        batch_size=int(getattr(args, "batch_size", 8) or 8),
+    )
+    write_json(args.output, result)
+    if args.output:
+        emit_event(
+            "artifact",
+            artifact="timeline_preview_assets",
+            path=args.output,
+            message="timeline preview assets generated",
+        )
+
+
 
 # =========================
 # V5.6 long-video stability renderer
@@ -2515,6 +2568,23 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--base_render_plan", required=True)
     p.add_argument("--output")
     p.set_defaults(func=command_timeline_compile)
+
+    p = sub.add_parser("timeline-preview-manifest", help="Generate timeline preview asset manifest")
+    p.add_argument("--timeline", required=True)
+    p.add_argument("--output")
+    p.add_argument("--library")
+    p.add_argument("--proxy_manifest")
+    p.add_argument("--project_dir")
+    p.set_defaults(func=command_timeline_preview_manifest)
+
+    p = sub.add_parser("timeline-preview-assets", help="Generate missing timeline preview assets and manifest")
+    p.add_argument("--timeline", required=True)
+    p.add_argument("--output")
+    p.add_argument("--library")
+    p.add_argument("--proxy_manifest")
+    p.add_argument("--project_dir")
+    p.add_argument("--batch_size", type=int, default=8)
+    p.set_defaults(func=command_timeline_preview_assets)
 
     p = sub.add_parser("render", help="Render final MP4 from render_plan.json")
     p.add_argument("--plan", required=True)

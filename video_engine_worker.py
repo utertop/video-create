@@ -140,6 +140,47 @@ def run_task(task: Dict[str, Any]) -> Dict[str, Any]:
             "document": _read_output_json(output_path),
         }
 
+    if task_type == "timeline-preview-manifest":
+        output_path = str(task["output_path"])
+        _ensure_parent(output_path)
+        engine.command_timeline_preview_manifest(
+            Namespace(
+                timeline=str(task["timeline_path"]),
+                output=output_path,
+                library=str(task["library_path"]) if task.get("library_path") else None,
+                proxy_manifest=str(task["proxy_manifest_path"]) if task.get("proxy_manifest_path") else None,
+                project_dir=str(task["project_dir"]) if task.get("project_dir") else None,
+                batch_size=int(task.get("batch_size") or 8),
+            )
+        )
+        return {
+            "type": "result",
+            "id": task_id,
+            "ok": True,
+            "output_path": output_path,
+            "document": _read_output_json(output_path),
+        }
+
+    if task_type == "timeline-preview-assets":
+        output_path = str(task["output_path"])
+        _ensure_parent(output_path)
+        engine.command_timeline_preview_assets(
+            Namespace(
+                timeline=str(task["timeline_path"]),
+                output=output_path,
+                library=str(task["library_path"]) if task.get("library_path") else None,
+                proxy_manifest=str(task["proxy_manifest_path"]) if task.get("proxy_manifest_path") else None,
+                project_dir=str(task["project_dir"]) if task.get("project_dir") else None,
+            )
+        )
+        return {
+            "type": "result",
+            "id": task_id,
+            "ok": True,
+            "output_path": output_path,
+            "document": _read_output_json(output_path),
+        }
+
     if task_type == "render":
         engine.render_with_v56_stability(
             str(task["plan_path"]),

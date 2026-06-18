@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import audioop
 import hashlib
 import copy
+import json
+import math
+import subprocess
 from collections.abc import Iterable as IterableABC
 from datetime import datetime
 from pathlib import Path
@@ -607,6 +611,285 @@ def update_preview_quality_profile(timeline: Dict[str, Any], profile: str) -> Di
     return result
 
 
+def build_timeline_preview_manifest(
+    timeline: Dict[str, Any],
+    *,
+    media_library: Optional[Dict[str, Any]] = None,
+    proxy_media_manifest: Optional[Dict[str, Any]] = None,
+    project_dir: Optional[str] = None,
+    timeline_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build a deterministic manifest for timeline preview assets.
+
+    The manifest is intentionally an index, not a generator. It lets the UI and
+    later workers know which thumbnails, proxy files, waveforms, and preview
+    segments belong to each clip under the current preview quality policy.
+    """
+
+    if not isinstance(timeline, dict):
+        raise ValueError("timeline document must be an object")
+    if timeline.get("document_type") != "timeline":
+        raise ValueError(f"timeline document_type mismatch: {timeline.get('document_type')!r}")
+
+    media_library = media_library if isinstance(media_library, dict) else {}
+    project_ref = timeline.get("project_ref") if isinstance(timeline.get("project_ref"), dict) else {}
+    effective_project_dir = project_dir or project_ref.get("project_dir")
+    cache_root, render_cache_root = _timeline_preview_cache_roots(effective_project_dir)
+    asset_by_id, asset_by_path = _timeline_asset_lookup(media_library)
+    proxy_lookup = _timeline_proxy_lookup(proxy_media_manifest or media_library.get("proxy_media_manifest"))
+
+    policy = dict(timeline.get("performance_policy") or {})
+    preview_policy = _normalized_preview_policy(policy.get("preview"))
+    cache_namespaces = {
+        "preview": preview_policy.get("cache_namespace") or "preview",
+        "final": (dict(policy.get("final") or {})).get("cache_namespace") or "final",
+        "thumbnail": (dict(policy.get("thumbnail") or {})).get("cache_namespace") or "thumbnail",
+        "proxy": (dict(policy.get("proxy") or {})).get("cache_namespace") or "proxy",
+    }
+
+    clips: Dict[str, Any] = {}
+    summary = {
+        "total_clips": 0,
+        "visual_clips": 0,
+        "audio_clips": 0,
+        "thumbnail_ready": 0,
+        "thumbnail_planned": 0,
+        "thumbnail_failed": 0,
+        "proxy_ready": 0,
+        "proxy_planned": 0,
+        "proxy_failed": 0,
+        "waveform_ready": 0,
+        "waveform_planned": 0,
+        "waveform_failed": 0,
+        "preview_segment_ready": 0,
+        "preview_segment_planned": 0,
+        "preview_segment_failed": 0,
+        "missing_sources": 0,
+    }
+
+    clip_index = timeline.get("clip_index") if isinstance(timeline.get("clip_index"), dict) else {}
+    for clip_id, raw_clip in clip_index.items():
+        if not isinstance(raw_clip, dict):
+            continue
+        clip = raw_clip
+        clip_id = str(clip.get("clip_id") or clip_id)
+        kind = str(clip.get("kind") or "unknown")
+        content_ref = clip.get("content_ref") if isinstance(clip.get("content_ref"), dict) else {}
+        source_ref = clip.get("source_ref") if isinstance(clip.get("source_ref"), dict) else {}
+        source_path = _first_string(
+            content_ref.get("source_path"),
+            content_ref.get("background_source_path"),
+            source_ref.get("source_path"),
+        )
+        asset_id = _first_string(source_ref.get("asset_id"), content_ref.get("asset_id"))
+        asset = asset_by_id.get(asset_id or "") or asset_by_path.get(_norm_path(source_path))
+        source_path = source_path or _first_string((asset or {}).get("absolute_path"), (asset or {}).get("path"))
+        source_state = _source_state(source_path)
+        source_fingerprint = _source_fingerprint(source_path)
+        artifact_key = _stable_id(
+            "tl_asset",
+            clip_id,
+            kind,
+            source_path or "",
+            preview_policy.get("profile") or "",
+            preview_policy.get("mode") or "",
+            preview_policy.get("height") or "",
+            preview_policy.get("fps") or "",
+            source_fingerprint.get("fingerprint") if source_fingerprint else "",
+        )
+
+        entry = {
+            "clip_id": clip_id,
+            "kind": kind,
+            "track_id": clip.get("track_id"),
+            "enabled": bool(clip.get("enabled", True)),
+            "timeline_start": _float(clip.get("timeline_start"), 0.0),
+            "timeline_duration": _float(clip.get("timeline_duration"), 0.0),
+            "timeline_end": _float(clip.get("timeline_end"), 0.0),
+            "source_ref": {
+                "asset_id": asset_id,
+                "source_path": source_path,
+                "source_state": source_state,
+                "source_fingerprint": source_fingerprint,
+            },
+            "artifact_key": artifact_key,
+        }
+
+        summary["total_clips"] += 1
+        if source_state == "missing":
+            summary["missing_sources"] += 1
+
+        if _is_visual_clip(kind):
+            summary["visual_clips"] += 1
+            entry["thumbnail"] = _thumbnail_artifact(
+                clip,
+                asset or {},
+                source_state,
+                artifact_key,
+                cache_root,
+                cache_namespaces["thumbnail"],
+            )
+            _count_artifact(summary, "thumbnail", entry["thumbnail"])
+            entry["preview_segment"] = _preview_segment_artifact(
+                source_state,
+                artifact_key,
+                render_cache_root,
+                cache_namespaces["preview"],
+                preview_policy,
+            )
+            _count_artifact(summary, "preview_segment", entry["preview_segment"])
+        else:
+            entry["thumbnail"] = _not_applicable_artifact(cache_namespaces["thumbnail"])
+            entry["preview_segment"] = _not_applicable_artifact(cache_namespaces["preview"])
+
+        if kind == "video_asset":
+            entry["proxy"] = _proxy_artifact(
+                source_path,
+                source_state,
+                artifact_key,
+                cache_root,
+                cache_namespaces["proxy"],
+                preview_policy,
+                proxy_lookup,
+            )
+            _count_artifact(summary, "proxy", entry["proxy"])
+        else:
+            entry["proxy"] = _not_applicable_artifact(cache_namespaces["proxy"])
+
+        if _is_audio_clip(kind):
+            summary["audio_clips"] += 1
+            entry["waveform"] = _waveform_artifact(
+                source_state,
+                artifact_key,
+                cache_root,
+                cache_namespaces["preview"],
+            )
+            _count_artifact(summary, "waveform", entry["waveform"])
+        else:
+            entry["waveform"] = _not_applicable_artifact(cache_namespaces["preview"])
+
+        clips[clip_id] = entry
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "document_type": "timeline_preview_manifest",
+        "manifest_version": "timeline_preview_manifest_v1",
+        "timeline_version": timeline.get("timeline_version") or TIMELINE_VERSION,
+        "generated_at": datetime.now().isoformat(),
+        "timeline_path": timeline_path,
+        "project_ref": project_ref,
+        "source_ref": timeline.get("source_ref") if isinstance(timeline.get("source_ref"), dict) else {},
+        "preview_policy": preview_policy,
+        "final_policy": dict(policy.get("final") or {}),
+        "cache_namespaces": cache_namespaces,
+        "cache_roots": {
+            "asset_cache_root": str(cache_root) if cache_root else None,
+            "render_cache_root": str(render_cache_root) if render_cache_root else None,
+        },
+        "summary": summary,
+        "clips": clips,
+    }
+
+
+def generate_timeline_preview_assets(manifest: Dict[str, Any]) -> Dict[str, Any]:
+    """Generate missing preview assets described by a timeline preview manifest."""
+
+    return generate_timeline_preview_assets_with_events(manifest)
+
+
+def generate_timeline_preview_assets_with_events(
+    manifest: Dict[str, Any],
+    *,
+    emit_event_fn=None,
+    batch_size: int = 8,
+) -> Dict[str, Any]:
+    if not isinstance(manifest, dict):
+        raise ValueError("timeline preview manifest must be an object")
+    if manifest.get("document_type") != "timeline_preview_manifest":
+        raise ValueError(f"timeline preview manifest document_type mismatch: {manifest.get('document_type')!r}")
+
+    result = copy.deepcopy(manifest)
+    clips = result.get("clips") if isinstance(result.get("clips"), dict) else {}
+    report = {
+        "generated_at": datetime.now().isoformat(),
+        "thumbnail": {"created": 0, "hit": 0, "failed": 0, "skipped": 0},
+        "proxy": {"created": 0, "hit": 0, "failed": 0, "skipped": 0},
+        "waveform": {"created": 0, "hit": 0, "failed": 0, "skipped": 0},
+        "preview_segment": {"created": 0, "hit": 0, "failed": 0, "skipped": 0},
+    }
+
+    total_tasks = _count_preview_asset_tasks(clips)
+    completed_tasks = 0
+    batch_size = max(1, int(batch_size or 8))
+    _emit_preview_asset_progress(emit_event_fn, None, completed_tasks, total_tasks, "running", None)
+
+    for clip in clips.values():
+        if not isinstance(clip, dict):
+            continue
+        source_ref = clip.get("source_ref") if isinstance(clip.get("source_ref"), dict) else {}
+        source_path = _first_string(source_ref.get("source_path"))
+
+        thumbnail = clip.get("thumbnail") if isinstance(clip.get("thumbnail"), dict) else {}
+        clip["thumbnail"] = _generate_thumbnail_asset(clip, thumbnail, source_path, report["thumbnail"])
+        completed_tasks = _advance_preview_asset_progress(
+            clip,
+            "thumbnail",
+            completed_tasks,
+            total_tasks,
+            clip["thumbnail"],
+            emit_event_fn=emit_event_fn,
+            batch_size=batch_size,
+        )
+
+        proxy = clip.get("proxy") if isinstance(clip.get("proxy"), dict) else {}
+        clip["proxy"] = _generate_proxy_asset(proxy, source_path, report["proxy"])
+        completed_tasks = _advance_preview_asset_progress(
+            clip,
+            "proxy",
+            completed_tasks,
+            total_tasks,
+            clip["proxy"],
+            emit_event_fn=emit_event_fn,
+            batch_size=batch_size,
+        )
+
+        waveform = clip.get("waveform") if isinstance(clip.get("waveform"), dict) else {}
+        clip["waveform"] = _generate_waveform_asset(waveform, source_path, report["waveform"])
+        completed_tasks = _advance_preview_asset_progress(
+            clip,
+            "waveform",
+            completed_tasks,
+            total_tasks,
+            clip["waveform"],
+            emit_event_fn=emit_event_fn,
+            batch_size=batch_size,
+        )
+
+        preview_segment = clip.get("preview_segment") if isinstance(clip.get("preview_segment"), dict) else {}
+        clip["preview_segment"] = _generate_preview_segment_asset(
+            clip,
+            preview_segment,
+            source_path,
+            report["preview_segment"],
+        )
+        completed_tasks = _advance_preview_asset_progress(
+            clip,
+            "preview_segment",
+            completed_tasks,
+            total_tasks,
+            clip["preview_segment"],
+            emit_event_fn=emit_event_fn,
+            batch_size=batch_size,
+        )
+
+    result["clips"] = clips
+    result["summary"] = _timeline_preview_manifest_summary(clips)
+    result["generation_report"] = report
+    result["generated_assets_at"] = report["generated_at"]
+    _emit_preview_asset_progress(emit_event_fn, None, total_tasks, total_tasks, "done", "timeline preview assets generated")
+    return result
+
+
 def build_clip_from_segment(
     segment: Dict[str, Any],
     occurrence: int,
@@ -1087,6 +1370,753 @@ def _stable_id(prefix: str, *parts: Any) -> str:
     raw = "|".join(str(part or "") for part in parts)
     digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
     return f"{prefix}_{digest}"
+
+
+def _normalized_preview_policy(source: Any) -> Dict[str, Any]:
+    preview = dict(source or {}) if isinstance(source, dict) else {}
+    profile = str(preview.get("profile") or "balanced")
+    if profile not in {"auto", "performance", "balanced", "high", "original"}:
+        profile = "balanced"
+    resolved = _resolve_preview_quality_profile(profile)
+    result = {
+        "profile": profile,
+        "mode": preview.get("mode") or resolved["mode"],
+        "fps": int(preview.get("fps") or resolved["fps"]),
+        "cache_namespace": preview.get("cache_namespace") or "preview",
+    }
+    height = preview.get("height", resolved.get("height"))
+    if height is not None:
+        result["height"] = int(height)
+    return result
+
+
+def _timeline_preview_cache_roots(project_dir: Optional[str]) -> Tuple[Optional[Path], Optional[Path]]:
+    if not project_dir:
+        return None, None
+    project_path = Path(str(project_dir))
+    doc_dir = project_path if project_path.name == ".video_create_project" else project_path / ".video_create_project"
+    workspace_dir = doc_dir.parent if doc_dir.name == ".video_create_project" else project_path
+    return workspace_dir / ".cache_video_create_v5", doc_dir / "render_cache"
+
+
+def _timeline_asset_lookup(media_library: Dict[str, Any]) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+    by_id: Dict[str, Dict[str, Any]] = {}
+    by_path: Dict[str, Dict[str, Any]] = {}
+    for asset in media_library.get("assets") or []:
+        if not isinstance(asset, dict):
+            continue
+        asset_id = str(asset.get("asset_id") or "")
+        if asset_id:
+            by_id[asset_id] = asset
+        for path in (asset.get("absolute_path"), asset.get("path"), asset.get("source_path")):
+            norm = _norm_path(path)
+            if norm:
+                by_path[norm] = asset
+    return by_id, by_path
+
+
+def _timeline_proxy_lookup(proxy_media_manifest: Any) -> Dict[str, Dict[str, Any]]:
+    lookup: Dict[str, Dict[str, Any]] = {}
+    if not isinstance(proxy_media_manifest, dict):
+        return lookup
+
+    entries: List[Any]
+    if isinstance(proxy_media_manifest.get("assets"), list):
+        entries = proxy_media_manifest.get("assets") or []
+    else:
+        entries = list(proxy_media_manifest.values())
+        for key, value in proxy_media_manifest.items():
+            if isinstance(value, dict):
+                norm_key = _norm_path(key)
+                if norm_key:
+                    lookup[norm_key] = value
+
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        source = _first_string(entry.get("source_path"), entry.get("absolute_path"), entry.get("path"))
+        norm = _norm_path(source)
+        if norm:
+            lookup[norm] = entry
+    return lookup
+
+
+def _first_string(*values: Any) -> Optional[str]:
+    for value in values:
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
+def _norm_path(value: Any) -> str:
+    if not isinstance(value, str) or not value:
+        return ""
+    try:
+        return str(Path(value).resolve()).lower()
+    except Exception:
+        return value.replace("\\", "/").lower()
+
+
+def _source_state(source_path: Optional[str]) -> str:
+    if not source_path:
+        return "generated"
+    return "ready" if Path(source_path).exists() else "missing"
+
+
+def _source_fingerprint(source_path: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not source_path:
+        return None
+    path = Path(source_path)
+    if not path.exists():
+        return {
+            "path": source_path,
+            "exists": False,
+            "fingerprint": _stable_id("missing_source", source_path),
+        }
+    stat = path.stat()
+    fingerprint = _stable_id("source", str(path.resolve()), stat.st_size, stat.st_mtime_ns)
+    return {
+        "path": str(path),
+        "exists": True,
+        "size_bytes": stat.st_size,
+        "modified_ns": stat.st_mtime_ns,
+        "fingerprint": fingerprint,
+    }
+
+
+def _is_visual_clip(kind: str) -> bool:
+    return kind in {"video_asset", "image_asset", "title_card", "chapter_card", "subtitle_overlay"}
+
+
+def _is_audio_clip(kind: str) -> bool:
+    return kind in {"audio_bgm", "audio_source", "audio_effect"}
+
+
+def _thumbnail_artifact(
+    clip: Dict[str, Any],
+    asset: Dict[str, Any],
+    source_state: str,
+    artifact_key: str,
+    cache_root: Optional[Path],
+    namespace: str,
+) -> Dict[str, Any]:
+    asset_thumb = _first_string(asset.get("thumbnail_path"), asset.get("thumbnail"))
+    if asset_thumb:
+        return _artifact(namespace, asset_thumb, status="ready" if Path(asset_thumb).exists() else "planned")
+    path = cache_root / "timeline_thumbnails" / f"{artifact_key}.jpg" if cache_root else None
+    status = _planned_status(path, source_state, generated_ok=_is_generated_visual_clip(str(clip.get("kind") or "")))
+    return _artifact(namespace, str(path) if path else None, status=status)
+
+
+def _proxy_artifact(
+    source_path: Optional[str],
+    source_state: str,
+    artifact_key: str,
+    cache_root: Optional[Path],
+    namespace: str,
+    preview_policy: Dict[str, Any],
+    proxy_lookup: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    if preview_policy.get("mode") == "original":
+        return _artifact(namespace, source_path, status="bypass_original", profile=preview_policy.get("profile"))
+
+    manifest_path = _select_proxy_manifest_path(proxy_lookup.get(_norm_path(source_path)), preview_policy)
+    if manifest_path:
+        return _artifact(
+            namespace,
+            manifest_path,
+            status="ready" if Path(manifest_path).exists() else "planned",
+            profile=preview_policy.get("profile"),
+            mode=preview_policy.get("mode"),
+            height=preview_policy.get("height"),
+            fps=preview_policy.get("fps"),
+            source="proxy_media_manifest",
+        )
+
+    path = cache_root / "timeline_proxies" / f"{artifact_key}.mp4" if cache_root else None
+    return _artifact(
+        namespace,
+        str(path) if path else None,
+        status=_planned_status(path, source_state),
+        profile=preview_policy.get("profile"),
+        mode=preview_policy.get("mode"),
+        height=preview_policy.get("height"),
+        fps=preview_policy.get("fps"),
+    )
+
+
+def _select_proxy_manifest_path(entry: Optional[Dict[str, Any]], preview_policy: Dict[str, Any]) -> Optional[str]:
+    if not isinstance(entry, dict):
+        return None
+    profiles = entry.get("profiles") if isinstance(entry.get("profiles"), dict) else {}
+    preferred_names = [
+        f"{preview_policy.get('mode')}_{preview_policy.get('height') or 'original'}p",
+        str(preview_policy.get("profile") or ""),
+        "scan_proxy_v1",
+        "default",
+    ]
+    for name in preferred_names:
+        profile = profiles.get(name)
+        if isinstance(profile, dict) and isinstance(profile.get("path"), str):
+            return profile["path"]
+    for profile in profiles.values():
+        if isinstance(profile, dict) and isinstance(profile.get("path"), str):
+            return profile["path"]
+    if isinstance(entry.get("path"), str):
+        return entry["path"]
+    return None
+
+
+def _waveform_artifact(
+    source_state: str,
+    artifact_key: str,
+    cache_root: Optional[Path],
+    namespace: str,
+) -> Dict[str, Any]:
+    path = cache_root / "timeline_waveforms" / f"{artifact_key}.json" if cache_root else None
+    return _artifact(namespace, str(path) if path else None, status=_planned_status(path, source_state))
+
+
+def _preview_segment_artifact(
+    source_state: str,
+    artifact_key: str,
+    render_cache_root: Optional[Path],
+    namespace: str,
+    preview_policy: Dict[str, Any],
+) -> Dict[str, Any]:
+    path = render_cache_root / "preview_segments" / f"{artifact_key}.mp4" if render_cache_root else None
+    return _artifact(
+        namespace,
+        str(path) if path else None,
+        status=_planned_status(path, source_state, generated_ok=True),
+        cache_key=artifact_key,
+        profile=preview_policy.get("profile"),
+        mode=preview_policy.get("mode"),
+        height=preview_policy.get("height"),
+        fps=preview_policy.get("fps"),
+    )
+
+
+def _planned_status(path: Optional[Path], source_state: str, *, generated_ok: bool = False) -> str:
+    if path and path.exists():
+        return "ready"
+    if source_state == "missing":
+        return "missing_source"
+    if source_state == "generated" and not generated_ok:
+        return "not_applicable"
+    return "planned"
+
+
+def _is_generated_visual_clip(kind: str) -> bool:
+    return kind in {"title_card", "chapter_card", "subtitle_overlay"}
+
+
+def _artifact(namespace: str, path: Optional[str], *, status: str, **extra: Any) -> Dict[str, Any]:
+    result = {
+        "cache_namespace": namespace,
+        "path": path,
+        "status": status,
+    }
+    result.update({key: value for key, value in extra.items() if value is not None})
+    return result
+
+
+def _not_applicable_artifact(namespace: str) -> Dict[str, Any]:
+    return _artifact(namespace, None, status="not_applicable")
+
+
+def _count_artifact(summary: Dict[str, Any], prefix: str, artifact: Dict[str, Any]) -> None:
+    status = artifact.get("status")
+    if status == "ready":
+        summary[f"{prefix}_ready"] += 1
+    elif status == "planned":
+        summary[f"{prefix}_planned"] += 1
+    elif status == "failed":
+        summary[f"{prefix}_failed"] += 1
+
+
+def _timeline_preview_manifest_summary(clips: Dict[str, Any]) -> Dict[str, int]:
+    summary = {
+        "total_clips": 0,
+        "visual_clips": 0,
+        "audio_clips": 0,
+        "thumbnail_ready": 0,
+        "thumbnail_planned": 0,
+        "thumbnail_failed": 0,
+        "proxy_ready": 0,
+        "proxy_planned": 0,
+        "proxy_failed": 0,
+        "waveform_ready": 0,
+        "waveform_planned": 0,
+        "waveform_failed": 0,
+        "preview_segment_ready": 0,
+        "preview_segment_planned": 0,
+        "preview_segment_failed": 0,
+        "missing_sources": 0,
+    }
+    for clip in clips.values():
+        if not isinstance(clip, dict):
+            continue
+        kind = str(clip.get("kind") or "")
+        summary["total_clips"] += 1
+        if _is_visual_clip(kind):
+            summary["visual_clips"] += 1
+        if _is_audio_clip(kind):
+            summary["audio_clips"] += 1
+        source_ref = clip.get("source_ref") if isinstance(clip.get("source_ref"), dict) else {}
+        if source_ref.get("source_state") == "missing":
+            summary["missing_sources"] += 1
+        for prefix in ("thumbnail", "proxy", "waveform", "preview_segment"):
+            artifact = clip.get(prefix) if isinstance(clip.get(prefix), dict) else {}
+            _count_artifact(summary, prefix, artifact)
+    return summary
+
+
+def _count_preview_asset_tasks(clips: Dict[str, Any]) -> int:
+    total = 0
+    for clip in clips.values():
+        if not isinstance(clip, dict):
+            continue
+        for key in ("thumbnail", "proxy", "waveform", "preview_segment"):
+            artifact = clip.get(key) if isinstance(clip.get(key), dict) else {}
+            status = artifact.get("status")
+            if status in {"not_applicable", "bypass_original", "missing_source"}:
+                continue
+            total += 1
+    return total
+
+
+def _advance_preview_asset_progress(
+    clip: Dict[str, Any],
+    artifact_kind: str,
+    completed: int,
+    total: int,
+    artifact: Dict[str, Any],
+    *,
+    emit_event_fn=None,
+    batch_size: int = 8,
+) -> int:
+    status = artifact.get("status") if isinstance(artifact, dict) else None
+    if status in {"not_applicable", "bypass_original", "missing_source"}:
+        return completed
+    next_completed = completed + 1
+    if emit_event_fn and (next_completed == total or next_completed % max(1, batch_size) == 0 or status == "failed"):
+        clip_id = str(clip.get("clip_id") or "")
+        message = f"Preview asset {next_completed}/{max(1, total)}: {artifact_kind} {clip_id} {status or 'done'}"
+        _emit_preview_asset_progress(
+            emit_event_fn,
+            clip_id,
+            next_completed,
+            total,
+            str(status or "done"),
+            message,
+            artifact_kind=artifact_kind,
+        )
+    return next_completed
+
+
+def _emit_preview_asset_progress(
+    emit_event_fn,
+    clip_id: Optional[str],
+    current: int,
+    total: int,
+    status: str,
+    message: Optional[str],
+    *,
+    artifact_kind: Optional[str] = None,
+) -> None:
+    if not emit_event_fn:
+        return
+    safe_total = max(1, int(total or 0))
+    safe_current = max(0, min(int(current or 0), safe_total))
+    emit_event_fn(
+        "timeline_preview_assets",
+        phase="preview_assets",
+        current=safe_current,
+        total=safe_total,
+        percent=round((safe_current / safe_total) * 100, 2),
+        status=status,
+        clip_id=clip_id,
+        artifact_kind=artifact_kind,
+        message=message or "Preparing timeline preview assets",
+    )
+
+
+def _generate_thumbnail_asset(
+    clip: Dict[str, Any],
+    artifact: Dict[str, Any],
+    source_path: Optional[str],
+    stats: Dict[str, int],
+) -> Dict[str, Any]:
+    result = dict(artifact or {})
+    if result.get("status") == "not_applicable":
+        stats["skipped"] += 1
+        return result
+    path = _artifact_path(result)
+    if path and path.is_file():
+        stats["hit"] += 1
+        return {**result, "status": "ready", "path": str(path)}
+    if not path:
+        stats["skipped"] += 1
+        return result
+
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        kind = str(clip.get("kind") or "")
+        if source_path and Path(source_path).is_file() and kind == "image_asset":
+            _write_image_thumbnail(Path(source_path), path)
+        elif source_path and Path(source_path).is_file() and kind == "video_asset":
+            _write_video_thumbnail(Path(source_path), path, int(result.get("height") or 270))
+        elif _is_generated_visual_clip(kind):
+            _write_generated_clip_thumbnail(clip, path)
+        else:
+            raise RuntimeError("thumbnail source is unavailable")
+        stats["created"] += 1
+        return {**result, "status": "ready", "path": str(path), "generated_at": datetime.now().isoformat()}
+    except Exception as exc:
+        stats["failed"] += 1
+        return {**result, "status": "failed", "error": str(exc)}
+
+
+def _generate_proxy_asset(
+    artifact: Dict[str, Any],
+    source_path: Optional[str],
+    stats: Dict[str, int],
+) -> Dict[str, Any]:
+    result = dict(artifact or {})
+    if result.get("status") in {"not_applicable", "bypass_original"}:
+        stats["skipped"] += 1
+        return result
+    path = _artifact_path(result)
+    if path and path.is_file():
+        stats["hit"] += 1
+        return {**result, "status": "ready", "path": str(path)}
+    if not path or not source_path or not Path(source_path).is_file():
+        stats["skipped"] += 1
+        return result
+
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        height = int(result.get("height") or 720)
+        fps = int(result.get("fps") or 24)
+        _write_video_proxy(Path(source_path), path, height, fps)
+        stats["created"] += 1
+        return {**result, "status": "ready", "path": str(path), "generated_at": datetime.now().isoformat()}
+    except Exception as exc:
+        stats["failed"] += 1
+        return {**result, "status": "failed", "error": str(exc)}
+
+
+def _generate_waveform_asset(
+    artifact: Dict[str, Any],
+    source_path: Optional[str],
+    stats: Dict[str, int],
+) -> Dict[str, Any]:
+    result = dict(artifact or {})
+    if result.get("status") == "not_applicable":
+        stats["skipped"] += 1
+        return result
+    path = _artifact_path(result)
+    if path and path.is_file():
+        stats["hit"] += 1
+        return {**result, "status": "ready", "path": str(path)}
+    if not path or not source_path or not Path(source_path).is_file():
+        stats["skipped"] += 1
+        return result
+
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _write_waveform_json(Path(source_path), path)
+        stats["created"] += 1
+        return {**result, "status": "ready", "path": str(path), "generated_at": datetime.now().isoformat()}
+    except Exception as exc:
+        stats["failed"] += 1
+        return {**result, "status": "failed", "error": str(exc)}
+
+
+def _generate_preview_segment_asset(
+    clip: Dict[str, Any],
+    artifact: Dict[str, Any],
+    source_path: Optional[str],
+    stats: Dict[str, int],
+) -> Dict[str, Any]:
+    result = dict(artifact or {})
+    if result.get("status") == "not_applicable":
+        stats["skipped"] += 1
+        return result
+    path = _artifact_path(result)
+    if path and path.is_file():
+        stats["hit"] += 1
+        return {**result, "status": "ready", "path": str(path)}
+    if not path:
+        stats["skipped"] += 1
+        return result
+
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        height = int(result.get("height") or 540)
+        fps = int(result.get("fps") or 15)
+        duration = max(0.25, min(_float(clip.get("timeline_duration"), 1.0), 6.0))
+        kind = str(clip.get("kind") or "")
+        proxy = clip.get("proxy") if isinstance(clip.get("proxy"), dict) else {}
+        proxy_path = _artifact_path(proxy)
+        if kind == "video_asset" and proxy_path and proxy_path.is_file():
+            _write_video_preview_segment(proxy_path, path, duration, height, fps)
+        elif kind == "video_asset" and source_path and Path(source_path).is_file():
+            _write_video_preview_segment(Path(source_path), path, duration, height, fps)
+        else:
+            thumbnail = clip.get("thumbnail") if isinstance(clip.get("thumbnail"), dict) else {}
+            thumbnail_path = _artifact_path(thumbnail)
+            if thumbnail_path and thumbnail_path.is_file():
+                _write_image_preview_segment(thumbnail_path, path, duration, height, fps)
+            else:
+                raise RuntimeError("preview segment thumbnail/source is unavailable")
+        stats["created"] += 1
+        return {**result, "status": "ready", "path": str(path), "generated_at": datetime.now().isoformat()}
+    except Exception as exc:
+        stats["failed"] += 1
+        return {**result, "status": "failed", "error": str(exc)}
+
+
+def _artifact_path(artifact: Dict[str, Any]) -> Optional[Path]:
+    value = artifact.get("path") if isinstance(artifact, dict) else None
+    if not isinstance(value, str) or not value:
+        return None
+    return Path(value)
+
+
+def _write_image_thumbnail(source: Path, output: Path, width: int = 480, height: int = 270) -> None:
+    from PIL import Image, ImageOps
+
+    with Image.open(source) as img:
+        img = ImageOps.exif_transpose(img).convert("RGB")
+        img.thumbnail((width, height), Image.Resampling.LANCZOS)
+        canvas = Image.new("RGB", (width, height), (22, 32, 28))
+        x = (width - img.width) // 2
+        y = (height - img.height) // 2
+        canvas.paste(img, (x, y))
+        canvas.save(output, quality=84)
+
+
+def _write_video_thumbnail(source: Path, output: Path, height: int = 270) -> None:
+    cmd = [
+        _ffmpeg_exe(),
+        "-y",
+        "-ss",
+        "0",
+        "-i",
+        str(source),
+        "-frames:v",
+        "1",
+        "-vf",
+        f"scale=-2:{max(120, min(height, 540))}",
+        str(output),
+    ]
+    _run_ffmpeg(cmd)
+
+
+def _write_generated_clip_thumbnail(clip: Dict[str, Any], output: Path) -> None:
+    from PIL import Image, ImageDraw, ImageFont
+
+    width, height = 480, 270
+    image = Image.new("RGB", (width, height), (18, 38, 32))
+    draw = ImageDraw.Draw(image)
+    title = _first_string(
+        ((clip.get("content_ref") or {}) if isinstance(clip.get("content_ref"), dict) else {}).get("title_text"),
+        str(clip.get("kind") or "Title"),
+    ) or "Title"
+    subtitle = _first_string(
+        ((clip.get("content_ref") or {}) if isinstance(clip.get("content_ref"), dict) else {}).get("subtitle_text")
+    )
+    try:
+        font = ImageFont.truetype(r"C:\Windows\Fonts\msyh.ttc", 30)
+        small = ImageFont.truetype(r"C:\Windows\Fonts\msyh.ttc", 18)
+    except Exception:
+        font = ImageFont.load_default()
+        small = ImageFont.load_default()
+    draw.rectangle((0, height - 84, width, height), fill=(8, 24, 18))
+    draw.text((28, height - 70), title[:32], fill=(236, 253, 245), font=font)
+    if subtitle:
+        draw.text((30, height - 34), subtitle[:48], fill=(167, 243, 208), font=small)
+    image.save(output, quality=84)
+
+
+def _write_video_proxy(source: Path, output: Path, height: int, fps: int) -> None:
+    height = max(240, min(int(height or 720), 1080))
+    fps = max(8, min(int(fps or 24), 30))
+    cmd = [
+        _ffmpeg_exe(),
+        "-y",
+        "-i",
+        str(source),
+        "-vf",
+        f"scale=-2:{height},fps={fps}",
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a?",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "28",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "96k",
+        "-movflags",
+        "+faststart",
+        str(output),
+    ]
+    _run_ffmpeg(cmd)
+
+
+def _write_video_preview_segment(source: Path, output: Path, duration: float, height: int, fps: int) -> None:
+    height = max(240, min(int(height or 540), 1080))
+    fps = max(8, min(int(fps or 15), 30))
+    cmd = [
+        _ffmpeg_exe(),
+        "-y",
+        "-i",
+        str(source),
+        "-t",
+        f"{duration:.3f}",
+        "-vf",
+        f"scale=-2:{height},fps={fps}",
+        "-an",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "30",
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+        str(output),
+    ]
+    _run_ffmpeg(cmd)
+
+
+def _write_image_preview_segment(source: Path, output: Path, duration: float, height: int, fps: int) -> None:
+    height = max(240, min(int(height or 540), 1080))
+    fps = max(8, min(int(fps or 15), 30))
+    cmd = [
+        _ffmpeg_exe(),
+        "-y",
+        "-loop",
+        "1",
+        "-i",
+        str(source),
+        "-t",
+        f"{duration:.3f}",
+        "-vf",
+        f"scale=-2:{height},fps={fps}",
+        "-an",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "30",
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+        str(output),
+    ]
+    _run_ffmpeg(cmd)
+
+
+def _write_waveform_json(source: Path, output: Path, bucket_count: int = 512) -> None:
+    sample_rate = 4000
+    sample_width = 2
+    channels = 1
+    pcm = _decode_audio_pcm_mono(source, sample_rate=sample_rate)
+    if not pcm:
+        raise RuntimeError("waveform decode produced no PCM samples")
+
+    bytes_per_frame = sample_width
+    total_frames = len(pcm) // bytes_per_frame
+    bucket_frames = max(1, math.ceil(total_frames / max(1, bucket_count)))
+    peaks: List[float] = []
+    max_peak = float((1 << (8 * sample_width - 1)) - 1)
+    for start_frame in range(0, total_frames, bucket_frames):
+        start = start_frame * bytes_per_frame
+        end = min(len(pcm), (start_frame + bucket_frames) * bytes_per_frame)
+        chunk = pcm[start:end]
+        if not chunk:
+            continue
+        peak = audioop.max(chunk, sample_width)
+        peaks.append(round(min(1.0, peak / max_peak), 4) if max_peak > 0 else 0.0)
+        if len(peaks) >= bucket_count:
+            break
+    output.write_text(
+        json.dumps(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "document_type": "timeline_waveform_peaks",
+                "source_path": str(source),
+                "duration_seconds": round(total_frames / sample_rate, 4) if sample_rate else 0,
+                "sample_rate": sample_rate,
+                "channels": channels,
+                "bucket_count": len(peaks),
+                "peaks": peaks,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
+def _decode_audio_pcm_mono(source: Path, *, sample_rate: int) -> bytes:
+    cmd = [
+        _ffmpeg_exe(),
+        "-hide_banner",
+        "-nostdin",
+        "-i",
+        str(source),
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        str(sample_rate),
+        "-f",
+        "s16le",
+        "pipe:1",
+    ]
+    completed = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=False,
+    )
+    if completed.returncode != 0:
+        stderr = completed.stderr.decode("utf-8", errors="replace") if isinstance(completed.stderr, bytes) else str(completed.stderr)
+        raise RuntimeError((stderr or "ffmpeg audio decode failed")[-900:])
+    return completed.stdout or b""
+
+
+def _ffmpeg_exe() -> str:
+    import imageio_ffmpeg
+
+    return imageio_ffmpeg.get_ffmpeg_exe()
+
+
+def _run_ffmpeg(cmd: List[str]) -> None:
+    completed = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if completed.returncode != 0:
+        raise RuntimeError((completed.stderr or completed.stdout or "ffmpeg failed")[-900:])
 
 
 def _float(value: Any, fallback: float) -> float:

@@ -252,6 +252,7 @@ function patchAudioBlueprintCue(
   const nextPatch: Partial<StudioState> = {
     v5Blueprint: nextBlueprint,
     v5Timeline: null,
+    v5TimelinePreviewManifest: null,
   };
 
   if (state.v5RenderPlan?.render_settings?.audio_blueprint) {
@@ -287,6 +288,7 @@ function restoreCompiledAudioBlueprintCues(state: StudioState): void {
       audio_blueprint: nextAudioBlueprint,
     }),
     v5Timeline: null,
+    v5TimelinePreviewManifest: null,
   });
 }
 
@@ -1192,4 +1194,3 @@ function clampNumber(value: number, min: number, max: number, fallback: number):
   if (!Number.isFinite(value)) return fallback;
   return Math.min(max, Math.max(min, value));
 }
-
